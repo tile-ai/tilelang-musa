@@ -4,20 +4,13 @@ from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
 from tilelang.contrib import mcc
-from tilelang.contrib.nvcc import have_tma as cuda_have_tma, is_hopper, have_pdl
+from tilelang.contrib import nvcc
 
 
 def has_tma(target: Target | None = None) -> bool:
-    # avoid circular import
-    from tilelang.jit.adapter.utils import is_cuda_target, is_musa_target
-
-    if target is None:
+    if target is None or target.kind.name != "musa":
         return False
-    if is_cuda_target(target):
-        return cuda_have_tma(target)
-    if is_musa_target(target):
-        return mcc.have_tma(target)
-    return False
+    return mcc.have_tma(target)
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -54,17 +47,50 @@ def allow_tma_lower(pass_ctx: PassContext | None = None, target: Target | None =
 
 
 def allow_warp_group_reg_alloc(pass_ctx: PassContext, target: Target) -> bool:
-    # avoid circular import
-    from tilelang.jit.adapter.utils import is_musa_target
-
-    return allow_tma_and_warp_specialized(pass_ctx, target) and not is_musa_target(target)
+    # MUSA backend does not use CUDA warp-group register annotations.
+    return False
 
 
 def allow_fence_proxy(target: Target | None = None) -> bool:
-    # avoid circular import
-    from tilelang.jit.adapter.utils import is_musa_target
+    # MUSA backend does not require CUDA generic->async proxy fencing.
+    return False
 
-    return has_tma(target) and not is_musa_target(target)
+
+def has_explicit_cp_async(mod: IRModule) -> bool:
+    cp_async_ops = (
+        tir.op.Op.get("tir.ptx_cp_async"),
+        tir.op.Op.get("tl.ptx_cp_async"),
+        tir.op.Op.get("tir.ptx_commit_group"),
+        tir.op.Op.get("tir.ptx_wait_group"),
+        tir.op.Op.get("tir.ptx_cp_async_barrier"),
+        tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"),
+    )
+    found = False
+
+    def _visit(node):
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, tir.Call):
+            for op in cp_async_ops:
+                if node.op.same_as(op):
+                    found = True
+                    return
+            op_name = getattr(node.op, "name", "")
+            if any(token in op_name for token in ("cp_async", "commit_group", "wait_group")):
+                found = True
+                return
+            node_text = str(node)
+            if any(token in node_text for token in ("cp_async", "commit_group", "wait_group")):
+                found = True
+                return
+
+    for _, func in mod.functions.items():
+        if isinstance(func, tir.PrimFunc):
+            tir.stmt_functor.post_order_visit(func.body, _visit)
+            if found:
+                return True
+    return False
 
 
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
@@ -246,33 +272,44 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
-    from tilelang.jit.adapter.utils import is_musa_target
-
     pass_ctx = tilelang.transform.get_pass_context()
-    # Lower the shared.barrier and shared.cluster_barrier into specific initialization slot
-    mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
     # which may be introduced by the LegalizeSafeMemoryAccess
-    # Note: The WarpSpecialized + InjectTmaBarrier pipeline is required for correct TMA lowering
-    # (mbarrier allocation/init + expect_tx injection) even when warp specialization is disabled.
+    # Note: TMA lowering is decoupled from warp specialization. In no-WS mode,
+    # the planner/software-pipeline path still handles TMA + mbarrier lowering.
     if allow_tma_lower(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
+        # MultiVersionBuffer before LowerSharedBarrier so barrier buffers
+        # (shared.barrier scope) can be expanded for pipelining.
         mod = tilelang.transform.MultiVersionBuffer()(mod)
-        mod = tilelang.transform.WarpSpecialized()(mod)
+        mod = tilelang.transform.LowerSharedBarrier()(mod)
         if mcc.is_ph1(target):
             mod = tilelang.transform.LowerReduceBarrier()(mod)
-        mod = tilelang.transform.InjectTmaBarrier()(mod)
-        # Pipeline planning applies to both TMA and non-TMA paths
-        # to get better performance with async copy
-        mod = tilelang.transform.PipelinePlanning()(mod)
-        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-        # warp_specialized pass will pack the if stmt into the block
-        # so we need to lower the opaque block first
+        ws_enabled = allow_warp_specialized(pass_ctx=pass_ctx, target=target)
+        if has_explicit_cp_async(mod):
+            # Keep explicit cp.async kernels on the legacy MUSA WS chain.
+            # Direct PipelinePlanning on this pattern can report overlapping
+            # writes (fill + cp.async into the same shared buffer regions).
+            mod = tilelang.transform.WarpSpecialized()(mod)
+            mod = tilelang.transform.InjectTmaBarrier()(mod)
+            mod = tilelang.transform.PipelinePlanning()(mod)
+            mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        elif ws_enabled:
+            # Producer-Consumer Warp Specialization:
+            # Splits TMA pipeline loops into producer (TMA loads) and consumer
+            # (compute) warps with mbarrier-based synchronization.
+            # When WS succeeds, it handles the pipeline overlap directly,
+            # so PipelinePlanning + InjectSoftwarePipeline are skipped.
+            mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+        else:
+            mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+            mod = tilelang.transform.PipelinePlanning()(mod)
+            mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
-        if is_hopper(target):
-            mod = tilelang.transform.RewriteWgmmaSync()(mod)
     else:
+        mod = tilelang.transform.LowerSharedBarrier()(mod)
         mod = tilelang.transform.IfStmtBinding()(mod)
         if mcc.is_ph1(target):
             mod = tilelang.transform.LowerReduceBarrier()(mod)
@@ -281,10 +318,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    # Keep MUSA pipeline synchronization behavior aligned with tilelang_musa_6.
-    # CP-async wait/commit relaxation in this pass changes PH1 wait-group timing.
-    if not is_musa_target(target):
-        mod = tilelang.transform.OptimizeCPAsyncSync()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
@@ -326,7 +359,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.SplitHostDevice()(mod)
 
     # Mark the function contains pdl_sync or pdl_trigger
-    mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
+    mod = tilelang.transform.MarkCudaSyncCalls(nvcc.have_pdl(target))(mod)
 
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
@@ -342,13 +375,11 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     if mcc.is_ph1(target):
         mod = tilelang.transform.UnifiedBarrier()(mod)
         mod = tilelang.transform.OffsetMbarrierId()(mod)
-    # Keep PH1 async-copy lowering aligned with tilelang_musa_6.
     # Run before MergeIfStmt so async scope markers are still available.
-    if is_musa_target(target):
-        mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
-        mod = tilelang.transform.MergeAsyncCopy()(mod)
-        # LowerPTXAsyncCopy can inject tl.access_ptr; lower it again for codegen.
-        mod = tilelang.transform.LowerAccessPtr()(mod)
+    mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
+    mod = tilelang.transform.MergeAsyncCopy()(mod)
+    # LowerPTXAsyncCopy can inject tl.access_ptr; lower it again for codegen.
+    mod = tilelang.transform.LowerAccessPtr()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     if allow_warp_group_reg_alloc(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)

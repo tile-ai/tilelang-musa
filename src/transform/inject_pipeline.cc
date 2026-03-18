@@ -13,6 +13,7 @@
 
 #include "../op/builtin.h"
 #include "../target/utils.h"
+#include "common/tma_copy_utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
 #include "tir/transforms/ir_utils.h"
@@ -1146,6 +1147,7 @@ tir::transform::Pass InjectSoftwarePipeline() {
     auto *fptr = f.CopyOnWrite();
     fptr->body = software_pipeline::PipelineInjector::Inject(f);
     fptr->body = ConvertSSA(std::move(fptr->body));
+    fptr->body = StripTmaCopyWriteBufferAttr(std::move(fptr->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectSoftwarePipeline", {});
