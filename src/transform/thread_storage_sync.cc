@@ -1952,13 +1952,16 @@ private:
 
       // Handle Ramp expressions by creating a new index variable
       if (const RampNode *prev_ramp = prev_indice_bytes.as<RampNode>()) {
-        Var prev_idx("prev_idx", DataType::Int(32));
+        DataType prev_index_dtype = prev_ramp->base.dtype();
+        Var prev_idx("prev_idx", prev_index_dtype);
         analyzer.Bind(prev_idx, Range::FromMinExtent(0, prev_ramp->lanes));
+
         prev_indice_bytes = prev_ramp->base + prev_idx * prev_ramp->stride;
       }
 
       if (const RampNode *curr_ramp = curr_indice_bytes.as<RampNode>()) {
-        Var curr_idx("curr_idx", DataType::Int(32));
+        DataType curr_index_dtype = curr_ramp->base.dtype();
+        Var curr_idx("curr_idx", curr_index_dtype);
         analyzer.Bind(curr_idx, Range::FromMinExtent(0, curr_ramp->lanes));
         curr_indice_bytes = curr_ramp->base + curr_idx * curr_ramp->stride;
       }
