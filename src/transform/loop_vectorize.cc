@@ -32,6 +32,7 @@
 #include "common/loop_vectorization_utils.h"
 #include "tvm/tir/analysis.h"
 #include "tvm/tir/var.h"
+#include <algorithm>
 #include <iostream>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/ir/transform.h>
@@ -644,12 +645,21 @@ private:
   }
 
   PrimExpr VisitExpr_(const CastNode *node) final {
-    int cast_vector_size = arith::ZeroAwareGCD(
-        vector_load_bits_max_ / node->dtype.bits(), initial_vector_size_);
+    // Consider both source and target types to ensure all intermediate
+    // vector types can be represented. For example, casting int32 to
+    // float8_e4m3fn: target allows more lanes than int32 can safely provide.
+    int target_lanes = vector_load_bits_max_ / node->dtype.bits();
+    int source_bits = node->value.dtype().bits();
+    int max_lanes = target_lanes;
+    if (source_bits > 0) {
+      int source_lanes = vector_load_bits_max_ / source_bits;
+      max_lanes = std::min(target_lanes, source_lanes);
+    }
+    int cast_vector_size = arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
     Target target = Target::Current(false);
     // On MUSA, mixed-precision vectorized casts (e.g. float32 <-> fp8/fp4)
     // are lowered via x2/x4 chunk helpers in codegen. Cap planning width to x8
-    // so we don't emit unsupported vector dtypes (e.g. float32x16).
+    // so we don't emit unsupported vector dtypes.
     if (TargetIsMusa(target) &&
         IsCudaVectorizableCast(node->value.dtype(), node->dtype)) {
       cast_vector_size = arith::ZeroAwareGCD(cast_vector_size, 8);
