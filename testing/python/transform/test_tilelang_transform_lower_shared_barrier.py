@@ -1,48 +1,101 @@
-import tilelang
+# ruff: noqa
+from tilelang import tvm as tvm
+import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 
+musa_target = tvm.target.Target("musa", host="llvm")
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    },
-)
-def matmul(M, N, K, block_M, block_N, block_K, mbars, dtype=T.float16, accum_dtype=T.float32):
+
+def _apply(func):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(musa_target)(mod)
+    mod = tl.transform.LowerSharedBarrier()(mod)
+    return mod
+
+
+def _collect_calls(stmt, op_name: str):
+    calls = []
+
+    def visitor(node):
+        if isinstance(node, tvm.tir.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
+            calls.append(node)
+
+    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
+    return calls
+
+
+def _collect_storage_syncs(stmt):
+    return _collect_calls(stmt, "tir.tvm_storage_sync")
+
+
+def _collect_init_barrier_calls(stmt):
+    return _collect_calls(stmt, "tir.ptx_init_barrier_thread_count")
+
+
+def _collect_shuffle_elect(stmt):
+    return _collect_calls(stmt, "tl.tl_shuffle_elect")
+
+
+def test_single_barrier():
+    """Single barrier with one arrive count."""
+
     @T.prim_func
-    def main(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            barriers = T.alloc_barrier(mbars)  # noqa: F841
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+    def func():
+        with T.Kernel(1, threads=128):
+            mbar = T.alloc_barrier(128)  # noqa: F841
 
-            T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-                T.copy(A[by * block_M, k * block_K], A_shared)
-                T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm(A_shared, B_shared, C_local)
+    mod = _apply(func)
+    body = mod["main"].body
 
-            T.copy(C_local, C[by * block_M, bx * block_N])
+    assert len(_collect_init_barrier_calls(body)) == 1
+    assert len(_collect_shuffle_elect(body)) == 1
+    assert len(_collect_storage_syncs(body)) >= 1
 
-    return main
+    init_call = _collect_init_barrier_calls(body)[0]
+    # arrive count should be 128
+    assert init_call.args[1].value == 128
 
 
-def test_lower_shared_barrier():
-    mbars = (1, 1, 128, 128)  # list is unhashable so we use tuple here
-    kernel = matmul(1024, 1024, 1024, 128, 128, 32, mbars=mbars)
-    source = kernel.get_kernel_source()
+def test_multiple_barriers():
+    """Multiple barriers with different arrive counts."""
 
-    # MUSA path lowers shared barriers to named barrier bookkeeping.
-    assert f"__musa_async_bar_record({len(mbars)});" in source
-    assert "if (tl::tl_shuffle_elect<0>()) {" in source
-    for i, thread_count in enumerate(mbars, start=1):
-        assert f"__musa_async_init_arrival({i}, (({thread_count} + 31) / 32), 0);" in source
+    @T.prim_func
+    def func():
+        with T.Kernel(1, threads=128):
+            mbars = T.alloc_barrier([1, 1, 128, 128])  # noqa: F841
+
+    mod = _apply(func)
+    body = mod["main"].body
+
+    init_calls = _collect_init_barrier_calls(body)
+    assert len(init_calls) == 4
+
+    arrive_counts = sorted([c.args[1].value for c in init_calls])
+    assert arrive_counts == [1, 1, 128, 128]
+
+    # Should have exactly one shuffle_elect guard for all barrier initializers.
+    assert len(_collect_shuffle_elect(body)) == 1
+
+    # Should sync after init
+    syncs = _collect_storage_syncs(body)
+    assert len(syncs) >= 1
+
+
+def test_no_barrier_is_noop():
+    """Pass should be a no-op when no barrier buffers are present."""
+
+    @T.prim_func
+    def func():
+        with T.Kernel(1, threads=128):
+            buf = T.alloc_shared((16,), T.float16)
+            buf[0] = T.float16(0)
+
+    mod = _apply(func)
+    body = mod["main"].body
+
+    assert len(_collect_init_barrier_calls(body)) == 0
+    assert len(_collect_shuffle_elect(body)) == 0
 
 
 if __name__ == "__main__":
