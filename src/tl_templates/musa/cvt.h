@@ -95,6 +95,12 @@ TL_DEVICE bfloat164_t cvt_float_to_bfloat16_x4(float4 in) {
   return make_bfloat164_t(__float42bfloat164_rn(in));
 }
 
+TL_DEVICE bfloat164_t mul_half_float_to_bfloat16_x4(half4_t lhs, float4 rhs) {
+  const _BFloat16_4 out = __musa_mul_bhf_bst4_vv(
+      to_musa_half4(lhs), *reinterpret_cast<const _Float4 *>(&rhs));
+  return *reinterpret_cast<const bfloat164_t *>(&out);
+}
+
 // fp8 -> fp16 / fp32
 TL_DEVICE float4 cvt_fp8e4m3_to_float_x4(fp8_e4_4_t in);
 TL_DEVICE float4 cvt_fp8e5m2_to_float_x4(fp8_e5_4_t in);
