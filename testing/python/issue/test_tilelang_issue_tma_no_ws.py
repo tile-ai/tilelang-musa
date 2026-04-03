@@ -76,6 +76,47 @@ def test_plain_copy_no_warp_specialized_uses_cp_async():
     assert "tl::mbarrier_arrive_expect_tx(" not in src
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+def test_tma_lower_1d_no_warp_specialized():
+    """Regression for issue #1842: 1D TMA load fails when warp specialization is disabled.
+
+    A single-dimension tensor copy (global -> shared -> global) using 1D bulk
+    TMA must compile and produce correct results when
+    ``tl.disable_warp_specialized=True``.
+    """
+
+    length = 7168
+
+    @T.prim_func
+    def tma_copy_1d(
+        a: T.Tensor((length,), T.float32),
+        out: T.Tensor((length,), T.float32),
+    ):
+        with T.Kernel(1, threads=256):
+            a_shared = T.alloc_shared((length,), T.float32)
+            T.copy(a, a_shared)
+            T.copy(a_shared, out)
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    }
+    kernel = _compile_tvm_ffi(tma_copy_1d, pass_configs, out_idx=[1])
+
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load" in src
+    assert "__musa_async_bar_record(1)" in src
+    assert "__musa_async_init_arrival(1" in src
+    assert "tl::mbarrier_arrive_expect_tx(1" in src
+    assert "tl::tma_store" in src
+
+    t = torch.randn((length,), device="musa", dtype=torch.float32)
+    out = kernel(t)
+    torch.testing.assert_close(out, t)
+    torch.musa.synchronize()
+
+
 def test_plain_copy_no_warp_specialized_2d_desc_stays_cp_async():
     """2D plain global->shared T.copy should stay on the non-TMA path."""
 
