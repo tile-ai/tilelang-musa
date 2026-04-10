@@ -46,9 +46,10 @@ using namespace tir;
  */
 class BufferFlattener : public arith::IRMutatorWithAnalyzer {
 public:
-  static PrimFunc Flatten(PrimFunc func) {
+  static PrimFunc Flatten(PrimFunc func, bool disable_index_type_promotion) {
     arith::Analyzer ana;
     auto pass = BufferFlattener(&ana);
+    pass.disable_index_type_promotion_ = disable_index_type_promotion;
     if (auto init_map =
             func->attrs.GetAttr<Map<Var, PrimExpr>>(tl::attr::kLocalVarInit)) {
       pass.local_var_init_map_ = init_map.value();
@@ -324,6 +325,9 @@ private:
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
                                           const Array<PrimExpr> &indices) {
     auto flattened_indices = buffer->ElemOffset(indices);
+    if (disable_index_type_promotion_) {
+      return this->IterMapSimplifyWithContext(flattened_indices, false);
+    }
     Array<PrimExpr> safe_indices;
     Int64Promoter promoter;
     for (const auto &index : flattened_indices) {
@@ -387,10 +391,17 @@ private:
 
   /*! \brief Local var initializers preserved from block annotations. */
   Map<Var, PrimExpr> local_var_init_map_;
+
+  /*! \brief Disable automatic widening of index expressions. */
+  bool disable_index_type_promotion_{false};
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
-  return BufferFlattener::Flatten(std::move(f));
+  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+  bool disable_index_type_promotion =
+      ctxt->GetConfig(kDisableIndexTypePromotion, Optional<Bool>())
+          .value_or(false);
+  return BufferFlattener::Flatten(std::move(f), disable_index_type_promotion);
 }
 
 using namespace tir::transform;

@@ -46,6 +46,11 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kLoopUnswitchingAllowNonTrivialElse, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableOutOfBoundWarning, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableDumpIR, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDumpIRDir, ffi::String);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableIndexTypePromotion, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoUnroll, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSQMMA, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableMusaBurst, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableReduceBurst, Bool);
 
 DataType cuTensorMapType() { return DataType::UInt(8, 128); }
 
@@ -143,7 +148,22 @@ TIR_DEFINE_TL_BUILTIN(create_list_of_mbarrier)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(layout_marker)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(partial_barrier_sync)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(create_tma_descriptor)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(make_robust_desc)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
@@ -158,6 +178,12 @@ TIR_DEFINE_TL_BUILTIN(get_mbarrier)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
+// Keep placeholder calls as embedded-info nodes so simplification can still
+// track expressions without treating this as a pure arithmetic op.
+TIR_DEFINE_TL_BUILTIN(barrier_id_placeholder)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kEmbedInfo));
+
 TIR_DEFINE_TL_BUILTIN(tma_load).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
@@ -168,6 +194,11 @@ TIR_DEFINE_TL_BUILTIN(tma_load_im2col)
 
 TIR_DEFINE_TL_BUILTIN(tma_store).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(musa_cp_async_robust)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(ptx_fence_barrier_init)
     .set_num_inputs(-1)
