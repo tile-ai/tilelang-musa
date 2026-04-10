@@ -36,6 +36,7 @@ def cached(
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
     verbose: bool | None = None,
     pass_configs: dict | None = None,
+    instruments: list | None = None,
     compile_flags: list[str] | str | None = None,
 ) -> JITKernel:
     """
@@ -70,6 +71,18 @@ def cached(
                 norm_target.kind.name,
                 ", ".join(sorted(allowed_now)),
             )
+    if instruments:
+        return JITKernel(
+            func,
+            out_idx,
+            target=norm_target,
+            target_host=target_host,
+            execution_backend=execution_backend,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            pass_instruments=instruments,
+            compile_flags=compile_flags,
+        )
     if execution_backend in _dispatch_map:
         return _dispatch_map[execution_backend].cached(
             func,

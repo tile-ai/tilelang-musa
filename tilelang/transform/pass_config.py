@@ -85,7 +85,14 @@ class PassConfigKey(str, Enum):
     """Disable TMA (Tensor Memory Access) lowering. Default: False"""
 
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
-    """Disable safe memory access optimization. Default: False"""
+    """Disable automatic global-memory bounds checks inserted by
+    `tl.LegalizeSafeMemoryAccess`. Default: False
+
+    When enabled, TileLang will not rewrite global `BufferLoad`/`BufferStore`
+    with `if_then_else` guards. This can improve performance for kernels that
+    are already provably in-bounds, but may lead to undefined behavior if any
+    global memory access goes out of bounds.
+    """
 
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
@@ -260,3 +267,24 @@ class PassConfigKey(str, Enum):
 
     TL_DUMP_IR_DIR = "tl.dump_ir_path"
     """Path to the directory where IR will be dumped. Default: ./dump_ir/"""
+
+    TL_DISABLE_INDEX_TYPE_PROMOTION = "tl.disable_index_type_promotion"
+    """Disable automatic promotion of index expressions to wider integer types.
+    Default: False
+
+    When enabled, TileLang will skip index-type promotion entirely in passes
+    such as `tl.FlattenBuffer` and `tl.ConfigIndexBitwidth`. This flag has
+    higher priority than `tl.config_index_bitwidth`.
+    """
+
+    TL_ENABLE_AUTO_UNROLL = "tl.enable_auto_unroll"
+    """Enable auto unroll for vectorize-split outer loops. Default: False"""
+
+    TL_DISABLE_SQMMA = "tl.disable_sqmma"
+    """Disable usage of PH1 SQMMA. Default: False"""
+
+    TL_ENABLE_MUSA_BURST = "tl.enable_musa_burst"
+    """Enable MUSA burst SIMD vectorization when True. Default: False"""
+
+    TL_ENABLE_REDUCE_BURST = "tl.enable_reduce_burst"
+    """Enable MUSA reduce SIMD optimizations when True. Default: False"""

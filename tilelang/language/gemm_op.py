@@ -6,6 +6,7 @@ from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
+from tvm.target import Target
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -13,10 +14,10 @@ from tilelang.utils.language import (
     retrieve_offset,
     prim_expr_equal,
 )
+from tilelang.utils.target import target_is_qy2
 from tilelang.language.utils import (
     buffer_region_to_tile_region,
 )
-from tilelang.env import env as _env
 
 
 def _gemm_impl(
@@ -63,6 +64,10 @@ def _gemm_impl(
     A_shape = retrieve_shape(A_region)
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
+
+    current_target = Target.current(allow_none=True)
+    if current_target is not None and target_is_qy2(current_target):
+        assert C_region.buffer.dtype == "float32", f"QY2 WMMA only supports float32 accumulator matrix C, but got {C_region.buffer.dtype}"
 
     A_stride = retrieve_stride(A_region)
     B_stride = retrieve_stride(B_region)
@@ -222,5 +227,6 @@ def gemm(
     Returns:
         tir.Call: A handle to the GEMM operation.
     """
-    impl = gemm_v1 if _env.use_gemm_v1() else gemm_v2
+    # impl = gemm_v1 if _env.use_gemm_v1() else gemm_v2
+    impl = gemm_v1
     return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, k_pack, wg_wait, mbar)

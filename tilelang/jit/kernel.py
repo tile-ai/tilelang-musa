@@ -68,6 +68,7 @@ class JITKernel(Generic[_P, _T]):
         target_host: str | Target = None,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
+        pass_instruments: list[tvm.instrument.PassInstrument] | None = None,
         from_database: bool = False,
         compile_flags: list[str] | None = None,
     ):
@@ -102,6 +103,7 @@ class JITKernel(Generic[_P, _T]):
         if pass_configs is None:
             pass_configs = {}
         self.pass_configs = pass_configs
+        self.pass_instruments = list(pass_instruments) if pass_instruments else []
 
         self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 
@@ -239,7 +241,7 @@ class JITKernel(Generic[_P, _T]):
         enable_device_compile = execution_backend == "tvm_ffi"
 
         # Additional pass instruments
-        pass_instruments = []
+        pass_instruments = list(self.pass_instruments)
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
             pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))

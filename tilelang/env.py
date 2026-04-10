@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
+MUTLASS_NOT_FOUND_MESSAGE = "MUTLASS is not installed or found in the expected path"
+", which may lead to compilation bugs when utilize tilelang backend."
 COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = "Composable Kernel is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
 TL_TEMPLATE_NOT_FOUND_MESSAGE = "TileLang is not installed or found in the expected path"
@@ -133,6 +135,25 @@ def _find_rocm_home() -> str:
     return rocm_home if rocm_home is not None else ""
 
 
+def _find_musa_home() -> str:
+    """Find the MUSA install path."""
+    # Guess #1
+    musa_home = os.environ.get("MUSA_HOME") or os.environ.get("MUSA_PATH")
+    if musa_home is None:
+        # Guess #2
+        mcc_path = shutil.which("mcc")
+        if mcc_path is not None:
+            musa_home = os.path.dirname(os.path.dirname(mcc_path))
+        else:
+            # Guess #3
+
+            # Linux/macOS
+            if os.path.exists("/usr/local/musa"):
+                musa_home = "/usr/local/musa"
+
+    return musa_home if musa_home is not None else ""
+
+
 # Cache control
 class CacheState:
     """Class to manage global kernel caching state."""
@@ -245,12 +266,14 @@ class Environment:
     # CUDA/ROCm home directories
     CUDA_HOME = _find_cuda_home()
     ROCM_HOME = _find_rocm_home()
+    MUSA_HOME = _find_musa_home()
 
     # Path to the TileLang package root
     TILELANG_PACKAGE_PATH = pathlib.Path(__file__).resolve().parent
 
     # External library include paths
     CUTLASS_INCLUDE_DIR = EnvVar("TL_CUTLASS_PATH", None)
+    MUTLASS_INCLUDE_DIR = EnvVar("TL_MUTLASS_PATH", None)
     COMPOSABLE_KERNEL_INCLUDE_DIR = EnvVar("TL_COMPOSABLE_KERNEL_PATH", None)
 
     # TVM integration
@@ -264,6 +287,7 @@ class Environment:
 
     # Kernel Build options
     TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION", "1")  # print kernel name on compile
+    TILELANG_PRINT_DEVICE_COMPILE_COMMAND = EnvVar("TILELANG_PRINT_DEVICE_COMPILE_COMMAND", "0")  # print nvcc/mcc compiler command
     TILELANG_DISABLE_CACHE = EnvVar(
         "TILELANG_DISABLE_CACHE", "0"
     )  # disable kernel cache, usually for unit testing / debugging, high priority
@@ -271,6 +295,7 @@ class Environment:
     TILELANG_CLEANUP_TEMP_FILES = EnvVar(
         "TILELANG_CLEANUP_TEMP_FILES", "0"
     )  # cleanup temporary compiler files/dirs after compilation (default: keep for debugging)
+    TILELANG_REPLACE_MUSAC = EnvVar("TILELANG_REPLACE_MUSAC", "")  # custom source file path to replace generated code
 
     # Kernel selection options
     # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
@@ -324,6 +349,9 @@ class Environment:
     def is_print_on_compilation_enabled(self) -> bool:
         return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
 
+    def is_print_device_compile_command_enabled(self) -> bool:
+        return self.TILELANG_PRINT_DEVICE_COMPILE_COMMAND.lower() in ("1", "true", "yes", "on")
+
     def should_cleanup_temp_files(self) -> bool:
         return str(self.TILELANG_CLEANUP_TEMP_FILES).lower() in ("1", "true", "yes", "on")
 
@@ -371,6 +399,7 @@ is_cache_enabled = env.is_cache_enabled  # CacheState.is_enabled
 # after initialization.
 CUDA_HOME = env.CUDA_HOME
 ROCM_HOME = env.ROCM_HOME
+MUSA_HOME = env.MUSA_HOME
 
 
 def prepend_pythonpath(path):
@@ -400,16 +429,20 @@ if os.environ.get("TL_CUTLASS_PATH", None) is None:
     cutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, "cutlass", "include")
     if os.path.exists(cutlass_inc_path):
         os.environ["TL_CUTLASS_PATH"] = env.CUTLASS_INCLUDE_DIR = cutlass_inc_path
+
+# Initialize MUTLASS paths
+if os.environ.get("TL_MUTLASS_PATH", None) is None:
+    mutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, "mutlass", "include")
+    if os.path.exists(mutlass_inc_path):
+        os.environ["TL_MUTLASS_PATH"] = env.MUTLASS_INCLUDE_DIR = mutlass_inc_path
     else:
-        logger.warning(CUTLASS_NOT_FOUND_MESSAGE)
+        logger.warning(MUTLASS_NOT_FOUND_MESSAGE)
 
 # Initialize COMPOSABLE_KERNEL paths
 if os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None) is None:
     ck_inc_path = os.path.join(THIRD_PARTY_ROOT, "composable_kernel", "include")
     if os.path.exists(ck_inc_path):
         os.environ["TL_COMPOSABLE_KERNEL_PATH"] = env.COMPOSABLE_KERNEL_INCLUDE_DIR = ck_inc_path
-    else:
-        logger.warning(COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE)
 
 # Initialize TL_TEMPLATE_PATH
 if os.environ.get("TL_TEMPLATE_PATH", None) is None:
@@ -421,5 +454,6 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
 
 # Export static variables after initialization.
 CUTLASS_INCLUDE_DIR = env.CUTLASS_INCLUDE_DIR
+MUTLASS_INCLUDE_DIR = env.MUTLASS_INCLUDE_DIR
 COMPOSABLE_KERNEL_INCLUDE_DIR = env.COMPOSABLE_KERNEL_INCLUDE_DIR
 TILELANG_TEMPLATE_PATH = env.TILELANG_TEMPLATE_PATH

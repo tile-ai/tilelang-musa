@@ -106,6 +106,9 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
 
     (out, _) = proc.communicate()
 
+    if env.is_print_device_compile_command_enabled():
+        print(f"compile_cuda command: {' '.join(cmd)}")
+
     if verbose:
         print(py_str(out))
 
