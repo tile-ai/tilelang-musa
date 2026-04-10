@@ -1114,8 +1114,9 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
 
   // Plain T.copy does not auto-upgrade to TMA loads anymore. Store-side TMA
   // remains allowed because it is self-synchronized locally and does not
-  // participate in pipeline producer scheduling. WS still rewrites eligible
-  // load-side copies to T.tma_copy explicitly.
+  // participate in pipeline producer scheduling. The deprecated global pass
+  // config is still honored for backward compatibility. WS still rewrites
+  // eligible load-side copies to T.tma_copy explicitly.
   if (!disable_tma_lower) {
     bool is_cutedsl = TargetIsCuTeDSL(target);
     if (!is_cutedsl && !buffer_oob &&
