@@ -17,7 +17,7 @@ def _collect_tvm_access_ptr_offsets(func: tvm.tir.PrimFunc):
 
 def test_flatten_buffer_promotes_tvm_access_ptr_offset_to_int64():
     @T.prim_func
-    def before(A: T.Buffer((1,), "float16")):
+    def before(A: T.Tensor((1,), "float16")):
         for i in T.serial(1 << 30):
             T.evaluate(
                 T.tvm_access_ptr(
@@ -42,7 +42,7 @@ def test_flatten_buffer_promotes_tvm_access_ptr_offset_to_int64():
 
 def test_flatten_buffer_keeps_safe_tvm_access_ptr_offset_int32():
     @T.prim_func
-    def before(A: T.Buffer((1,), "float16")):
+    def before(A: T.Tensor((1,), "float16")):
         for i in T.serial(1 << 20):
             T.evaluate(
                 T.tvm_access_ptr(

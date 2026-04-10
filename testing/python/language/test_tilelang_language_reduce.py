@@ -2,6 +2,7 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
 import tilelang.language as T
+import pytest
 
 tilelang.testing.set_random_seed()
 tilelang.disable_cache()
@@ -123,19 +124,33 @@ def run_reduce_max(M, N, dtype=T.float16):
     _run_program(program, lambda A: A.max(dim=1).values, atol=1e-2, rtol=1e-2)
 
 
-def test_reduce_sum():
-    MN_zip = [(256, 256), (512, 128), (128, 512)]
-    for dtype in [T.float32, T.int32, T.int64]:
-        for M, N in MN_zip:
-            run_reduce(M, N, dtype, "sum")
+@pytest.mark.parametrize(
+    "dtype",
+    [T.float32, T.int32, T.int64],
+    ids=["float32", "int32", "int64"],
+)
+@pytest.mark.parametrize(
+    "M,N",
+    [(256, 256), (512, 128), (128, 512)],
+    ids=["M256_N256", "M512_N128", "M128_N512"],
+)
+def test_reduce_sum(dtype, M, N):
+    run_reduce(M, N, dtype, "sum")
 
 
-def test_reduce_other_op():
-    MN_zip = [(256, 256), (512, 128)]
-    for op in ["max", "min", "abssum", "absmax"]:
-        for dtype in [T.float32, T.int32, T.int64]:
-            for M, N in MN_zip:
-                run_reduce(M, N, dtype, op)
+@pytest.mark.parametrize("op", ["max", "min", "abssum", "absmax"])
+@pytest.mark.parametrize(
+    "dtype",
+    [T.float32, T.int32, T.int64],
+    ids=["float32", "int32", "int64"],
+)
+@pytest.mark.parametrize(
+    "M,N",
+    [(256, 256), (512, 128)],
+    ids=["M256_N256", "M512_N128"],
+)
+def test_reduce_other_op(op, dtype, M, N):
+    run_reduce(M, N, dtype, op)
 
 
 def test_reduce_sum_threads():
@@ -198,7 +213,7 @@ def run_reduce_sum_clear(M, N, dtype=T.float32, tl_func=reduce_sum_test_clear):
 
     import torch
 
-    dummy_A = torch.randn((M, N), dtype=getattr(torch, dtype)).cuda()
+    dummy_A = torch.randn((M, N), dtype=getattr(torch, dtype)).musa()
     ref_out = ref_program(dummy_A)
     tl_out = jit_kernel(dummy_A)
     torch.testing.assert_close(tl_out, ref_out, atol=1e-2, rtol=1e-2)
@@ -239,7 +254,7 @@ def run_reduce_max_clear(M, N, dtype=T.float16):
 
     import torch
 
-    dummy_A = torch.randn((M, N), dtype=getattr(torch, dtype)).cuda()
+    dummy_A = torch.randn((M, N), dtype=getattr(torch, dtype)).musa()
     ref_out = ref_program(dummy_A)
     tl_out = jit_kernel(dummy_A)
     torch.testing.assert_close(tl_out, ref_out, atol=1e-2, rtol=1e-2)

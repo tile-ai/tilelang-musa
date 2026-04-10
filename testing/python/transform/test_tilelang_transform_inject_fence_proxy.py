@@ -22,7 +22,6 @@ def _check(original, transformed):
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_lower_fence_proxy():
     @T.prim_func
     def before():
@@ -66,7 +65,6 @@ def test_lower_fence_proxy():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_async_to_generic_no_double_fence():
     @T.prim_func
     def before():
@@ -104,7 +102,6 @@ def test_async_to_generic_no_double_fence():
     assert _count_fences(mod["main"].body) == 1
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_cp_async_then_wgmma_injects_fence_proxy():
     """cp.async is treated as generic proxy traffic for fence injection."""
 
@@ -178,7 +175,6 @@ def test_cp_async_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_unknown_extern_default_is_none():
     @T.prim_func
     def before():
@@ -209,7 +205,6 @@ def test_unknown_extern_default_is_none():
     assert _count_fences(mod["main"].body) == 0
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_unknown_extern_shared_store_then_wgmma_injects_fence_proxy():
     """Opaque calls that may write shared memory must be treated as generic."""
 
@@ -285,7 +280,6 @@ def test_unknown_extern_shared_store_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
     @T.prim_func
     def before():
@@ -347,7 +341,6 @@ def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_inject_fence_proxy_does_not_inject_tma_store_sync():
     @T.prim_func
     def before():
@@ -378,7 +371,6 @@ def test_inject_fence_proxy_does_not_inject_tma_store_sync():
     assert waits == 0
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_wgmma_marked_async():
     @T.prim_func
     def before():
@@ -426,7 +418,6 @@ def test_wgmma_marked_async():
     assert order.index("tl.fence_proxy_async") < order.index("tl.ptx_wgmma_ss")
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_shared_barrier_ops_do_not_trigger_fence_proxy():
     @T.prim_func
     def before(A_desc: T.handle("uint8x128", "grid_constant")):
@@ -535,7 +526,6 @@ def test_shared_barrier_ops_do_not_trigger_fence_proxy():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_regression_0219_fence_no_fence_inserted():
     """Regression test copied from `debug/0219_fence/fence.py`.
 
@@ -558,9 +548,9 @@ def test_regression_0219_fence_no_fence_inserted():
             {
                 "target": T.target(
                     {
-                        "arch": "sm_90a",
-                        "keys": ["cuda", "gpu"],
-                        "kind": "cuda",
+                        "arch": "mp_90a",
+                        "keys": ["musa", "gpu"],
+                        "kind": "musa",
                         "max_num_threads": 1024,
                         "tag": "",
                         "thread_warp_size": 32,
@@ -634,12 +624,12 @@ def test_regression_0219_fence_no_fence_inserted():
                     )
                 T.ptx_arrive_barrier(mbarrier[ko % 3])
         else:
-            C_local_2 = T.Buffer((128,), data=C_local, scope="local")
+            C_local_2 = T.Tensor((128,), data=C_local, scope="local")
             for i in T.unroll(32):
                 C_local_2[i * 4 : i * 4 + 4] = T.Broadcast(T.float32(0.0), 4)
             for ko in range(32):
                 T.mbarrier_wait_parity(mbarrier[ko % 3], ko % 6 // 3)
-                desc_a_2 = T.Buffer((1,), "uint64", data=desc_a, scope="local.descriptor.wgmma")
+                desc_a_2 = T.Tensor((1,), "uint64", data=desc_a, scope="local.descriptor.wgmma")
                 T.initialize_wgmma_descriptor(
                     desc_a_2[0],
                     T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, ko % 3 * 4096, 4096, 1),
@@ -647,7 +637,7 @@ def test_regression_0219_fence_no_fence_inserted():
                     1,
                     32,
                 )
-                desc_b_2 = T.Buffer((1,), "uint64", data=desc_b, scope="local.descriptor.wgmma")
+                desc_b_2 = T.Tensor((1,), "uint64", data=desc_b, scope="local.descriptor.wgmma")
                 T.initialize_wgmma_descriptor(
                     desc_b_2[0],
                     T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, 12288 + ko % 3 * 4096, 4096, 1),
@@ -684,9 +674,9 @@ def test_regression_0219_fence_no_fence_inserted():
             for i in T.unroll(128):
                 C_local_2[i] = T.max(C_local_2[i], T.float32(0.0))
             for i in T.unroll(64):
-                C_local_cast_2 = T.Buffer((2,), "float16", data=C_local_cast, scope="local")
+                C_local_cast_2 = T.Tensor((2,), "float16", data=C_local_cast, scope="local")
                 C_local_cast_2[0:2] = T.Cast("float16x2", C_local_2[i * 2 : i * 2 + 2])
-                C_2 = T.Buffer((1048576,), "float16", data=C)
+                C_2 = T.Tensor((1048576,), "float16", data=C)
                 C_2[
                     by * 131072
                     + i // 32 * 65536
@@ -716,9 +706,9 @@ def test_regression_0219_fence_no_fence_inserted():
             {
                 "target": T.target(
                     {
-                        "arch": "sm_90a",
-                        "keys": ["cuda", "gpu"],
-                        "kind": "cuda",
+                        "arch": "mp_90a",
+                        "keys": ["musa", "gpu"],
+                        "kind": "musa",
                         "max_num_threads": 1024,
                         "tag": "",
                         "thread_warp_size": 32,
@@ -792,12 +782,12 @@ def test_regression_0219_fence_no_fence_inserted():
                     )
                 T.ptx_arrive_barrier(mbarrier[ko % 3])
         else:
-            C_local_2 = T.Buffer((128,), data=C_local, scope="local")
+            C_local_2 = T.Tensor((128,), data=C_local, scope="local")
             for i in T.unroll(32):
                 C_local_2[i * 4 : i * 4 + 4] = T.Broadcast(T.float32(0.0), 4)
             for ko in range(32):
                 T.mbarrier_wait_parity(mbarrier[ko % 3], ko % 6 // 3)
-                desc_a_2 = T.Buffer((1,), "uint64", data=desc_a, scope="local.descriptor.wgmma")
+                desc_a_2 = T.Tensor((1,), "uint64", data=desc_a, scope="local.descriptor.wgmma")
                 T.initialize_wgmma_descriptor(
                     desc_a_2[0],
                     T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, ko % 3 * 4096, 4096, 1),
@@ -805,7 +795,7 @@ def test_regression_0219_fence_no_fence_inserted():
                     1,
                     32,
                 )
-                desc_b_2 = T.Buffer((1,), "uint64", data=desc_b, scope="local.descriptor.wgmma")
+                desc_b_2 = T.Tensor((1,), "uint64", data=desc_b, scope="local.descriptor.wgmma")
                 T.initialize_wgmma_descriptor(
                     desc_b_2[0],
                     T.tvm_access_ptr(T.type_annotation("float16"), buf_dyn_shmem, 12288 + ko % 3 * 4096, 4096, 1),
@@ -842,9 +832,9 @@ def test_regression_0219_fence_no_fence_inserted():
             for i in T.unroll(128):
                 C_local_2[i] = T.max(C_local_2[i], T.float32(0.0))
             for i in T.unroll(64):
-                C_local_cast_2 = T.Buffer((2,), "float16", data=C_local_cast, scope="local")
+                C_local_cast_2 = T.Tensor((2,), "float16", data=C_local_cast, scope="local")
                 C_local_cast_2[0:2] = T.Cast("float16x2", C_local_2[i * 2 : i * 2 + 2])
-                C_2 = T.Buffer((1048576,), "float16", data=C)
+                C_2 = T.Tensor((1048576,), "float16", data=C)
                 C_2[
                     by * 131072
                     + i // 32 * 65536
@@ -867,7 +857,6 @@ def test_regression_0219_fence_no_fence_inserted():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_ldmatrix_then_wgmma_does_not_inject_fence_proxy():
     """Shared-memory loads (including ldmatrix) do not trigger fence injection."""
 
@@ -910,7 +899,6 @@ def test_ldmatrix_then_wgmma_does_not_inject_fence_proxy():
     _check(before, before)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_stmatrix_then_wgmma_injects_fence_proxy():
     @T.prim_func
     def before():
@@ -986,7 +974,6 @@ def test_stmatrix_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_if_merge_may_be_generic_then_async_injects_fence_proxy():
     @T.prim_func
     def before(flag: T.int32):
@@ -1050,7 +1037,6 @@ def test_if_merge_may_be_generic_then_async_injects_fence_proxy():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_hoist_fence_proxy_out_of_if():
     """Hoist a single fence out of a pure-async if-then-else region."""
 
@@ -1154,7 +1140,6 @@ def test_hoist_fence_proxy_out_of_if():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_hoist_fence_proxy_out_of_unrolled_loop():
     """Prefer a single preheader fence over per-iteration fences.
 
@@ -1227,7 +1212,6 @@ def test_hoist_fence_proxy_out_of_unrolled_loop():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_hoist_fence_proxy_out_of_while_loop():
     """Hoist a single fence out of a pure-async while-loop body."""
 
@@ -1299,7 +1283,6 @@ def test_hoist_fence_proxy_out_of_while_loop():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_loop_carried_generic_then_async_injects_fence_proxy():
     """Generic proxy traffic at the end of an iteration may affect the next iteration."""
 
@@ -1365,7 +1348,6 @@ def test_loop_carried_generic_then_async_injects_fence_proxy():
     _check(before, after)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_shared_load_does_not_trigger_fence_proxy():
     """Shared loads are not treated as generic proxy traffic for fence injection."""
 

@@ -5,7 +5,7 @@ import tilelang.language as T
 def test_issue_1198():
     @T.prim_func
     def foo(
-        x: T.Buffer(
+        x: T.Tensor(
             [
                 32,
             ],

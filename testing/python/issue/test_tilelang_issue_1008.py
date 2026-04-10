@@ -11,7 +11,7 @@ from tilelang import language as T
     },
 )
 def _fill_with_static_region_kernel():
-    num_tokens = T.symbolic("num_tokens")
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), "int64"]):  # noqa: F821
@@ -28,7 +28,7 @@ def _fill_with_static_region_kernel():
     },
 )
 def _fill_with_dynamic_region_kernel():
-    num_tokens = T.symbolic("num_tokens")
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), "int64"]):  # noqa: F821
@@ -39,17 +39,17 @@ def _fill_with_dynamic_region_kernel():
     return buggy_kernel
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_fill_with_static_region_kernel():
     kernel = _fill_with_static_region_kernel()
-    x = torch.zeros((256,), dtype=torch.int64, device="cuda")
+    x = torch.zeros((256,), dtype=torch.int64, device="musa")
     kernel(x)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_fill_with_dynamic_region_kernel():
     kernel = _fill_with_dynamic_region_kernel()
-    x = torch.zeros((256,), dtype=torch.int64, device="cuda")
+    x = torch.zeros((256,), dtype=torch.int64, device="musa")
     kernel(x)
 
 
