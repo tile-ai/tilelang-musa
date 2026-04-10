@@ -9,7 +9,9 @@ from pathlib import Path
 
 def repo_root() -> Path:
     # Resolve the repository root based on this script's location.
-    return Path(__file__).resolve().parents[1]
+    # public.py is located at <repo>/maint/scripts/public.py
+    # so repo root is two levels up from the script directory.
+    return Path(__file__).resolve().parents[2]
 
 
 def load_config(path: Path) -> dict:
@@ -174,7 +176,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--config",
-        default=str(repo_root() / "scripts" / "public.json"),
+        default=str(Path(__file__).resolve().with_name("public.json")),
         help="Path to release config JSON.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Show changes without writing.")
