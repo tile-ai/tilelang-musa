@@ -172,17 +172,6 @@ def LowerReduceBarrier():
     return _ffi_api.LowerReduceBarrier() if hasattr(_ffi_api, "LowerReduceBarrier") else lambda f: f  # type: ignore
 
 
-def ReuseLocalDescriptorAllocations():
-    """Pool lexically-disjoint local descriptor allocations.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.ReuseLocalDescriptorAllocations()  # type: ignore
-
-
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 

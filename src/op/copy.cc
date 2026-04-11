@@ -1993,7 +1993,12 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE);
     musa_force_swizzle_none = true;
   } else if (!TargetIsMusa(T.target)) {
-    ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
+    if (shared_layout->InputDim() < 2) {
+      LOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
+                   << "dimension " << shared_layout->InputDim()
+                   << ", fallback to normal copy.";
+      return LowerNormalCopy(T, analyzer);
+    }
     const int ndim = static_cast<int>(shared_layout->InputDim());
     auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
     auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);
