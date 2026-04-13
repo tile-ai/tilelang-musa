@@ -251,6 +251,10 @@ TVM_DLL const Op &__tan();
 TVM_DLL const Op &__cos();
 // __sin(x) - fast sine
 TVM_DLL const Op &__sin();
+// max_nan(x, y) - max with CUDA __hmax_nan semantics for fp16/bf16
+TVM_DLL const Op &max_nan();
+// min_nan(x, y) - min with CUDA __hmin_nan semantics for fp16/bf16
+TVM_DLL const Op &min_nan();
 
 // high precision with IEEE-compliant.
 // ieee_add(x, y, rounding_mode) - IEEE-compliant addition
