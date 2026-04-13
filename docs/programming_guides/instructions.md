@@ -194,9 +194,9 @@ Synchronization helpers
 - `T.pdl_sync()`: Wait until kernel dependencies are satisfied.
 
 Warp-vote / warp-ballot (MUSA)
-- `T.any_sync(mask, predicate)` -> `int32`: Non-zero if ANY lane in `mask` has non-zero predicate (`__any_sync`).
-- `T.all_sync(mask, predicate)` -> `int32`: Non-zero if ALL lanes in `mask` have non-zero predicate (`__all_sync`).
-- `T.ballot_sync(mask, predicate)` -> `uint64`: Bitmask of lanes in `mask` with non-zero predicate. MUSA `__ballot_sync` returns 32 bits and TileLang zero-extends it to 64 bits.
+- `T.any_sync(predicate[, mask])` -> `int32`: Non-zero if ANY lane in `mask` has non-zero predicate (`__any_sync`). `mask` defaults to `0xFFFFFFFF`.
+- `T.all_sync(predicate[, mask])` -> `int32`: Non-zero if ALL lanes in `mask` have non-zero predicate (`__all_sync`). `mask` defaults to `0xFFFFFFFF`.
+- `T.ballot_sync(predicate[, mask])` -> `uint64`: Bitmask of lanes in `mask` with non-zero predicate. MUSA `__ballot_sync` returns 32 bits and TileLang zero-extends it to 64 bits. `mask` defaults to `0xFFFFFFFF`.
 - `T.ballot(predicate)` -> `uint64`: Full-warp ballot (mask = `0xFFFFFFFF`).
 - `T.activemask()` -> `uint64`: Bitmask of currently active lanes, zero-extended to 64 bits.
 
@@ -205,15 +205,15 @@ Block-wide predicated sync
 - `T.syncthreads_and(predicate)` -> `int32`: Sync; non-zero iff ALL threads have non-zero predicate (`__syncthreads_and`).
 - `T.syncthreads_or(predicate)` -> `int32`: Sync; non-zero iff ANY thread has non-zero predicate (`__syncthreads_or`).
 
-Warp-shuffle (intra-warp data exchange)
-- `T.shfl_sync(mask, value, src_lane[, width])`: Broadcast value from `src_lane` to all lanes (`__shfl_sync`).
-- `T.shfl_xor(value, offset)` or `T.shfl_xor(mask, value, offset[, width])`: XOR-swap across lanes (`__shfl_xor_sync`).
-- `T.shfl_down(value, offset)` or `T.shfl_down(mask, value, offset[, width])`: Shift down by `offset` lanes (`__shfl_down_sync`).
-- `T.shfl_up(value, offset)` or `T.shfl_up(mask, value, offset[, width])`: Shift up by `offset` lanes (`__shfl_up_sync`).
+Warp-shuffle (intra-warp data exchange). All accept a trailing `mask` kwarg that defaults to `0xFFFFFFFF`.
+- `T.shfl_sync(value, src_lane[, width, mask])`: Broadcast value from `src_lane` to all lanes (`__shfl_sync`).
+- `T.shfl_xor(value, delta[, width, mask])`: XOR-swap across lanes (`__shfl_xor_sync`).
+- `T.shfl_down(value, delta[, width, mask])`: Shift down by `delta` lanes (`__shfl_down_sync`).
+- `T.shfl_up(value, delta[, width, mask])`: Shift up by `delta` lanes (`__shfl_up_sync`).
 
-Warp-match (MUSA)
-- `T.match_any_sync(mask, value)` -> `uint32`: Bitmask of lanes in `mask` whose `value` matches the calling lane's (`__match_any_sync`).
-- `T.match_all_sync(mask, value)` -> `uint32`: Returns `mask` if all lanes in `mask` agree on `value`, else 0 (`__match_all_sync`). The C-level `int*` predicate output is hidden; reconstruct it as `result != 0`.
+Warp-match (MUSA). `mask` defaults to `0xFFFFFFFF`.
+- `T.match_any_sync(value[, mask])` -> `uint32`: Bitmask of lanes in `mask` whose `value` matches the calling lane's (`__match_any_sync`).
+- `T.match_all_sync(value[, mask])` -> `uint32`: Returns `mask` if all lanes in `mask` agree on `value`, else 0 (`__match_all_sync`). The C-level `int*` predicate output is hidden; reconstruct it as `result != 0`.
 
 Atomics
 - `T.atomic_add(dst, value, memory_order=None, return_prev=False, use_tma=False)`.
