@@ -516,9 +516,6 @@ private:
       return 0;
     }
     if (!TargetIsPH1(target) ||
-        !tvm::transform::PassContext::Current()
-             ->GetConfig<Bool>(kDisableTMALower, Bool(false))
-             .value() ||
         (buffer->data->name_hint != "A_shared" &&
          buffer->data->name_hint != "B_shared") ||
         (buffer.scope() != "shared" && buffer.scope() != "shared.dyn")) {

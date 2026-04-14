@@ -413,10 +413,7 @@ private:
   int swizzle_cycle_{0};
 
   void setSwizzleCycle_(const CallNode *op) {
-    if (TargetIsPH1(Target::Current()) && op->op.same_as(tl::tl_gemm()) &&
-        tvm::transform::PassContext::Current()
-            ->GetConfig<Bool>(kDisableTMALower, Bool(false))
-            .value()) {
+    if (TargetIsPH1(Target::Current()) && op->op.same_as(tl::tl_gemm())) {
       swizzle_cycle_ = 4096;
     }
   }
