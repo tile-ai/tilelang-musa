@@ -11,9 +11,23 @@
 
 namespace tl {
 
-TL_DEVICE void cp_async_commit() {}
+TL_DEVICE void cp_async_commit() {
+#if defined(MUSACC_VERSION) && (MUSACC_VERSION > 4)
+  __musa_memcpy_g2s_commit_group();
+#endif
+}
 
-template <int N> TL_DEVICE void cp_async_wait() { __musa_memcpy_g2s_wait(); }
+template <int N> TL_DEVICE void cp_async_wait() {
+#if defined(MUSACC_VERSION) && (MUSACC_VERSION > 4)
+  if constexpr (N == 0) {
+    __musa_memcpy_g2s_wait();
+  } else {
+    __musa_memcpy_g2s_wait_group(N);
+  }
+#else
+  __musa_memcpy_g2s_wait();
+#endif
+}
 
 template <int N>
 TL_DEVICE void cp_async_gs(void const *const smem_addr,

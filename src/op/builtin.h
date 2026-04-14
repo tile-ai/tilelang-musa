@@ -550,6 +550,14 @@ TVM_DLL const Op &get_warp_idx();
 TVM_DLL const Op &get_warp_group_idx();
 
 /*!
+ * \brief Wait for prior LMA operations to complete.
+ *
+ * lma_wait()
+ *
+ */
+TVM_DLL const Op &lma_wait();
+
+/*!
  * \brief Wait the previous wgmma to finish
  *
  * wait_wgmma(num_mma)

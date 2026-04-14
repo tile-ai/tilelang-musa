@@ -812,6 +812,14 @@ def wait_wgmma(id: int = 0):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
+def lma_wait():
+    """Wait for prior LMA operations to complete.
+
+    Returns:
+        tir.Call: A handle to the LMA wait operation.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.lma_wait"))
+
 def barrier_wait(mbarrier: BarrierType, parity: int | Var):
     """Wait for a memory barrier to complete.
 
