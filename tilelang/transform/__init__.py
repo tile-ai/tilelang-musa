@@ -438,6 +438,21 @@ def LowerPTXAsyncCopy():
     return _ffi_api.LowerPTXAsyncCopy()  # type: ignore
 
 
+def MergeAsyncCopy():
+    """Merge narrow async-copy loops into a wider async-copy when legal.
+
+    This pass is intended to run after `LowerPTXAsyncCopy`, where async copies
+    have already been rewritten into `ptx_cp_async` / `musa_cp_async_robust`
+    calls but may still appear as short unrolled loops.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.MergeAsyncCopy()  # type: ignore
+
+
 def InjectPTXAsyncCopy():
     """Deprecated alias of `LowerPTXAsyncCopy`."""
     return LowerPTXAsyncCopy()

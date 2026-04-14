@@ -351,6 +351,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # Run before MergeIfStmt so async scope markers are still available.
     if is_musa_target(target):
         mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
+        mod = tilelang.transform.MergeAsyncCopy()(mod)
         # LowerPTXAsyncCopy can inject tl.access_ptr; lower it again for codegen.
         mod = tilelang.transform.LowerAccessPtr()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
