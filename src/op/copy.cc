@@ -19,6 +19,7 @@
 #include "utils.h"
 
 #include "builtin.h"
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -1273,9 +1274,24 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
 
     if (is_cpu_target || IsLocalBuffer(node.src) || IsLocalBuffer(node.dst)) {
       if (IsLocalBuffer(node.src) && !IsLocalBuffer(node.dst)) {
-        LOG(WARNING) << "Copy from local buffer `" << node.src->name << "` to "
-                     << node.dst.scope() << " buffer `" << node.dst->name
-                     << "` may cause conflicted write.";
+        // A conflict write only occurs when multiple threads write to the same
+        // global address. If any dst_range dimension's min depends on the
+        // thread variable, each thread targets a distinct location and there is
+        // no conflict.
+        bool dst_depends_on_thread = false;
+        for (const auto &range : node.dst_range) {
+          if (tir::UsesVar(range->min, [&](const VarNode *v) {
+                return v == T.thread_var.get();
+              })) {
+            dst_depends_on_thread = true;
+            break;
+          }
+        }
+        if (!dst_depends_on_thread) {
+          LOG(WARNING) << "Copy from local buffer `" << node.src->name
+                       << "` to " << node.dst.scope() << " buffer `"
+                       << node.dst->name << "` may cause conflicted write.";
+        }
       }
       lowered_body = VectorizeLoop(fused_loop, T.layout_map);
     } else {
