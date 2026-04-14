@@ -523,6 +523,9 @@ std::string CodeGenTileLangMUSA::Finish() {
   if (enable_fp8_) {
     decl_stream << "#include <tl_templates/musa/musa_fp8.h>\n";
   }
+  if (enable_fp4_) {
+    decl_stream << "#include <tl_templates/musa/musa_fp4.h>\n";
+  }
 
   if (need_math_constants_h_) {
     decl_stream << "#include <math_constants.h>\n";
@@ -1631,6 +1634,10 @@ std::string CodeGenTileLangMUSA::GetBufferRef(DataType t,
   const VarNode *buffer_var = buffer->data.get();
   std::ostringstream os;
   std::string vid = GetVarID(buffer_var);
+  auto it = fp4_packed_buffers_.find(buffer_var);
+  if (it != fp4_packed_buffers_.end() && !t.is_scalar()) {
+    vid = it->second;
+  }
   std::string scope;
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
@@ -1669,7 +1676,7 @@ std::string CodeGenTileLangMUSA::GetBufferRef(DataType t,
     return os.str();
   }
   std::string index_str = PrintExpr(index);
-  if (t.bits() == 4 || (t.bits() == 1 && t.is_int())) {
+  if ((t.bits() == 4 && !t.is_float4()) || (t.bits() == 1 && t.is_int())) {
     // This is a special case, because CodegenMUSA::PrintType()
     // returns "int" for bool and for 4-bit integers. In most cases,
     // we divide by the number of lanes to determine the index.
@@ -1677,13 +1684,25 @@ std::string CodeGenTileLangMUSA::GetBufferRef(DataType t,
     // int32.  Therefore, we need to divide by the ratio of their
     // sizes in that case.
     int div_factor = (t.lanes() == 1) ? (32 / t.bits()) : t.lanes();
-
-    os << "*("
-       << "(" << ptr_cast(t) << vid << ")"
-       << " + " << index_str << " / " << div_factor << ")";
+    index_str =
+        PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
+    os << "*((" << ptr_cast(t) << vid << ")"
+       << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
+    int div_factor = 1;
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+      div_factor = 2;
+    }
+    index_str =
+        PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
     os << buffer_str << "[" << index_str << "]";
   } else {
+    int div_factor = 1;
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+      div_factor = 2;
+    }
+    index_str =
+        PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
     os << "*" << ptr_cast(t) << "(" << buffer_str << " + " << index_str << ")";
   }
 
@@ -3652,8 +3671,12 @@ void CodeGenTileLangMUSA::VisitStmt_(const AllocateNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    PrintStorageScope(scope, stream);
-    PrintType(op->dtype, stream);
+    bool is_fp4_scalar_local = op->dtype.is_float4() && op->dtype.is_scalar() &&
+                               (scope == "local" || scope.empty());
+    if (!is_fp4_scalar_local) {
+      PrintStorageScope(scope, stream);
+      PrintType(op->dtype, stream);
+    }
   }
 
   if (scope == "shared.dyn") {
@@ -3680,7 +3703,14 @@ void CodeGenTileLangMUSA::VisitStmt_(const AllocateNode *op) {
       stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
              << "*>(" << v_id_mem << ");\n";
     } else if (scope == "local") {
-      stream << ' ' << vid << '[' << constant_size << "];\n";
+      if (op->dtype.is_float4() && op->dtype.is_scalar()) {
+        auto vid_packed = vid + "_packed";
+        stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
+               << "];\n";
+        fp4_packed_buffers_[op->buffer_var.get()] = vid_packed;
+      } else {
+        stream << ' ' << vid << '[' << constant_size << "];\n";
+      }
     } else if (scope == "local.var") {
       PrimExpr init = tir::make_const(op->dtype, 0);
       auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
@@ -3773,6 +3803,13 @@ void CodeGenTileLangMUSA::VisitExpr_(const BufferLoadNode *op,
   Var buffer_var = op->buffer->data;
   DataType element_dtype = op->buffer->dtype;
 
+  auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
+  if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
+    std::string idx_str = PrintExpr(index);
+    os << "tl_fp4_packed_load(" << packed_it->second << ", " << idx_str << ")";
+    return;
+  }
+
   if (current_src_robust_desc_.defined() && op->buffer.scope() == "global") {
     ICHECK_NE(value_dtype.bits(), 4)
         << "Robust load does not support 4-bit packed dtypes.";
@@ -3855,8 +3892,14 @@ void CodeGenTileLangMUSA::VisitExpr_(const BufferLoadNode *op,
   int lanes = op->dtype.lanes();
   // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
-    HandleVolatileLoads(ref, op, os);
+    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+      std::string idx_str = PrintExpr(index);
+      std::string vid = GetVarID(buffer_var.get());
+      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
+    } else {
+      std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
+      HandleVolatileLoads(ref, op, os);
+    }
   } else {
     bool can_vector_load = false;
     arith::PVar<PrimExpr> base;
@@ -3906,6 +3949,96 @@ void CodeGenTileLangMUSA::VisitExpr_(const BufferLoadNode *op,
         PrintVecElemLoadExpr(op->dtype, i, value_temp.str(), svalue_expr);
       }
       os << svalue_expr.str();
+    }
+  }
+}
+
+void CodeGenTileLangMUSA::VisitStmt_(const BufferStoreNode *op) {
+  ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
+  ICHECK(!op->predicate.defined())
+      << "Predicated buffer store is not supported.";
+
+  DataType value_dtype = op->value.dtype();
+  DataType element_dtype = op->buffer->dtype;
+  PrimExpr index_expr = op->indices[0];
+  Var buffer_var = op->buffer->data;
+
+  auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
+  if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
+    std::string idx_str = PrintExpr(index_expr);
+    std::string value = this->PrintExpr(op->value);
+    this->PrintIndent();
+    stream << "tl_fp4_packed_store(" << packed_it->second << ", " << idx_str
+           << ", " << value << ");\n";
+    return;
+  }
+
+  if (value_dtype.lanes() == element_dtype.lanes()) {
+    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+      std::string idx_str = PrintExpr(index_expr);
+      std::string value = this->PrintExpr(op->value);
+      std::string vid = GetVarID(buffer_var.get());
+      this->PrintIndent();
+      stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << vid << ", " << idx_str
+             << ", " << value << ");\n";
+    } else {
+      std::string value = this->PrintExpr(op->value);
+      std::string ref =
+          this->GetBufferRef(value_dtype, op->buffer.get(), index_expr);
+      this->PrintIndent();
+      stream << ref << " = " << value << ";\n";
+    }
+  } else {
+    arith::PVar<PrimExpr> base;
+    int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
+    if (arith::ramp(base, 1, ramp_lanes).Match(index_expr) &&
+        !value_dtype.is_float4_e2m1fn()) {
+      std::string value = this->PrintExpr(op->value);
+      this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);
+    } else {
+      int vec_scope = BeginScope();
+
+      std::string index = SSAGetID(PrintExpr(index_expr), index_expr.dtype());
+      std::string value = SSAGetID(PrintExpr(op->value), op->value.dtype());
+      std::string vid = GetVarID(buffer_var.get());
+      DataType elem_type = value_dtype.element_of();
+      for (int i = 0; i < value_dtype.lanes(); ++i) {
+        this->PrintIndent();
+        if (elem_type.is_float4() && elem_type.lanes() == 1) {
+          stream << "tl_fp4_packed_store(";
+          if (packed_it != fp4_packed_buffers_.end()) {
+            stream << packed_it->second;
+          } else {
+            stream << "(fp4_e2_2_t*)" << vid;
+          }
+          stream << ", ";
+          PrintVecElemLoad(index, index_expr.dtype(), i, stream);
+          stream << ", ";
+          PrintVecElemLoad(value, op->value.dtype(), i, stream);
+          stream << ");\n";
+          continue;
+        }
+
+        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+          stream << "((";
+          if (buffer_var.get()->dtype.is_handle()) {
+            auto it = alloc_storage_scope_.find(buffer_var.get());
+            if (it != alloc_storage_scope_.end()) {
+              PrintStorageScope(it->second, stream);
+            }
+          }
+          PrintType(elem_type, stream);
+          stream << "*)" << vid << ')';
+        } else {
+          stream << vid;
+        }
+        stream << '[';
+        PrintVecElemLoad(index, index_expr.dtype(), i, stream);
+        stream << "] = ";
+        PrintVecElemLoad(value, op->value.dtype(), i, stream);
+        stream << ";\n";
+      }
+      EndScope(vec_scope);
     }
   }
 }

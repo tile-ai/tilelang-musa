@@ -60,6 +60,7 @@ public:
   void VisitStmt_(const AllocateNode *op);
   void VisitStmt_(const AttrStmtNode *op);
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os);
+  void VisitStmt_(const BufferStoreNode *op);
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const GlobalVar &gvar, const PrimFunc &f);
