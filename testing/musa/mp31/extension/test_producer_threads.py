@@ -58,6 +58,7 @@ def _thread_idx_x_extent(func: tvm.tir.PrimFunc) -> int:
     return max(extents)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_producer_threads_override_changes_thread_partition():
     target, _ = _get_test_target_and_device()
     base_kernel = _make_pipeline_copy_kernel(None)
@@ -75,6 +76,7 @@ def test_producer_threads_override_changes_thread_partition():
     assert overridden_extent == 160
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_producer_threads_runtime_copy():
     target, device = _get_test_target_and_device()
     kernel = tilelang.compile(_make_pipeline_copy_kernel(32), target=target)

@@ -2,6 +2,7 @@ from typing import Optional, Tuple
 
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 
 tilelang.disable_cache()
@@ -131,6 +132,7 @@ def act_quant_torch(
     return y, s
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_act_quant(
     batch_size: int = 512,
     hidden_dim: int = 8192,

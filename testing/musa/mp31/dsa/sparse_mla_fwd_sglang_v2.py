@@ -1,6 +1,7 @@
 from typing import Optional
 
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 
@@ -422,6 +423,7 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, d_v=64):
     return o.to(torch.bfloat16)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_sparse_mla_fwd_v2(
     B=1,
     S=512,

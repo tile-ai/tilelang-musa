@@ -1,6 +1,7 @@
 import torch
 import pytest
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 
 tilelang.disable_cache()
@@ -72,6 +73,7 @@ test_params = [
 ]
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 @pytest.mark.parametrize("elem_type, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K", test_params)
 def test_mm_kernel(elem_type, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K):
     kernel = matmul.compile(

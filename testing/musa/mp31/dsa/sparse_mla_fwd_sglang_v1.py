@@ -1,6 +1,7 @@
 # ruff: noqa
 import torch
 import tilelang
+import tilelang.testing
 from tilelang import language as T
 
 
@@ -283,6 +284,7 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, is_casual=True):
     return o.to(torch.bfloat16)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_sparse_mla_fwd(
     B=1,
     S=4096,

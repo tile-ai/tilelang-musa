@@ -1,4 +1,5 @@
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 
@@ -75,6 +76,7 @@ def independent_compute_reference(a, b, block_K):
     return ref_d
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_wait_wgmma():
     M = 512
     N = 512
@@ -102,6 +104,7 @@ def test_wait_wgmma():
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_wait_wgmma_with_independent_compute():
     M = 512
     N = 512

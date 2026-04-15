@@ -1,4 +1,5 @@
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
 from tvm import tir
@@ -72,6 +73,7 @@ def collect_lowered_stats(stmt):
     return placeholder_calls, barrier_arg_is_buffer_load
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_lower_shared_barrier_to_named_barrier():
     lowered = run_lower_shared_barrier(make_before())
 

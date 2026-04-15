@@ -2,6 +2,7 @@ import re
 
 import pytest
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 
@@ -22,6 +23,7 @@ def tma_copy_1d(A, block_N, dtype):
     return C
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 @pytest.mark.parametrize(
     "N, block_N",
     [

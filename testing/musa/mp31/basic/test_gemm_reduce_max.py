@@ -1,4 +1,5 @@
 import tilelang
+import tilelang.testing
 from tilelang import language as T
 import torch
 
@@ -34,6 +35,7 @@ def gemm_reduce_max_ref(A, B):
     return scores.max(dim=1).values
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_gemm_reduce_max():
     torch.random.manual_seed(2026)
 

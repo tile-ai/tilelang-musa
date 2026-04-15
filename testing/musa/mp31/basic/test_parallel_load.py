@@ -1,4 +1,5 @@
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 
@@ -69,6 +70,7 @@ def _assert_case(M, N, K, block_M, block_N, block_K):
     return kernel
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_parallel_shared_gemm():
     _assert_case(
         M=512,

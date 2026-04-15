@@ -1,5 +1,6 @@
 import pytest
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 from tilelang.tileop.base import GemmWarpPolicy
@@ -77,6 +78,7 @@ def _assert_gemm_trans_b_case(M, N, K, block_M, block_N, block_K, dtype, accum_d
     return kernel
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float8_e4m3"])
 def test_gemm_trans_b(dtype):
     _assert_gemm_trans_b_case(

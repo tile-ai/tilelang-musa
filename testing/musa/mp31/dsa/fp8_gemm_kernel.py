@@ -1,5 +1,6 @@
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 
 tilelang.disable_cache()
@@ -119,6 +120,7 @@ def fp8_gemm_torch(
     return out.view(*a.shape[:-1], N)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_fp8_gemm(
     M: int = 512,
     N: int = 1024,

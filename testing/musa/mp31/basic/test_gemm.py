@@ -2,6 +2,7 @@ import itertools
 
 import pytest
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 from tilelang.tileop.base import GemmWarpPolicy
@@ -288,6 +289,7 @@ def _assert_gemm_case(
     return kernel
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 @pytest.mark.parametrize(
     "M,N,K,block_M,block_N,block_K,dtype,accum_dtype,num_warp,policy,num_stages",
     TEST_CASES,

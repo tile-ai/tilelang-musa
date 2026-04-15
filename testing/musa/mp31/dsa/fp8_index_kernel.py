@@ -1,5 +1,6 @@
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 
 tilelang.disable_cache()
@@ -100,6 +101,7 @@ def fp8_index_torch(
     return out
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_fp8_index(
     B: int = 64,
     M: int = 256,
