@@ -264,12 +264,148 @@ GemmNode::SelectSQMMAInstShape(int block_size, Target target) const {
   return std::nullopt;
 }
 
+std::optional<std::array<int, 3>>
+GemmNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
+  if (!TargetIsPH1(target)) {
+    return std::nullopt;
+  }
+  if (a_.scope() != "shared.dyn" && a_.scope() != "shared") {
+    return std::nullopt;
+  }
+  if (b_.scope() != "shared.dyn" && b_.scope() != "shared") {
+    return std::nullopt;
+  }
+  if (c_.scope() != "local.fragment") {
+    return std::nullopt;
+  }
+
+  int warp_size = TargetGetWarpSize(target);
+  if (block_size % warp_size != 0) {
+    return std::nullopt;
+  }
+
+  // The current PH1 WMMA layout hooks still lower through the generic
+  // fragment/shared-memory helpers, so keep the frontend on the subset that
+  // those layouts can already represent.
+  if (m_ % 16 != 0 || n_ % 8 != 0) {
+    return std::nullopt;
+  }
+
+  auto warp_parts = policy_->computeWarpPartition(m_, n_, block_size, target,
+                                                  GemmInst::kPH1WMMA);
+  int warp_m = warp_parts.first;
+  int warp_n = warp_parts.second;
+  if (warp_m <= 0 || warp_n <= 0) {
+    return std::nullopt;
+  }
+  if (m_ % warp_m != 0 || n_ % warp_n != 0) {
+    return std::nullopt;
+  }
+
+  int warp_tile_m = m_ / warp_m;
+  int warp_tile_n = n_ / warp_n;
+
+  // makePH1Wmma*Layout() is still backed by the generic MMA layouts for now,
+  // which require a 16x8-compatible warp tile. Once those hooks are
+  // specialized, this guard can be relaxed to expose the 8x16 path too.
+  if (warp_tile_m % 16 != 0 || warp_tile_n % 8 != 0) {
+    return std::nullopt;
+  }
+
+  const auto &a_dtype = a_->dtype;
+  const auto &b_dtype = b_->dtype;
+  const auto &c_dtype = c_->dtype;
+
+  enum class Ph1WmmaTypeClass : uint8_t {
+    kF16F16F32,
+    kBF16BF16F32,
+    kTF32TF32F32,
+    kS8S8S32,
+    kU8U8U32,
+    kF16S8F32,
+    kBF16S8F32,
+    kS8F16F32,
+    kS8BF16F32,
+    kFP8F32,
+  };
+  std::optional<Ph1WmmaTypeClass> type_class = std::nullopt;
+
+  if (a_dtype == DataType::Float(16) && b_dtype == DataType::Float(16) &&
+      c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kF16F16F32;
+  } else if (a_dtype == DataType::BFloat(16) &&
+             b_dtype == DataType::BFloat(16) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kBF16BF16F32;
+  } else if (a_dtype == DataType::Float(32) && b_dtype == DataType::Float(32) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kTF32TF32F32;
+  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Int(8) &&
+             c_dtype == DataType::Int(32)) {
+    type_class = Ph1WmmaTypeClass::kS8S8S32;
+  } else if (a_dtype == DataType::UInt(8) && b_dtype == DataType::UInt(8) &&
+             c_dtype == DataType::UInt(32)) {
+    type_class = Ph1WmmaTypeClass::kU8U8U32;
+  } else if (a_dtype == DataType::Float(16) && b_dtype == DataType::Int(8) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kF16S8F32;
+  } else if (a_dtype == DataType::BFloat(16) && b_dtype == DataType::Int(8) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kBF16S8F32;
+  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Float(16) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kS8F16F32;
+  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::BFloat(16) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kS8BF16F32;
+  } else if (((a_dtype.is_float8_e4m3() && b_dtype.is_float8_e4m3()) ||
+              (a_dtype.is_float8_e5m2() && b_dtype.is_float8_e5m2()) ||
+              (a_dtype.is_float8_e4m3() && b_dtype.is_float8_e5m2()) ||
+              (a_dtype.is_float8_e5m2() && b_dtype.is_float8_e4m3())) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kFP8F32;
+  } else {
+    return std::nullopt;
+  }
+
+  auto select_inst = [&](const std::vector<std::array<int, 3>> &candidates)
+      -> std::optional<std::array<int, 3>> {
+    for (const auto &inst : candidates) {
+      if (warp_tile_m % inst[0] == 0 && warp_tile_n % inst[1] == 0 &&
+          k_ % inst[2] == 0) {
+        return inst;
+      }
+    }
+    return std::nullopt;
+  };
+
+  if (*type_class == Ph1WmmaTypeClass::kF16F16F32 ||
+      *type_class == Ph1WmmaTypeClass::kBF16BF16F32) {
+    return select_inst(
+        {{16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}, {16, 8, 8}});
+  }
+  if (*type_class == Ph1WmmaTypeClass::kTF32TF32F32) {
+    return select_inst({{16, 16, 16}, {16, 8, 8}, {16, 8, 4}});
+  }
+  if (*type_class == Ph1WmmaTypeClass::kS8S8S32 ||
+      *type_class == Ph1WmmaTypeClass::kU8U8U32 ||
+      *type_class == Ph1WmmaTypeClass::kFP8F32) {
+    return select_inst(
+        {{16, 16, 64}, {16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}});
+  }
+  return select_inst({{16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}});
+}
+
 bool GemmNode::AllowSQMMA(int block_size, Target target) const {
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
   if (ctxt->GetConfig(kDisableSQMMA, Optional<Bool>()).value_or(false)) {
     return false;
   }
   return SelectSQMMAInstShape(block_size, target).has_value();
+}
+
+bool GemmNode::AllowPH1Wmma(int block_size, Target target) const {
+  return SelectPH1WmmaInstShape(block_size, target).has_value();
 }
 
 GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
@@ -282,7 +418,13 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
   } else if (TargetIsCuda(target) || TargetIsQY2(target)) {
     return GemmInst::kMMA;
   } else if (TargetIsPH1(target)) {
-    return AllowSQMMA(block_size, target) ? GemmInst::kSQMMA : GemmInst::kFMA;
+    if (AllowSQMMA(block_size, target)) {
+      return GemmInst::kSQMMA;
+    }
+    if (AllowPH1Wmma(block_size, target)) {
+      return GemmInst::kPH1WMMA;
+    }
+    return GemmInst::kFMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target;
     return GemmInst::kMMA;
@@ -600,6 +742,18 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   GemmInst gemm_inst = getGemmInst(block_size, T.target);
   auto [warp_m, warp_n] =
       policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
+  std::optional<std::array<int, 3>> ph1_mma_inst = std::nullopt;
+  if (TargetIsPH1(T.target) &&
+      (gemm_inst == GemmInst::kSQMMA || gemm_inst == GemmInst::kPH1WMMA)) {
+    ph1_mma_inst = gemm_inst == GemmInst::kSQMMA
+                       ? SelectSQMMAInstShape(block_size, T.target)
+                       : SelectPH1WmmaInstShape(block_size, T.target);
+    ICHECK(ph1_mma_inst.has_value())
+        << (gemm_inst == GemmInst::kSQMMA ? "PH1 SQMMA is selected but no "
+                                            "valid SQMMA instruction is found."
+                                          : "PH1 WMMA is selected but no valid "
+                                            "WMMA instruction is found.");
+  }
 
   if (TargetIsPH1(T.target) && gemm_inst == GemmInst::kFMA) {
     auto A_buffer = a_;
@@ -761,26 +915,39 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ICHECK(clear_accum_bool.has_value())
       << "clear_accum must be a constant Bool type, got " << clearAccum_;
   ss << ", " << bool(clear_accum_bool.value());
+
   if ((TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) ||
       (TargetIsPH1(T.target)) || (TargetIsQY2(T.target))) {
     ss << ", " << strideA_ << ", " << strideB_;
     ss << ", " << offsetA_ << ", " << offsetB_;
   }
+
   if (TargetIsCDNA(T.target)) {
     // for cdna gemm, we need to specify kPack
     ss << ", " << kPack_;
   } else if (TargetIsHopper(T.target)) {
     ss << ", " << (gemm_inst == GemmInst::kWGMMA ? "true" : "false");
   } else if (TargetIsPH1(T.target)) {
-    ss << ", " << (gemm_inst == GemmInst::kSQMMA ? "true" : "false");
+    if (gemm_inst == GemmInst::kSQMMA) {
+      ss << ", true";
+      ss << ", " << (*ph1_mma_inst)[0] << ", " << (*ph1_mma_inst)[1] << ", "
+         << (*ph1_mma_inst)[2];
+    } else if (gemm_inst == GemmInst::kPH1WMMA) {
+      ss << ", false";
+      ss << ", " << (*ph1_mma_inst)[0] << ", " << (*ph1_mma_inst)[1] << ", "
+         << (*ph1_mma_inst)[2];
+    } else {
+      ICHECK(gemm_inst == GemmInst::kSQMMA || gemm_inst == GemmInst::kPH1WMMA)
+          << "Unexpected PH1 GEMM instruction kind in templated lowering: "
+          << static_cast<int>(gemm_inst);
+    }
   }
 
-  // Emit wg_wait if necessary
-  if (TargetIsHopper(T.target) || TargetIsPH1(T.target)) {
-    if (wgWait_ != 0) {
-      ss << ", " << wgWait_;
-    }
-  } else if (TargetIsSm100(T.target)) {
+  if ((TargetIsHopper(T.target) || TargetIsPH1(T.target)) && wgWait_ != 0) {
+    ss << ", " << wgWait_;
+  }
+
+  if (TargetIsSm100(T.target)) {
     // NOTE On sm100, only the leading thread issues the TCGEN5MMA instruction
     // but all threads need to wait, so we emit another statement for cases
     // where wg_wait == 0.
@@ -992,6 +1159,38 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       } else {
         results.Set(b_, BLayout);
       }
+    } else if (gemm_inst == GemmInst::kPH1WMMA) {
+      ICHECK(a_.scope() == "shared" || a_.scope() == "shared.dyn")
+          << "PH1 WMMA requires A in shared/shared.dyn scope, got "
+          << a_.scope();
+      ICHECK(b_.scope() == "shared" || b_.scope() == "shared.dyn")
+          << "PH1 WMMA requires B in shared/shared.dyn scope, got "
+          << b_.scope();
+      ICHECK(c_.scope() == "local.fragment")
+          << "PH1 WMMA requires C in local.fragment scope, got " << c_.scope();
+      auto wmma_inst = SelectPH1WmmaInstShape(block_size, T.target);
+      ICHECK(wmma_inst.has_value())
+          << "PH1 WMMA is selected but no valid WMMA instruction is found.";
+
+      auto fragment = makePH1WmmaCLayout(m_, n_, warp_m, warp_n,
+                                         c_->dtype.bits(), *wmma_inst);
+      results.Set(c_, fragment->BindThreadRange(thread_range));
+
+      int dim_A = a_->shape.size();
+      const int64_t a_mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+      const int64_t a_mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+      auto ALayout =
+          makePH1WmmaABLayout(a_mat_stride, a_mat_continuous, a_mat_continuous,
+                              a_->dtype.bits(), !transA_);
+      results.Set(a_, ExpandLayoutToMatchBuffer(ALayout, a_));
+
+      int dim_B = b_->shape.size();
+      const int64_t b_mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+      const int64_t b_mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
+      auto BLayout =
+          makePH1WmmaABLayout(b_mat_stride, b_mat_continuous, b_mat_continuous,
+                              b_->dtype.bits(), transB_);
+      results.Set(b_, ExpandLayoutToMatchBuffer(BLayout, b_));
     } else {
       auto fragment = makeGemmFragmentCLinear(m_, n_, block_size);
       results.Set(c_, fragment->BindThreadRange(thread_range));

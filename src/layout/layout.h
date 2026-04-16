@@ -246,6 +246,12 @@ Fragment makePHSqmmaFragmentC(const int block_m, const int block_n,
                               const int warp_m, const int warp_n,
                               const int element_size,
                               const std::array<int, 3> &inst_shape = {0, 0, 0});
+Fragment makePH1WmmaCLayout(const int block_m, const int block_n,
+                            const int warp_m, const int warp_n,
+                            const int element_size,
+                            const std::array<int, 3> &inst_shape = {0, 0, 0});
+Layout makePH1WmmaABLayout(int mat_stride, int mat_continuous, int continuity,
+                           int element_size, bool k_inner = true);
 Fragment makeGemmFragmentCLinear(const int block_m, const int block_n,
                                  const int block_size);
 Fragment makeGemmFragmentA(const int block_m, const int block_n,

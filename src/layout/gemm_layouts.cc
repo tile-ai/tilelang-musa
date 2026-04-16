@@ -232,6 +232,35 @@ Fragment makePHSqmmaFragmentC(const int block_m, const int block_n,
   return block_layout;
 }
 
+Fragment makePH1WmmaCLayout(const int block_m, const int block_n,
+                            const int warp_m, const int warp_n,
+                            const int element_size,
+                            const std::array<int, 3> &inst_shape) {
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  const int inst_m = inst_shape[0];
+  const int inst_n = inst_shape[1];
+
+  auto base_layout = makeGemmFragment4x8();
+  auto inst_layout = base_layout->Repeat({inst_m / 4, inst_n / 8}, false, true);
+  auto warp_layout = inst_layout->Repeat({warp_m, warp_n}, true, false);
+  auto block_layout = warp_layout->Repeat(
+      {block_m / warp_m / inst_m, block_n / warp_n / inst_n}, false, false);
+  return block_layout;
+}
+
+Layout makePH1WmmaABLayout(int mat_stride, int mat_continuous, int continuity,
+                           int element_size, bool k_inner) {
+  // Keep a dedicated PH1 WMMA hook even though we currently stage A/B with a
+  // plain row-major shared-memory layout. This lets us tighten it back to a
+  // WMMA-specific swizzle later without touching call sites.
+  static_cast<void>(continuity);
+  static_cast<void>(element_size);
+  static_cast<void>(k_inner);
+  return makeLinearLayout(
+      Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
+}
+
 Fragment makeGemmQY2FragmentC(const int block_m, const int block_n,
                               const int warp_m, const int warp_n,
                               const int element_size) {

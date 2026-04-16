@@ -42,7 +42,15 @@ inline const char *GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
 }
 
 // Target GEMM instruction
-enum class GemmInst : uint8_t { kMMA, kWGMMA, kTCGEN5MMA, kMFMA, kFMA, kSQMMA };
+enum class GemmInst : uint8_t {
+  kMMA,
+  kWGMMA,
+  kTCGEN5MMA,
+  kMFMA,
+  kFMA,
+  kSQMMA,
+  kPH1WMMA,
+};
 
 /// Convert GemmInst enum to string for debugging
 inline const char *GemmInstToString(GemmInst inst) {
@@ -59,6 +67,8 @@ inline const char *GemmInstToString(GemmInst inst) {
     return "FMA";
   case GemmInst::kSQMMA:
     return "SQMMA";
+  case GemmInst::kPH1WMMA:
+    return "PH1WMMA";
   default:
     return "Unknown";
   }
@@ -126,8 +136,11 @@ class GemmNode : public TileOperatorNode {
 public:
   bool checkWgmma() const;
   bool AllowSQMMA(int block_size, Target target) const;
+  bool AllowPH1Wmma(int block_size, Target target) const;
   std::optional<std::array<int, 3>> SelectSQMMAInstShape(int block_size,
                                                          Target target) const;
+  std::optional<std::array<int, 3>> SelectPH1WmmaInstShape(int block_size,
+                                                           Target target) const;
   tir::Buffer a_, b_, c_;
   // BufferRegion for A, B and C
   BufferRegion aRegion_, bRegion_, cRegion_;
