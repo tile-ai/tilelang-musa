@@ -6,6 +6,9 @@
 
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
 #include "copy_mp31.h"
+#endif
+
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 220
 #include <musa_robust.h>
 #endif
 
@@ -50,7 +53,27 @@ TL_DEVICE void cp_async_gs_conditional(void const *const smem_addr,
   }
 }
 
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 220
+
+// MP22 uses the legacy 3-word robust address, while MP31+ switches to the
+// v4 robust descriptor form with prefetch-capable load intrinsics.
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+using robust_desc_t = __musa::robust_v4_addr_t;
+#define TL_GET_ROBUST_DESC(ROBUST_PTR) ((ROBUST_PTR).get_v4_robust_addr())
+#define TL_ROBUST_LOAD_CALL(LENGTH_TYPE, ADDR, DESC)                           \
+  __musa_ld_v4_robust_##LENGTH_TYPE((ADDR), (DESC), 0)
+#define TL_ROBUST_MEMCPY_G2S(DST, SRC, BYTES, DESC)                            \
+  __musa_memcpy_g2s_robust_v4((DST), (SRC), (BYTES), (DESC),                   \
+                              0 /* prefetch_size */)
+#else
+using robust_desc_t = __musa::robust_addr_t;
+#define TL_GET_ROBUST_DESC(ROBUST_PTR) ((ROBUST_PTR).get_robust_addr())
+#define TL_ROBUST_LOAD_CALL(LENGTH_TYPE, ADDR, DESC)                           \
+  __musa_ld_robust_##LENGTH_TYPE((ADDR), (DESC))
+#define TL_ROBUST_MEMCPY_G2S(DST, SRC, BYTES, DESC)                            \
+  __musa_memcpy_g2s_robust((DST), (SRC), (BYTES), (DESC), 0 /* prefetch_size   \
+                                                             */)
+#endif
 
 template <typename To, typename From>
 TL_DEVICE To robust_bit_cast(const From &from) {
@@ -62,12 +85,12 @@ TL_DEVICE To robust_bit_cast(const From &from) {
   return storage.to;
 }
 
-TL_DEVICE __musa::robust_v4_addr_t make_robust_desc(void const *robust_base_ptr,
-                                                    uint64_t robust_size) {
+TL_DEVICE robust_desc_t make_robust_desc(void const *robust_base_ptr,
+                                         uint64_t robust_size) {
   auto *typed_base =
       reinterpret_cast<int8_t *>(const_cast<void *>(robust_base_ptr));
   __musa::robust_ptr<int8_t> robust_ptr(typed_base, robust_size);
-  return robust_ptr.get_v4_robust_addr();
+  return TL_GET_ROBUST_DESC(robust_ptr);
 }
 
 template <typename T>
@@ -76,31 +99,31 @@ TL_DEVICE T robust_load(void const *global_ptr, void const *robust_base_ptr,
   auto robust_desc = make_robust_desc(robust_base_ptr, robust_size);
   void const *addr = global_ptr;
   if constexpr (sizeof(T) == 1) {
-    auto raw = __musa_ld_v4_robust_i8(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(i8, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else if constexpr (sizeof(T) == 2) {
-    auto raw = __musa_ld_v4_robust_i16(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(i16, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else if constexpr (sizeof(T) == 4) {
-    auto raw = __musa_ld_v4_robust_i32(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(i32, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else if constexpr (sizeof(T) == 8) {
-    auto raw = __musa_ld_v4_robust_i64(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(i64, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else if constexpr (sizeof(T) == 12) {
-    auto raw = __musa_ld_v4_robust_v3i32(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(v3i32, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else if constexpr (sizeof(T) == 16) {
-    auto raw = __musa_ld_v4_robust_v4i32(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(v4i32, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else if constexpr (sizeof(T) == 32) {
-    auto raw = __musa_ld_v4_robust_v8i32(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(v8i32, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else if constexpr (sizeof(T) == 64) {
-    auto raw = __musa_ld_v4_robust_v16i32(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(v16i32, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else if constexpr (sizeof(T) == 128) {
-    auto raw = __musa_ld_v4_robust_v32i32(addr, robust_desc, 0);
+    auto raw = TL_ROBUST_LOAD_CALL(v32i32, addr, robust_desc);
     return robust_bit_cast<T>(raw);
   } else {
     static_assert(sizeof(T) <= 128, "Unsupported robust load width");
@@ -113,9 +136,8 @@ TL_DEVICE void
 cp_async_gs_robust(void const *const smem_addr, void const *global_ptr,
                    void const *robust_base_ptr, uint64_t robust_size) {
   auto robust_desc = make_robust_desc(robust_base_ptr, robust_size);
-  __musa_memcpy_g2s_robust_v4(
-      (void _AS3 *)smem_addr, (void const _AS1 *)global_ptr,
-      N /* total_bytes */, robust_desc, 0 /* prefetch_size */);
+  TL_ROBUST_MEMCPY_G2S((void _AS3 *)smem_addr, (void _AS1 *)global_ptr,
+                       N /* total_bytes */, robust_desc);
 }
 
 template <int N>
@@ -126,6 +148,10 @@ TL_DEVICE void cp_async_gs_robust_conditional(void const *const smem_addr,
   uint64_t selected_size = cond ? robust_size : 0;
   cp_async_gs_robust<N>(smem_addr, global_ptr, robust_base_ptr, selected_size);
 }
+
+#undef TL_ROBUST_MEMCPY_G2S
+#undef TL_ROBUST_LOAD_CALL
+#undef TL_GET_ROBUST_DESC
 
 #endif
 

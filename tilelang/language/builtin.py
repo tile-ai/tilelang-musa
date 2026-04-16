@@ -270,7 +270,7 @@ def create_tma_descriptor(*args):
 
 
 def make_robust_desc(*args):
-    """Create a robust source descriptor for MUSA copy lowering.
+    """Create a robust source descriptor for MUSA robust copy lowering.
 
     Args:
         *args: Either `(addr, size_bytes)` for a concrete robust descriptor, or

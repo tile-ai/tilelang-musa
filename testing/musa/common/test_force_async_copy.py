@@ -57,7 +57,7 @@ def kernel_with_vectorized_scalar_force_async_copy_to_shared_disable_thread_stor
     return main
 
 
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_musa_compute_version_ge(2, 2)
 def test_vectorized_scalar_force_async_copy_to_shared_numerical():
     require_musa()
 
@@ -70,7 +70,7 @@ def test_vectorized_scalar_force_async_copy_to_shared_numerical():
     torch.testing.assert_close(out, src, rtol=0.0, atol=0.0)
 
 
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_musa_compute_version_ge(2, 2)
 def test_vectorized_scalar_force_async_copy_to_shared_source():
     code = kernel_with_vectorized_scalar_force_async_copy_to_shared().get_kernel_source()
 
@@ -78,7 +78,7 @@ def test_vectorized_scalar_force_async_copy_to_shared_source():
     assert "tl::cp_async_wait<0>();" in code
 
 
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_musa_compute_version_ge(2, 2)
 def test_vectorized_scalar_force_async_copy_to_shared_source_disable_thread_storage_sync():
     code = kernel_with_vectorized_scalar_force_async_copy_to_shared_disable_thread_storage_sync().get_kernel_source()
 
