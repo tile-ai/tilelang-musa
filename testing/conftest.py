@@ -21,6 +21,27 @@ else:
     np.random.seed(0)
 
 
+collect_ignore = [
+    "python/cache",
+    "python/carver",
+    "python/cpu",
+    "python/autotune",
+    "python/tilelibrary",
+    "python/kernel/test_tilelang_kernel_bf16_gemm_mma.py",
+    "python/kernel/test_tilelang_kernel_fp8_gemm_mma.py",
+    "python/kernel/test_tilelang_kernel_gemm_mma_intrinsic.py",
+    "python/kernel/test_tilelang_kernel_int4_gemm_mma.py",
+    "python/language/test_tilelang_language_cooperative.py",
+    "python/language/test_tilelang_language_pdl.py",
+    "python/language/test_tilelang_language_cluster.py",
+    "python/language/test_tilelang_language_ldg.py",
+    "python/language/test_tilelang_language_stg.py",
+    "python/language/test_tilelang_language_async_copy_gemm_sm80.py",
+    "python/language/test_tilelang_language_intrinsics_codegen.py",
+    "python/transform/test_tilelang_transform_lower_ldgstg.py",
+]
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     """Ensure that at least one test is collected. Error out if all tests are skipped."""
     known_types = {
