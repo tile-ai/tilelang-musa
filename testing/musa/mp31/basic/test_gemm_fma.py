@@ -1,6 +1,7 @@
 import pytest
 import tilelang
 import tilelang.testing
+from tilelang.testing import get_tilelang_type
 import tilelang.language as T
 import torch
 
@@ -32,36 +33,19 @@ def matmul(A, B, block_M, block_N, block_K, dtype="float16", accum_dtype="float3
     return C
 
 
-def get_tilelang_type(elem_type):
-    type_map = {
-        torch.float16: "float16",
-        torch.bfloat16: "bfloat16",
-        torch.float8_e4m3fn: "float8_e4m3",
-    }
-    return type_map[elem_type]
-
-
-def get_rtol(elem_type):
-    rtol_map = {
-        torch.float16: 1e-3,
-        torch.bfloat16: 7.9e-3,
-        torch.float8_e4m3fn: 1.25e-1,
-    }
-    return rtol_map[elem_type]
-
-
-def get_atol(elem_type):
-    atol_map = {
-        torch.float16: 1e-3,
-        torch.bfloat16: 1e-3,
-        torch.float8_e4m3fn: 1.25e-1,
-    }
-    return atol_map[elem_type]
+def make_input(shape, elem_type):
+    if elem_type == torch.float8_e4m3fn:
+        return torch.randn(shape, dtype=torch.float32, device="musa").to(elem_type)
+    return torch.randn(shape, dtype=elem_type, device="musa")
 
 
 def _assert_case(elem_type, M, N, K, block_M, block_N, block_K):
-    a = torch.randn((M, K), dtype=torch.float16, device="musa").to(elem_type)
-    b = torch.randn((K, N), dtype=torch.float16, device="musa").to(elem_type)
+    a = make_input((M, K), elem_type)
+    b = make_input((K, N), elem_type)
+    rtol, atol = tilelang.testing.get_tolerance(
+        elem_type,
+        profile="gemm_contract",
+    )
     kernel = matmul.compile(
         M=M,
         N=N,
@@ -74,12 +58,12 @@ def _assert_case(elem_type, M, N, K, block_M, block_N, block_K):
     )
 
     out = kernel(a, b)
-    ref = a @ b
+    ref = (a.float() @ b.float()).to(elem_type)
     torch.testing.assert_close(
         ref.to(torch.float32),
         out.to(torch.float32),
-        rtol=get_rtol(elem_type),
-        atol=get_atol(elem_type),
+        rtol=rtol,
+        atol=atol,
     )
     return kernel
 

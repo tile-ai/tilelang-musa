@@ -2,6 +2,7 @@ import torch
 import pytest
 import tilelang
 import tilelang.testing
+from tilelang.testing import get_tilelang_type
 import tilelang.language as T
 
 tilelang.disable_cache()
@@ -26,11 +27,6 @@ def matmul(A, B, block_M, block_N, block_K, dtype="float16", accum_dtype="float"
         T.copy(C_local, C[by * block_M, bx * block_N])
 
     return C
-
-
-def get_tilelang_type(elem_type):
-    type_map = {torch.float16: "float16", torch.bfloat16: "bfloat16", torch.float8_e4m3fn: "float8_e4m3"}
-    return type_map.get(elem_type)
 
 
 elem_type_list = [torch.float16]

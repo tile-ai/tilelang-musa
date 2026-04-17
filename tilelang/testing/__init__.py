@@ -17,6 +17,8 @@ from tvm.testing.utils import (
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
 from .perf_regression import process_func, regression
+from .tolerance import get_tolerance, list_tolerance_profiles
+from .dtypes import get_tilelang_type
 
 __all__ = (
     [
@@ -32,6 +34,9 @@ __all__ = (
         "requires_musa_compute_version",
         "process_func",
         "regression",
+        "get_tolerance",
+        "list_tolerance_profiles",
+        "get_tilelang_type",
     ]
     + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
     + [f"requires_musa_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]

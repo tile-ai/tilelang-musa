@@ -12,6 +12,7 @@ except ImportError:
     pass
 else:
     torch.manual_seed(0)
+    torch.backends.mudnn.allow_tf32 = False
 
 try:
     import numpy as np
