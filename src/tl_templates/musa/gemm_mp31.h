@@ -639,6 +639,27 @@ public:
       gemm(tiled_mma, tCrA_view(_, _, k), tCrB_view(_, _, k), acc);
     }
   }
+
+  static TL_DEVICE void body_rr(A_type_raw *pA, B_type_raw *pB,
+                                C_type_raw *pC) {
+    TileMma tiled_mma;
+    Tensor acc =
+        make_tensor(make_rmem_ptr(reinterpret_cast<C_type *>(pC)),
+                    partition_shape_C(tiled_mma, Shape<Int<M>, Int<N>>{}));
+    Tensor tCrA =
+        make_tensor(make_rmem_ptr(reinterpret_cast<A_type *>(pA)),
+                    partition_shape_A(tiled_mma, Shape<Int<M>, Int<K>>{}));
+    Tensor tCrB =
+        make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
+                    partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
+    if constexpr (clear_accum) {
+      clear(acc);
+    }
+    MUTE_UNROLL
+    for (int k = 0; k < size<2>(tCrA); ++k) {
+      gemm(tiled_mma, tCrA(_, _, k), tCrB(_, _, k), acc);
+    }
+  }
 };
 
 } // namespace tl_wmma
@@ -769,6 +790,21 @@ TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
                                     B_type, C_type>;
     MMA::body(pA, pB, accum);
   }
+}
+
+template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
+          bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
+          int offset_a = 0, int offset_b = 0, bool use_sqmma = true,
+          int inst_m = 0, int inst_n = 0, int inst_k = 0, int wg_wait = 0,
+          typename A_type, typename B_type, typename C_type>
+TL_DEVICE void gemm_rr(A_type *pA, B_type *pB, C_type *accum) {
+  static_assert(!use_sqmma, "PH1 SQMMA does not support gemm_rr");
+  static_assert(wg_wait == 0,
+                "PH1 WMMA gemm_rr currently expects wg_wait to stay at 0");
+  using MMA = mute::tl_wmma::GemmTensorOp<
+      M, N, K, num_warp_m, num_warp_n, trans_A, trans_B, clear_accum, lda, ldb,
+      offset_a, offset_b, inst_m, inst_n, inst_k, A_type, B_type, C_type>;
+  MMA::body_rr(pA, pB, accum);
 }
 
 template <int num_mma>

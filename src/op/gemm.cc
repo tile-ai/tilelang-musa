@@ -269,10 +269,11 @@ GemmNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
   if (!TargetIsPH1(target)) {
     return std::nullopt;
   }
-  if (a_.scope() != "shared.dyn" && a_.scope() != "shared") {
-    return std::nullopt;
-  }
-  if (b_.scope() != "shared.dyn" && b_.scope() != "shared") {
+  const bool a_is_shared = a_.scope() == "shared.dyn" || a_.scope() == "shared";
+  const bool b_is_shared = b_.scope() == "shared.dyn" || b_.scope() == "shared";
+  const bool a_is_fragment = IsFragmentBuffer(a_);
+  const bool b_is_fragment = IsFragmentBuffer(b_);
+  if (!((a_is_shared && b_is_shared) || (a_is_fragment && b_is_fragment))) {
     return std::nullopt;
   }
   if (c_.scope() != "local.fragment") {
@@ -897,10 +898,15 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   if (IsFragmentBuffer(a_)) {
-    ICHECK(!IsFragmentBuffer(b_));
-    ICHECK(!transA_)
-        << "gemm_rs requires the A operand to be in non-transposed layout.";
-    op_name = "tl::gemm_rs";
+    if (IsFragmentBuffer(b_)) {
+      ICHECK(TargetIsPH1(T.target) && gemm_inst == GemmInst::kPH1WMMA)
+          << "gemm_rr is currently only implemented for PH1 WMMA.";
+      op_name = "tl::gemm_rr";
+    } else {
+      ICHECK(!transA_)
+          << "gemm_rs requires the A operand to be in non-transposed layout.";
+      op_name = "tl::gemm_rs";
+    }
   } else if (IsFragmentBuffer(b_)) {
     op_name = "tl::gemm_sr";
   } else {
@@ -1104,10 +1110,10 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       results.Set(b_, fragment->BindThreadRange(thread_range));
     }
   } else if (TargetIsPH1(T.target)) {
-    ICHECK(a_.scope() == "shared" || a_.scope() == "shared.dyn");
-    ICHECK(b_.scope() == "shared" || b_.scope() == "shared.dyn");
-    ICHECK(c_.scope() == "local.fragment");
     if (gemm_inst == GemmInst::kSQMMA) {
+      ICHECK(a_.scope() == "shared" || a_.scope() == "shared.dyn");
+      ICHECK(b_.scope() == "shared" || b_.scope() == "shared.dyn");
+      ICHECK(c_.scope() == "local.fragment");
       auto sqmma_inst = SelectSQMMAInstShape(block_size, T.target);
       ICHECK(sqmma_inst.has_value())
           << "SQMMA is selected but no valid SQMMA instruction is found.";
@@ -1156,12 +1162,16 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
         results.Set(b_, BLayout);
       }
     } else if (gemm_inst == GemmInst::kPH1WMMA) {
-      ICHECK(a_.scope() == "shared" || a_.scope() == "shared.dyn")
-          << "PH1 WMMA requires A in shared/shared.dyn scope, got "
-          << a_.scope();
-      ICHECK(b_.scope() == "shared" || b_.scope() == "shared.dyn")
-          << "PH1 WMMA requires B in shared/shared.dyn scope, got "
-          << b_.scope();
+      const bool a_is_shared =
+          a_.scope() == "shared" || a_.scope() == "shared.dyn";
+      const bool b_is_shared =
+          b_.scope() == "shared" || b_.scope() == "shared.dyn";
+      const bool a_is_fragment = IsFragmentBuffer(a_);
+      const bool b_is_fragment = IsFragmentBuffer(b_);
+      ICHECK((a_is_shared && b_is_shared) || (a_is_fragment && b_is_fragment))
+          << "PH1 WMMA requires A/B to both be in shared/shared.dyn or both "
+             "be in local.fragment scope, got A="
+          << a_.scope() << ", B=" << b_.scope();
       ICHECK(c_.scope() == "local.fragment")
           << "PH1 WMMA requires C in local.fragment scope, got " << c_.scope();
       auto wmma_inst = SelectPH1WmmaInstShape(block_size, T.target);
@@ -1172,21 +1182,31 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                          c_->dtype.bits(), *wmma_inst);
       results.Set(c_, fragment->BindThreadRange(thread_range));
 
-      int dim_A = a_->shape.size();
-      const int64_t a_mat_stride = *as_const_int(a_->shape[dim_A - 2]);
-      const int64_t a_mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      auto ALayout =
-          makePH1WmmaABLayout(a_mat_stride, a_mat_continuous, a_mat_continuous,
-                              a_->dtype.bits(), !transA_);
-      results.Set(a_, ExpandLayoutToMatchBuffer(ALayout, a_));
+      if (a_is_shared && b_is_shared) {
+        int dim_A = a_->shape.size();
+        const int64_t a_mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+        const int64_t a_mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+        auto ALayout =
+            makePH1WmmaABLayout(a_mat_stride, a_mat_continuous,
+                                a_mat_continuous, a_->dtype.bits(), !transA_);
+        results.Set(a_, ExpandLayoutToMatchBuffer(ALayout, a_));
 
-      int dim_B = b_->shape.size();
-      const int64_t b_mat_stride = *as_const_int(b_->shape[dim_B - 2]);
-      const int64_t b_mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      auto BLayout =
-          makePH1WmmaABLayout(b_mat_stride, b_mat_continuous, b_mat_continuous,
-                              b_->dtype.bits(), transB_);
-      results.Set(b_, ExpandLayoutToMatchBuffer(BLayout, b_));
+        int dim_B = b_->shape.size();
+        const int64_t b_mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+        const int64_t b_mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
+        auto BLayout =
+            makePH1WmmaABLayout(b_mat_stride, b_mat_continuous,
+                                b_mat_continuous, b_->dtype.bits(), transB_);
+        results.Set(b_, ExpandLayoutToMatchBuffer(BLayout, b_));
+      } else {
+        auto fragment_a = makePH1WmmaFragmentA(
+            m_, n_, k_, warp_m, warp_n, a_->dtype.bits(), transA_, *wmma_inst);
+        results.Set(a_, fragment_a->BindThreadRange(thread_range));
+
+        auto fragment_b = makePH1WmmaFragmentB(
+            m_, n_, k_, warp_m, warp_n, b_->dtype.bits(), transB_, *wmma_inst);
+        results.Set(b_, fragment_b->BindThreadRange(thread_range));
+      }
     } else {
       auto fragment = makeGemmFragmentCLinear(m_, n_, block_size);
       results.Set(c_, fragment->BindThreadRange(thread_range));

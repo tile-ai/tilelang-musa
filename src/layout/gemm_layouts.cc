@@ -249,6 +249,78 @@ Fragment makePH1WmmaCLayout(const int block_m, const int block_n,
   return block_layout;
 }
 
+Fragment makePH1WmmaFragmentA(const int block_m, const int block_n,
+                              const int block_k, const int warp_m,
+                              const int warp_n, const int element_size,
+                              bool transposed,
+                              const std::array<int, 3> &inst_shape) {
+  const int inst_m = inst_shape[0];
+  const int inst_k = inst_shape[2];
+  const int num_reg = 32 / element_size;
+  IterVar i = make_itervar("i", 1);
+  IterVar j = make_itervar("j", 1);
+  IterVar rep = make_itervar("rep", 1);
+  auto base_layout = Fragment({i, j}, {Integer(0)}, Integer(0), rep);
+  if (transposed) {
+    auto reg_layout = base_layout->Repeat({1, num_reg}, false, true);
+    auto tile_layout =
+        reg_layout->Repeat({4 * num_reg, 8 / num_reg}, true, true);
+    auto inst_layout =
+        tile_layout->Repeat({inst_k / num_reg / 4, inst_m / 8}, false, true);
+    auto warp_layout =
+        inst_layout->Repeat({1, warp_m}, true, false)->Replicate(warp_n);
+    auto block_layout = warp_layout->Repeat(
+        {block_k / inst_k, block_m / warp_m / inst_m}, false, true);
+    return block_layout;
+  } else {
+    auto reg_layout = base_layout->Repeat({1, num_reg}, false, true);
+    auto tile_layout = reg_layout->Repeat({8, 4}, true, true);
+    auto inst_layout =
+        tile_layout->Repeat({inst_m / 8, inst_k / num_reg / 4}, false, true);
+    auto warp_layout =
+        inst_layout->Repeat({warp_m, 1}, true, false)->Replicate(warp_n);
+    auto block_layout = warp_layout->Repeat(
+        {block_m / warp_m / inst_m, block_k / inst_k}, false, false);
+    return block_layout;
+  }
+}
+
+Fragment makePH1WmmaFragmentB(const int block_m, const int block_n,
+                              const int block_k, const int warp_m,
+                              const int warp_n, const int element_size,
+                              bool transposed,
+                              const std::array<int, 3> &inst_shape) {
+  const int inst_n = inst_shape[1];
+  const int inst_k = inst_shape[2];
+  const int num_reg = 32 / element_size;
+  IterVar i = make_itervar("i", 1);
+  IterVar j = make_itervar("j", 1);
+  IterVar rep = make_itervar("rep", 1);
+  auto base_layout = Fragment({i, j}, {Integer(0)}, Integer(0), rep);
+  if (transposed) {
+    auto reg_layout = base_layout->Repeat({num_reg, 1}, false, true);
+    auto tile_layout =
+        reg_layout->Repeat({8 / num_reg, 4 * num_reg}, true, false);
+    auto inst_layout =
+        tile_layout->Repeat({inst_n / 8, inst_k / num_reg / 4}, false, false);
+    auto warp_layout =
+        inst_layout->Replicate(warp_m)->Repeat({warp_n, 1}, true, false);
+    auto block_layout = warp_layout->Repeat(
+        {block_n / warp_n / inst_n, block_k / inst_k}, false, false);
+    return block_layout;
+  } else {
+    auto reg_layout = base_layout->Repeat({num_reg, 1}, false, true);
+    auto tile_layout = reg_layout->Repeat({4, 8}, true, false);
+    auto inst_layout =
+        tile_layout->Repeat({inst_k / num_reg / 4, inst_n / 8}, false, false);
+    auto warp_layout =
+        inst_layout->Replicate(warp_m)->Repeat({1, warp_n}, true, false);
+    auto block_layout = warp_layout->Repeat(
+        {block_k / inst_k, block_n / warp_n / inst_n}, false, true);
+    return block_layout;
+  }
+}
+
 Layout makePH1WmmaABLayout(int mat_stride, int mat_continuous, int continuity,
                            int element_size, bool k_inner) {
   // Keep a dedicated PH1 WMMA hook even though we currently stage A/B with a
