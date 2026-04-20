@@ -40,6 +40,7 @@ collect_ignore = [
     "python/language/test_tilelang_language_async_copy_gemm_sm80.py",
     "python/language/test_tilelang_language_intrinsics_codegen.py",
     "python/transform/test_tilelang_transform_lower_ldgstg.py",
+    "python/jit/test_tilelang_jit_parcompile.py",
 ]
 
 

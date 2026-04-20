@@ -1762,6 +1762,8 @@ private:
     }
     PrimExpr consumer_thread_extent = thread_iv_->dom->extent;
     PrimExpr producer_thread_extent = thread_iv_->dom->extent;
+
+    // Get producer threads override set by T.Kernel()
     int64_t producer_threads_override = -1;
     if (block->annotations.defined()) {
       auto it =
@@ -1778,6 +1780,7 @@ private:
     if (!marker.HasSimtCopy())
       producer_thread_extent = 128;
 
+    // Check producer_threads_override < consumer_thread
     bool use_override = false;
     if (producer_threads_override > 0 && marker.HasSimtCopy()) {
       int64_t consumer_threads = -1;

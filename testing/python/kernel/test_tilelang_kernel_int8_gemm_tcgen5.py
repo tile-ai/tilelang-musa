@@ -72,7 +72,7 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
     assert diff < 1e-3
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_assert_matmul():
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 128, T.int8, T.int32, T.int32)
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 128, T.uint8, T.int32, T.int32)

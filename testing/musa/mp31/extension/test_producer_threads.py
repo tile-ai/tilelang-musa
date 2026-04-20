@@ -1,92 +1,80 @@
-import pytest
+import re
+
 import tilelang
+import tilelang.language as T
 import tilelang.testing
 import torch
-from tilelang import tvm
-from tilelang import language as T
 
 tilelang.disable_cache()
 
-
-def _get_test_target_and_device() -> tuple[str, str]:
-    if hasattr(torch, "musa") and torch.musa.is_available():
-        return "musa", "musa"
-    if torch.cuda.is_available():
-        return "cuda", "cuda"
-    pytest.skip("Neither MUSA nor CUDA is available")
+CONSUMER_THREADS = 128
+BLOCK_ELEMS = 128
+NUM_STEPS = 4
+NUM_ELEMS = BLOCK_ELEMS * NUM_STEPS
 
 
-def _sync(device: str) -> None:
-    if device == "musa":
-        torch.musa.synchronize()
-    elif device == "cuda":
-        torch.cuda.synchronize()
+@tilelang.jit(target="musa")
+def simt_copy_kernel(A, producer_threads=None):
+    A: T.Tensor[[NUM_ELEMS], T.float16]
+    B = T.empty((NUM_ELEMS,), T.float16)
+
+    with T.Kernel(1, threads=CONSUMER_THREADS, producer_threads=producer_threads) as _:
+        simt_shared = T.alloc_shared((BLOCK_ELEMS,), T.float16)
+        for stage in T.Pipelined(NUM_STEPS, num_stages=2):
+            # Producer path: explicit SIMT copy from global to shared.
+            # This path is intentionally non-TMA to validate producer_threads override for SIMT producer.
+            for i in T.Parallel(BLOCK_ELEMS):
+                simt_shared[i] = A[stage * BLOCK_ELEMS + i]
+            # Consumer path: do actual compute (B = A + 1) in shared.
+            for i in T.Parallel(BLOCK_ELEMS):
+                simt_shared[i] = simt_shared[i] + T.float16(1.0)
+            T.copy(simt_shared, B[stage * BLOCK_ELEMS : (stage + 1) * BLOCK_ELEMS])
+
+    return B
 
 
-def _make_pipeline_copy_kernel(producer_threads: int | None):
-    @T.prim_func
-    def main(
-        A: T.Tensor((256,), T.float16),
-        B: T.Tensor((256,), T.float16),
-    ):
-        with T.Kernel(1, threads=128, producer_threads=producer_threads):
-            A_shared = T.alloc_shared((128,), T.float16)
-            for k in T.Pipelined(2, num_stages=2):
-                T.copy(A[k * 128 : (k + 1) * 128], A_shared)
-                T.copy(A_shared, B[k * 128 : (k + 1) * 128])
-
-    return main
+def get_launch_bounds_threads(source: str) -> int:
+    match = re.search(r"__launch_bounds__\((\d+)\s*,\s*1\)", source)
+    assert match is not None, "Cannot find __launch_bounds__ in generated source."
+    return int(match.group(1))
 
 
-def _thread_idx_x_extent(func: tvm.tir.PrimFunc) -> int:
-    extents: list[int] = []
-
-    def visitor(node):
-        if not isinstance(node, tvm.tir.AttrStmt):
-            return
-        if node.attr_key != "thread_extent":
-            return
-        if not isinstance(node.node, tvm.tir.IterVar):
-            return
-        if node.node.thread_tag != "threadIdx.x":
-            return
-        assert isinstance(node.value, tvm.tir.IntImm)
-        extents.append(int(node.value.value))
-
-    tvm.tir.stmt_functor.post_order_visit(func.body, visitor)
-    assert extents, "Cannot find threadIdx.x thread_extent in lowered TIR."
-    return max(extents)
+def get_producer_threads_from_source(source: str) -> int:
+    return get_launch_bounds_threads(source) - CONSUMER_THREADS
 
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
-def test_producer_threads_override_changes_thread_partition():
-    target, _ = _get_test_target_and_device()
-    base_kernel = _make_pipeline_copy_kernel(None)
-    overridden_kernel = _make_pipeline_copy_kernel(32)
+def test_producer_threads_simt_copy_codegen_partition():
+    source_default = simt_copy_kernel.compile().get_kernel_source()
+    source_override = simt_copy_kernel.compile(producer_threads=32).get_kernel_source()
 
-    base_artifact = tilelang.lower(base_kernel, target=target)
-    overridden_artifact = tilelang.lower(overridden_kernel, target=target)
+    assert get_producer_threads_from_source(source_default) == CONSUMER_THREADS
+    assert get_producer_threads_from_source(source_override) == 32
 
-    base_extent = _thread_idx_x_extent(base_artifact.device_mod["main"])
-    overridden_extent = _thread_idx_x_extent(overridden_artifact.device_mod["main"])
-
-    # Default: producer=consumer=128 => threadIdx.x extent is 256.
-    assert base_extent == 256
-    # With override: producer=32, consumer=128 => threadIdx.x extent is 160.
-    assert overridden_extent == 160
+    assert "vthread" not in source_default
+    assert "vthread" in source_override
 
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
-def test_producer_threads_runtime_copy():
-    target, device = _get_test_target_and_device()
-    kernel = tilelang.compile(_make_pipeline_copy_kernel(32), target=target)
+def test_producer_threads_simt_copy_correctness():
+    kernel = simt_copy_kernel.compile(producer_threads=32)
 
-    A = torch.randn((256,), device=device, dtype=torch.float16)
-    B = torch.empty_like(A)
-    kernel(A, B)
-    _sync(device)
-    torch.testing.assert_close(B, A)
+    a = torch.randn((NUM_ELEMS,), device="musa", dtype=torch.float16)
+    b = kernel(a)
+    ref = a + 1.0
+    torch.testing.assert_close(b, ref, rtol=0.0, atol=0.0)
+
+
+def main():
+    kernel = simt_copy_kernel.compile(producer_threads=32)
+    print(kernel.get_kernel_source())
+
+    a = torch.randn((NUM_ELEMS,), device="musa", dtype=torch.float16)
+    b = kernel(a)
+    ref = a + 1.0
+    torch.testing.assert_close(b, ref, rtol=0.0, atol=0.0)
+    print("pass")
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    main()
