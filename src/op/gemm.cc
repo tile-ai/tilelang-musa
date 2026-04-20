@@ -915,13 +915,11 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ICHECK(clear_accum_bool.has_value())
       << "clear_accum must be a constant Bool type, got " << clearAccum_;
   ss << ", " << bool(clear_accum_bool.value());
-
   if ((TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) ||
       (TargetIsPH1(T.target)) || (TargetIsQY2(T.target))) {
     ss << ", " << strideA_ << ", " << strideB_;
     ss << ", " << offsetA_ << ", " << offsetB_;
   }
-
   if (TargetIsCDNA(T.target)) {
     // for cdna gemm, we need to specify kPack
     ss << ", " << kPack_;
@@ -945,9 +943,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if ((TargetIsHopper(T.target) || TargetIsPH1(T.target)) && wgWait_ != 0) {
     ss << ", " << wgWait_;
-  }
-
-  if (TargetIsSm100(T.target)) {
+  } else if (TargetIsSm100(T.target)) {
     // NOTE On sm100, only the leading thread issues the TCGEN5MMA instruction
     // but all threads need to wait, so we emit another statement for cases
     // where wg_wait == 0.

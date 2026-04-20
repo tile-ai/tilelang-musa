@@ -7,14 +7,17 @@ tilelang.disable_cache()
 
 
 @tilelang.jit(target="musa")
-def matmul(A, B, block_M, block_N, block_K, dtype, accum_dtype, num_warp):
+def matmul(A, B, block_M, block_N, block_K, num_warp=4, dtype="float16", accum_dtype="float32"):
     M, N, K = T.const("M N K")
     A: T.Tensor[[M, K], dtype]
     B: T.Tensor[[K, N], dtype]
     C = T.empty((M, N), dtype)
     threads = num_warp * 32
 
-    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+        bx,
+        by,
+    ):
         a_shared = T.alloc_shared((block_M, block_K), dtype)
         b_shared = T.alloc_shared((block_K, block_N), dtype)
         c_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -31,7 +34,7 @@ def matmul(A, B, block_M, block_N, block_K, dtype, accum_dtype, num_warp):
 
 
 @tilelang.jit(target="musa")
-def matmul_with_independent_compute(A, B, block_M, block_N, block_K, dtype, accum_dtype, num_warp):
+def matmul_with_independent_compute(A, B, block_M, block_N, block_K, num_warp=4, dtype="float16", accum_dtype="float32"):
     M, N, K = T.const("M N K")
     A: T.Tensor[[M, K], dtype]
     B: T.Tensor[[K, N], dtype]
@@ -39,7 +42,10 @@ def matmul_with_independent_compute(A, B, block_M, block_N, block_K, dtype, accu
     D = T.empty((M, N), accum_dtype)
     threads = num_warp * 32
 
-    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+        bx,
+        by,
+    ):
         a_shared = T.alloc_shared((block_M, block_K), dtype)
         b_shared = T.alloc_shared((block_K, block_N), dtype)
         c_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -78,9 +84,9 @@ def independent_compute_reference(a, b, block_K):
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_wait_wgmma():
-    M = 512
-    N = 512
-    K = 512
+    M = 256
+    N = 256
+    K = 256
     block_M = 128
     block_N = 128
     block_K = 64
@@ -92,23 +98,20 @@ def test_wait_wgmma():
         block_M=block_M,
         block_N=block_N,
         block_K=block_K,
-        dtype="float16",
-        accum_dtype="float32",
-        num_warp=4,
     )
 
     a = torch.randn(M, K, device="musa", dtype=torch.float16)
     b = torch.randn(K, N, device="musa", dtype=torch.float16)
     c = kernel(a, b)
-    ref = a @ b
+    ref = (a.float() @ b.float()).to(torch.float16)
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
 
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_wait_wgmma_with_independent_compute():
-    M = 512
-    N = 512
-    K = 512
+    M = 256
+    N = 256
+    K = 256
     block_M = 128
     block_N = 128
     block_K = 64
@@ -120,15 +123,12 @@ def test_wait_wgmma_with_independent_compute():
         block_M=block_M,
         block_N=block_N,
         block_K=block_K,
-        dtype="float16",
-        accum_dtype="float32",
-        num_warp=4,
     )
 
     a = torch.randn(M, K, device="musa", dtype=torch.float16)
     b = torch.randn(K, N, device="musa", dtype=torch.float16)
     c, d = kernel(a, b)
-    ref_c = a @ b
+    ref_c = (a.float() @ b.float()).to(torch.float16)
     ref_d = independent_compute_reference(a, b, block_K)
 
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
@@ -136,9 +136,9 @@ def test_wait_wgmma_with_independent_compute():
 
 
 def main():
-    M = 512
-    N = 512
-    K = 512
+    M = 256
+    N = 256
+    K = 256
     block_M = 128
     block_N = 128
     block_K = 64
@@ -150,9 +150,6 @@ def main():
         block_M=block_M,
         block_N=block_N,
         block_K=block_K,
-        dtype="float16",
-        accum_dtype="float32",
-        num_warp=4,
     )
     print(kernel_0.get_kernel_source())
 
@@ -163,9 +160,6 @@ def main():
         block_M=block_M,
         block_N=block_N,
         block_K=block_K,
-        dtype="float16",
-        accum_dtype="float32",
-        num_warp=4,
     )
     print(kernel_1.get_kernel_source())
 

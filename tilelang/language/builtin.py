@@ -812,6 +812,19 @@ def wait_wgmma(id: int = 0):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
+def wait_sqmma(id: int = 0):
+    """Alias of :pyfunc:`wait_wgmma` for SQMMA naming compatibility.
+
+    Args:
+        id: int
+            The id of the SQMMA operation to wait for
+
+    Returns:
+        tir.Call: A handle to the SQMMA wait operation
+    """
+    return wait_wgmma(id)
+
+
 def lma_wait():
     """Wait for prior LMA operations to complete.
 
@@ -819,6 +832,7 @@ def lma_wait():
         tir.Call: A handle to the LMA wait operation.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.lma_wait"))
+
 
 def barrier_wait(mbarrier: BarrierType, parity: int | Var):
     """Wait for a memory barrier to complete.
