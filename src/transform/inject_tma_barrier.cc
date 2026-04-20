@@ -49,7 +49,25 @@ using namespace tir::transform;
 using arith::IRMutatorWithAnalyzer;
 using arith::IRVisitorWithAnalyzer;
 
-static inline bool Is1DTmaLoad(const CallNode *op) {
+namespace {
+
+bool IsManualTmaBarrier(const PrimExpr &barrier_id) {
+  if (const auto *call = barrier_id.as<CallNode>()) {
+    return call->op.same_as(manual_tma_barrier()) && call->args.size() == 1;
+  }
+  return false;
+}
+
+PrimExpr UnwrapManualTmaBarrier(const PrimExpr &barrier_id) {
+  if (const auto *call = barrier_id.as<CallNode>()) {
+    if (call->op.same_as(manual_tma_barrier()) && call->args.size() == 1) {
+      return call->args[0];
+    }
+  }
+  return barrier_id;
+}
+
+bool Is1DTmaLoad(const CallNode *op) {
   if (!op->op.same_as(tma_load())) {
     return false;
   }
@@ -57,6 +75,47 @@ static inline bool Is1DTmaLoad(const CallNode *op) {
   return arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
          !arg0.value()->op.same_as(create_tma_im2col_descriptor());
 }
+
+int GetTmaBarrierArgIndex(const CallNode *op) {
+  return Is1DTmaLoad(op) ? 2 : 1;
+}
+
+class ManualTmaBarrierIdRewriter : public StmtExprMutator {
+public:
+  static std::pair<Stmt, std::vector<PrimExpr>> Rewrite(const Stmt &stmt) {
+    ManualTmaBarrierIdRewriter rewriter;
+    Stmt rewritten = rewriter(stmt);
+    return {rewritten, rewriter.manual_barrier_ids_};
+  }
+
+private:
+  PrimExpr VisitExpr_(const CallNode *call) final {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+      int barrier_arg_index = GetTmaBarrierArgIndex(call);
+      PrimExpr barrier_id = call->args[barrier_arg_index];
+      if (IsManualTmaBarrier(barrier_id)) {
+        PrimExpr unwrapped = UnwrapManualTmaBarrier(barrier_id);
+        for (const auto &recorded : manual_barrier_ids_) {
+          if (deep_equal_(recorded, unwrapped)) {
+            Array<PrimExpr> new_args = call->args;
+            new_args.Set(barrier_arg_index, unwrapped);
+            return Call(call->dtype, call->op, new_args, call->annotations);
+          }
+        }
+        manual_barrier_ids_.push_back(unwrapped);
+        Array<PrimExpr> new_args = call->args;
+        new_args.Set(barrier_arg_index, unwrapped);
+        return Call(call->dtype, call->op, new_args, call->annotations);
+      }
+    }
+    return StmtExprMutator::VisitExpr_(call);
+  }
+
+  std::vector<PrimExpr> manual_barrier_ids_;
+  ExprDeepEqual deep_equal_;
+};
+
+} // namespace
 
 class TmaTraitsCollector : public StmtExprVisitor {
 public:
@@ -74,10 +133,13 @@ public:
 private:
   void VisitExpr_(const CallNode *call) final {
     if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-      auto arg0 = call->args[0].as<Call>();
-      if (call->op.same_as(tma_load()) && arg0 &&
-          !arg0.value()->op.same_as(create_tma_descriptor())) {
-        // 1D TMA load has tvm_access_ptr of shared tensor in its args[0]
+      int barrier_arg_index = GetTmaBarrierArgIndex(call);
+      if (IsManualTmaBarrier(call->args[barrier_arg_index])) {
+        StmtExprVisitor::VisitExpr_(call);
+        return;
+      }
+      if (Is1DTmaLoad(call)) {
+        // 1D TMA load uses size_bytes directly in args[3].
         bulk_copy_bytes = call->args[3] * loop_extents;
       } else {
         Call access_ptr = Downcast<Call>(call->args[2]);
@@ -109,7 +171,6 @@ public:
   }
 
 private:
-  bool inside_tma_block_{false};
   bool visited_tma_load_{false};
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
@@ -174,12 +235,15 @@ private:
 
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
-      bool is_1d_tma_load = Is1DTmaLoad(op);
+      int barrier_arg_index = GetTmaBarrierArgIndex(op);
+      PrimExpr barrier_id = op->args[barrier_arg_index];
+      if (IsManualTmaBarrier(barrier_id)) {
+        return IRMutatorWithAnalyzer::VisitExpr_(op);
+      }
       visited_tma_load_ = true;
       Array<PrimExpr> new_args = op->args;
-      new_args.Set(is_1d_tma_load ? 2 : 1,
-                   Call(DataType::Handle(), get_mbarrier(),
-                        {IntImm(DataType::Int(32), 0)}));
+      new_args.Set(barrier_arg_index, Call(DataType::Handle(), get_mbarrier(),
+                                           {IntImm(DataType::Int(32), 0)}));
       return Call(op->dtype, op->op, new_args, op->annotations);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -188,8 +252,10 @@ private:
 
 class TmaBarrierCollector : public IRVisitorWithAnalyzer {
 public:
-  TmaBarrierCollector(Map<Var, Buffer> buffer_data_to_buffer)
-      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
+  TmaBarrierCollector(Map<Var, Buffer> buffer_data_to_buffer,
+                      std::vector<PrimExpr> manual_barrier_ids)
+      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
+        manual_barrier_ids_(std::move(manual_barrier_ids)) {}
 
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id() {
     return tma_op_to_barrier_id_;
@@ -197,6 +263,15 @@ public:
   Map<PrimExpr, IntImm> barrier_id_to_range() { return barrier_id_to_range_; }
 
 private:
+  bool IsRecordedManualBarrier(const PrimExpr &barrier_id) const {
+    for (const auto &manual_barrier_id : manual_barrier_ids_) {
+      if (deep_equal_(manual_barrier_id, barrier_id)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   IntImm GetThreadExtentOrDefaultOne() {
     int64_t extent = 1;
     if (thread_var_.defined() &&
@@ -222,11 +297,24 @@ private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const auto *call = op->value.as<CallNode>()) {
       if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+        int barrier_arg_index = GetTmaBarrierArgIndex(call);
+        if (IsRecordedManualBarrier(call->args[barrier_arg_index])) {
+          StmtExprVisitor::VisitStmt_(op);
+          return;
+        }
         pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
       } else if (call->op.same_as(mbarrier_expect_tx())) {
+        if (IsRecordedManualBarrier(call->args[0])) {
+          StmtExprVisitor::VisitStmt_(op);
+          return;
+        }
         pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
       } else if (call->op.same_as(builtin::ptx_arrive_barrier())) {
         PrimExpr barrier_id = call->args[0];
+        if (IsRecordedManualBarrier(barrier_id)) {
+          StmtExprVisitor::VisitStmt_(op);
+          return;
+        }
         for (const auto &tma_call : pending_tma_ops_) {
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
@@ -239,6 +327,10 @@ private:
         // Treat this as a barrier release point for preceding TMA ops so we
         // can correctly associate tma_load/expect_tx with the right barrier.
         PrimExpr barrier_id = call->args[0];
+        if (IsRecordedManualBarrier(barrier_id)) {
+          StmtExprVisitor::VisitStmt_(op);
+          return;
+        }
         for (const auto &tma_call : pending_tma_ops_) {
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
@@ -246,6 +338,10 @@ private:
         pending_tma_ops_.clear();
       } else if (call->op.same_as(builtin::ptx_wait_barrier())) {
         PrimExpr barrier_id = call->args[0];
+        if (IsRecordedManualBarrier(barrier_id)) {
+          StmtExprVisitor::VisitStmt_(op);
+          return;
+        }
         UpdateBarrierRange(barrier_id, GetThreadExtentOrDefaultOne());
       }
     }
@@ -267,6 +363,8 @@ private:
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
   Map<Var, Buffer> buffer_data_to_buffer_;
+  std::vector<PrimExpr> manual_barrier_ids_;
+  ExprDeepEqual deep_equal_;
 };
 
 class TmaSequenceCollector : public IRVisitorWithAnalyzer {
@@ -548,7 +646,10 @@ public:
       single_warp_arrive = target.value()->kind->name == "musa";
     }
     f = TmaExpectTxRewriter::Rewrite(f, analyzer);
-    TmaBarrierCollector collector(buffer_data_to_buffer_);
+    auto [rewritten_body, manual_barrier_ids] =
+        ManualTmaBarrierIdRewriter::Rewrite(f->body);
+    f.CopyOnWrite()->body = std::move(rewritten_body);
+    TmaBarrierCollector collector(buffer_data_to_buffer_, manual_barrier_ids);
     collector(f->body);
     bool has_create_list_of_mbarrier = false;
     PostOrderVisit(f->body, [&](const ObjectRef &node) {
@@ -649,12 +750,12 @@ private:
 
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
+      bool is_1d_tma_load = Is1DTmaLoad(op);
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (!tma_op_to_barrier_id_.count(call_ref)) {
         // Promote raw integer barrier id to get_mbarrier(id) so codegen can
         // emit mbarrier[index]. This handles degenerate producer-only kernels
         // where no arrive()/expect mapping is recorded.
-        bool is_1d_tma_load = Is1DTmaLoad(op);
         if (is_1d_tma_load && op->args.size() >= 3) {
           if (const auto *imm = op->args[2].as<IntImmNode>()) {
             Array<PrimExpr> new_args = op->args;
@@ -676,7 +777,6 @@ private:
       }
       auto barrier_id = tma_op_to_barrier_id_[call_ref];
       auto new_args = op->args;
-      bool is_1d_tma_load = Is1DTmaLoad(op);
       if (is_1d_tma_load) {
         new_args.Set(2, barrier_id);
       } else {

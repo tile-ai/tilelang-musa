@@ -10,6 +10,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <string>
+
 #include "../op/builtin.h"
 #include "../runtime/runtime.h"
 #include "./common/mbarrier.h"
@@ -176,7 +178,8 @@ public:
         var = iter->second;
       } else {
         String name = call->args[2].as<Var>().value()->name_hint;
-        var = Var(name + "_desc",
+        int desc_index = static_cast<int>(desc_map_.size());
+        var = Var(name + "_desc_" + std::to_string(desc_index),
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
         desc_map_[tvm::ffi::GetRef<Call>(call)] = var;
         // prefetch_calls_.push_back(

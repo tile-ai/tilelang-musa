@@ -263,6 +263,7 @@ TVM_DLL const Op &create_tma_im2col_descriptor();
  */
 TVM_DLL const Op &create_list_of_mbarrier();
 TVM_DLL const Op &layout_marker();
+TVM_DLL const Op &manual_tma_barrier();
 
 /*!
  * \brief Get the mbarrier injected by compiler via barrier_id

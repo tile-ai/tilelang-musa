@@ -153,6 +153,11 @@ TIR_DEFINE_TL_BUILTIN(layout_marker)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(manual_tma_barrier)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(partial_barrier_sync)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",

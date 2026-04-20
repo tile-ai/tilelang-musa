@@ -124,6 +124,9 @@ public:
   //   - "disable_tma": Bool, whether to disable TMA acceleration
   //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
   //   2=last)
+  //   - "force_async_copy": IntImm, force MUSA async-copy lowering
+  //   - "src_robust_desc": PrimExpr, robust descriptor for guarded MUSA sources
+  //   - "barrier": PrimExpr, user-managed TMA mbarrier expression
   //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
   //     layout hint applied to the outermost generated parallel loop of this
   //     copy's SIMT loop nest.
@@ -175,6 +178,13 @@ public:
       return Downcast<PrimExpr>(val.value());
     }
     return PrimExpr();
+  }
+
+  PrimExpr GetTmaBarrier() const {
+    if (auto val = annotations.Get("barrier")) {
+      return Downcast<PrimExpr>(val.value());
+    }
+    return IntImm(DataType::Int(32), 0);
   }
 
   bool GetIsAsyncCopy() const {

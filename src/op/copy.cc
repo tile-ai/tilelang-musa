@@ -30,6 +30,22 @@ using namespace tir;
 
 namespace {
 
+static bool IsManualTmaBarrierExpr(const PrimExpr &barrier) {
+  if (const auto *call = barrier.as<CallNode>()) {
+    return call->op.same_as(manual_tma_barrier()) && call->args.size() == 1;
+  }
+  return false;
+}
+
+static PrimExpr UnwrapManualTmaBarrierExpr(const PrimExpr &barrier) {
+  if (const auto *call = barrier.as<CallNode>()) {
+    if (call->op.same_as(manual_tma_barrier()) && call->args.size() == 1) {
+      return call->args[0];
+    }
+  }
+  return barrier;
+}
+
 // Map TVM dtype to MUSA tensor descriptor dtype for MUSA TMA paths.
 static int to_MUtensorDescriptorDataType(DataType dtype) {
   MUtensorDescriptorDataType tp;
@@ -1664,8 +1680,14 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   Buffer global_tensor = is_load ? src : dst;
   Buffer shared_tensor = is_load ? dst : src;
   Buffer shared_tensor_unmapped = shared_tensor;
+  PrimExpr tma_barrier = GetTmaBarrier();
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
+  PrimExpr total_copy_bytes = shared_tensor->dtype.bytes();
+  for (const auto &range : shared_range) {
+    total_copy_bytes *= range->extent;
+  }
+  total_copy_bytes = analyzer->Simplify(total_copy_bytes);
   // TMA bulk copy cannot support a non-swizzled global layout, will be fallback
   // to normal copy
   if (T.layout_map.count(global_tensor)) {
@@ -2032,7 +2054,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     base_args.reserve(desc.rank + 4);
     base_args.push_back(create_descriptor);
     if (is_load)
-      base_args.push_back(0); // mbarrier id placeholder
+      base_args.push_back(tma_barrier);
 
     auto emit_tma_copy = [&](PrimExpr shared_addr,
                              const Array<PrimExpr> &coords) -> Stmt {
@@ -2078,7 +2100,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     args.reserve(desc.rank + 4);
     args.push_back(create_descriptor);
     if (is_load)
-      args.push_back(0); // mbarrier id placeholder
+      args.push_back(tma_barrier);
     if ((*inner_box_dim) != instruction_dim) {
       Var loop_var("i");
       int loop_extent = (*inner_box_dim) / instruction_dim;
@@ -2121,6 +2143,16 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     tma_copy = SeqStmt(std::move(seq));
   }
 
+  if (is_load && IsManualTmaBarrierExpr(tma_barrier)) {
+    Array<Stmt> seq;
+    seq.reserve(2);
+    seq.push_back(Evaluate(
+        Call(DataType::Handle(), mbarrier_expect_tx(),
+             {UnwrapManualTmaBarrierExpr(tma_barrier), total_copy_bytes})));
+    seq.push_back(tma_copy);
+    tma_copy = SeqStmt(std::move(seq));
+  }
+
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
 
   return tma_copy;
@@ -2139,6 +2171,7 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
   auto global_range = is_load ? src_range : dst_range;
   auto shared_tensor = is_load ? dst : src;
   auto global_tensor = is_load ? src : dst;
+  PrimExpr tma_barrier = GetTmaBarrier();
 
   PrimExpr shared_elements = 1;
   for (size_t i = 0; i < shared_range.size(); i++) {
@@ -2184,12 +2217,13 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
       is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, elements);
   PrimExpr global_addr = global_tensor.access_ptr(
       is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
+  PrimExpr total_copy_bytes =
+      analyzer->Simplify(elements * shared_tensor->dtype.bytes());
   Stmt tma_copy;
   if (is_load) {
-    // the zero is a placeholder for mbarrier ids
     tma_copy = Evaluate(
         Call(DataType::Handle(), tma_load(),
-             {shared_addr, global_addr, 0,
+             {shared_addr, global_addr, tma_barrier,
               elements * shared_tensor->dtype.bytes(), GetEvictionPolicy()}));
   } else {
     int need_reduce = 0;
@@ -2205,6 +2239,16 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
     seq.push_back(tma_copy);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    tma_copy = SeqStmt(std::move(seq));
+  }
+
+  if (is_load && IsManualTmaBarrierExpr(tma_barrier)) {
+    Array<Stmt> seq;
+    seq.reserve(2);
+    seq.push_back(Evaluate(
+        Call(DataType::Handle(), mbarrier_expect_tx(),
+             {UnwrapManualTmaBarrierExpr(tma_barrier), total_copy_bytes})));
+    seq.push_back(tma_copy);
     tma_copy = SeqStmt(std::move(seq));
   }
 
