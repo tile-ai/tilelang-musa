@@ -145,7 +145,7 @@ print(f"Latency: {latency} ms")
 
 For more examples, see the [MUSA MP31 Test Cases](./testing/musa/mp31/README.md) and [Common MUSA Test Cases](./testing/musa/common/README.md) documents.
 
-See the official [Tilelang documentation](https://tilelang.com/).
+See the official [Tilelang documentation](https://tilelang.com/) and [Tilelang MUSA Programming Guide](./docs/tilelang_musa_programming_guide.md).
 
 ## Acknowledgments
 
