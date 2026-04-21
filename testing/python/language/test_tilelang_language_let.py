@@ -3,24 +3,20 @@ import tilelang.testing
 from tilelang import language as T
 
 
+@tilelang.jit(target="musa")
+def test_kernel(
+    A: T.Tensor((16, 16), dtype=T.float32),
+):
+    for _blockIdx in T.thread_binding(1, thread="blockIdx.x"):
+        for _threadIdx in T.thread_binding(128, thread="threadIdx.x"):
+            b = A[0, 0:4]
+            A[0, 4:8] = b
+
+
 @tilelang.testing.requires_musa
-def let_vectorize_load():
-    @T.prim_func
-    def main(A_ptr: T.handle):
-        A = T.match_buffer(A_ptr, (16, 16), dtype=T.float32, align=16)
-
-        for _blockIdx in T.thread_binding(1, thread="blockIdx.x"):
-            for _threadIdx in T.thread_binding(128, thread="threadIdx.x"):
-                b = A[0, 0:4]
-                A[0, 4:8] = b
-
-    return main
-
-
 def test_let_vectorize_load():
-    program = let_vectorize_load()
-    kernel = tilelang.compile(program, target="musa")
-    assert "float4 b" in kernel.get_kernel_source()
+    kernel_source = test_kernel.get_kernel_source()
+    assert "tl_f4 b" in kernel_source
 
 
 if __name__ == "__main__":
