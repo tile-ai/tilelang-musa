@@ -1937,7 +1937,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   int split_count = 1;
   PrimExpr split_stride = 0;
   PrimExpr split_size_expr = 0;
-  if (TargetIsMusa(T.target) && is_load && desc.rank == 2) {
+  if (TargetIsMusa(T.target) && is_load) {
     auto sqmma_opt = GetLayoutSQMMA(T, shared_tensor);
     auto k_major_opt = GetLayoutKMajor(T, shared_tensor);
     if (!sqmma_opt.has_value() &&
@@ -1954,6 +1954,13 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
         k_major_opt.has_value() && sqmma_opt.value_or(false);
     if (is_musa_sqmma_tma_load) {
       auto n_dim = as_const_int(desc.smem_box[0]);
+      auto make_split_stride = [&](PrimExpr split_size) {
+        PrimExpr stride = split_size;
+        for (size_t i = 1; i < desc.smem_box.size(); ++i) {
+          stride *= desc.smem_box[i];
+        }
+        return analyzer->Simplify(stride);
+      };
       bool is_k_major = k_major_opt.value();
       if (!is_k_major) {
         int sqmma_inst_split =
@@ -1967,7 +1974,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
             (*n_dim) > sqmma_inst_split && ((*n_dim) % sqmma_inst_split) == 0) {
           split_count = (*n_dim) / sqmma_inst_split;
           split_size_expr = IntImm(DataType::Int(32), sqmma_inst_split);
-          split_stride = split_size_expr * desc.smem_box[1];
+          split_stride = make_split_stride(split_size_expr);
           desc.smem_box.Set(0, split_size_expr);
         }
       } else {
@@ -1977,7 +1984,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
             (*n_dim) * elem_bytes > 256 && ((*n_dim) % max_inner_elems) == 0) {
           split_count = (*n_dim) / max_inner_elems;
           split_size_expr = IntImm(DataType::Int(32), max_inner_elems);
-          split_stride = split_size_expr * desc.smem_box[1];
+          split_stride = make_split_stride(split_size_expr);
           desc.smem_box.Set(0, split_size_expr);
         }
       }
