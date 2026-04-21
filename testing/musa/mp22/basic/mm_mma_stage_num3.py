@@ -2,7 +2,6 @@ import argparse
 import tilelang
 import tilelang.language as T
 import torch
-from tilelang.utils.tensor import map_torch_type
 from tilelang import tvm as tvm
 from tvm.ir.instrument import PrintAfterAll
 from tilelang.tileop.base import GemmWarpPolicy
@@ -65,7 +64,7 @@ def run(M, N, K, bm, bn, bk, dtype, acc_type, num_warp, policy, verbose):
     if verbose >= 2:
         print(kernel.get_kernel_source())
 
-    pt_type = map_torch_type(dtype)
+    pt_type = T.dtype(dtype).as_torch()
     if pt_type is torch.float8_e4m3fn:
         a = torch.randint(low=-128, high=128, size=(M, K), device=DEVICE, dtype=torch.int8).to(pt_type)
         b = torch.randint(low=-128, high=128, size=(K, N), device=DEVICE, dtype=torch.int8).to(pt_type)

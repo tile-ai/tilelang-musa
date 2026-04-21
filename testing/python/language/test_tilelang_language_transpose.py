@@ -4,7 +4,6 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import torch
-from tilelang.utils import map_torch_type
 
 
 def tilelang_transpose(M, N, block_M, block_N, dtype=T.float16):
@@ -51,7 +50,7 @@ def run_tilelang_transpose(M=128, N=128, block_M=128, block_N=128, dtype=T.float
         target="musa",
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
-    torch_dtype = map_torch_type(dtype)
+    torch_dtype = T.dtype(dtype).as_torch()
     a = torch.randn(M, N, device="musa", dtype=torch_dtype)
     b = kernel(a)
     expected = a.T
@@ -93,7 +92,7 @@ def run_tilelang_transpose_square(M=256, block_M=128, dtype=T.float16):
         target="musa",
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
-    torch_dtype = map_torch_type(dtype)
+    torch_dtype = T.dtype(dtype).as_torch()
     a = torch.randn(M, M, device="musa", dtype=torch_dtype)
     b = kernel(a)
     expected = a.T

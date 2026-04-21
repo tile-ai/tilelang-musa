@@ -18,7 +18,6 @@ from tvm import DataType
 
 from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.utils.device import synchronize
-from tilelang.utils.tensor import map_torch_type
 
 
 M1_CASES = [
@@ -611,7 +610,7 @@ def _bench_m1_case(
     mode: str = "auto",
 ) -> list[BenchResult]:
     assert M == 1
-    torch_dtype = map_torch_type(dtype)
+    torch_dtype = T.dtype(dtype).as_torch()
     a = torch.randn(K, device="musa", dtype=torch_dtype)
     b = torch.randn(N, K, device="musa", dtype=torch_dtype)
     ref = None
@@ -709,7 +708,7 @@ def _bench_small_m_case(
     flush_buffers=None,
     mode: str = "auto",
 ) -> list[BenchResult]:
-    torch_dtype = map_torch_type(dtype)
+    torch_dtype = T.dtype(dtype).as_torch()
     a = torch.randn(M, K, device="musa", dtype=torch_dtype)
     b = torch.randn(N, K, device="musa", dtype=torch_dtype)
     a_pad16 = torch.zeros(16, K, device="musa", dtype=torch_dtype)

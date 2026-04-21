@@ -4,7 +4,6 @@ import tilelang.testing
 import tilelang.language as T
 import torch
 from tilelang.tileop.base import GemmWarpPolicy
-from tilelang.utils.tensor import map_torch_type
 
 tilelang.disable_cache()
 
@@ -43,7 +42,7 @@ def matmul_trans_b(A, B, block_M, block_N, block_K, dtype, accum_dtype, num_warp
 
 
 def _make_inputs(M, N, K, dtype):
-    torch_dtype = map_torch_type(dtype)
+    torch_dtype = T.dtype(dtype).as_torch()
     if torch_dtype is torch.float8_e4m3fn:
         a = torch.randint(-128, 128, (M, K), device="musa", dtype=torch.int8).to(torch_dtype)
         b = torch.randint(-128, 128, (N, K), device="musa", dtype=torch.int8).to(torch_dtype)
