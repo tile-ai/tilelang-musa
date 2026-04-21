@@ -6,7 +6,6 @@
 #include "tvm/ir/type.h"
 #include "tvm/tir/expr.h"
 #include "tvm/tir/stmt.h"
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/op.h>
@@ -174,11 +173,23 @@ private:
 
       PrimExpr index = load->indices[0];
       const auto *imm = index.as<IntImmNode>();
-      ICHECK(imm) << "shared.barrier index must be a constant integer";
-      ICHECK_GE(imm->value, 0);
-      ICHECK_LT(imm->value, static_cast<int64_t>(remap_vars.size()))
-          << "Barrier index out of range: " << imm->value;
-      return remap_vars[static_cast<int>(imm->value)];
+      int64_t remap_size = static_cast<int64_t>(remap_vars.size());
+      // fast path for constant index, directly return the corresponding barrier
+      // var
+      if (imm) {
+        ICHECK_GE(imm->value, 0);
+        ICHECK_LT(imm->value, remap_size)
+            << "Barrier index out of range: " << imm->value;
+        return remap_vars[static_cast<int>(imm->value)];
+      }
+
+      // Dynamic 1-D index maps to contiguous barrier ids:
+      //   mbars[idx] -> mbars_0 + idx
+      // where mbars_0 is the first placeholder-backed barrier id.
+      PrimExpr index_i32 = index.dtype() == DataType::Int(32)
+                               ? index
+                               : Cast(DataType::Int(32), index);
+      return Add(remap_vars[0], index_i32);
     }
     return load;
   }
