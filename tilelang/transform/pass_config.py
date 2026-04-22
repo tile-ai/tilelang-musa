@@ -283,6 +283,9 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_SQMMA = "tl.disable_sqmma"
     """Disable usage of PH1 SQMMA. Default: False"""
 
+    TL_DISABLE_PH1_WMMA = "tl.disable_ph1_wmma"
+    """Disable usage of PH1 WMMA. Default: False"""
+
     TL_ENABLE_MUSA_BURST = "tl.enable_musa_burst"
     """Enable MUSA burst SIMD vectorization when True. Default: False"""
 

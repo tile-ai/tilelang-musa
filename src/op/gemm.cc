@@ -285,10 +285,7 @@ GemmNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
     return std::nullopt;
   }
 
-  // The current PH1 WMMA layout hooks still lower through the generic
-  // fragment/shared-memory helpers, so keep the frontend on the subset that
-  // those layouts can already represent.
-  if (m_ % 16 != 0 || n_ % 8 != 0) {
+  if (m_ % 4 != 0 || n_ % 8 != 0) {
     return std::nullopt;
   }
 
@@ -305,13 +302,6 @@ GemmNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
 
   int warp_tile_m = m_ / warp_m;
   int warp_tile_n = n_ / warp_n;
-
-  // makePH1Wmma*Layout() is still backed by the generic MMA layouts for now,
-  // which require a 16x8-compatible warp tile. Once those hooks are
-  // specialized, this guard can be relaxed to expose the 8x16 path too.
-  if (warp_tile_m % 16 != 0 || warp_tile_n % 8 != 0) {
-    return std::nullopt;
-  }
 
   const auto &a_dtype = a_->dtype;
   const auto &b_dtype = b_->dtype;
@@ -406,6 +396,10 @@ bool GemmNode::AllowSQMMA(int block_size, Target target) const {
 }
 
 bool GemmNode::AllowPH1Wmma(int block_size, Target target) const {
+  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+  if (ctxt->GetConfig(kDisablePH1WMMA, Optional<Bool>()).value_or(false)) {
+    return false;
+  }
   return SelectPH1WmmaInstShape(block_size, target).has_value();
 }
 
@@ -451,12 +445,13 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
     kNPerWarp = 32;
   } else if (TargetIsCDNA(target)) {
     kNPerWarp = 16;
-  } else if (TargetIsPH1(target) && gemm_inst == GemmInst::kSQMMA) {
+  } else if (TargetIsPH1(target)) {
     kMPerWarp = 4;
     kNPerWarp = 8;
-  } else if (TargetIsPH1(target) && gemm_inst == GemmInst::kFMA) {
-    kMPerWarp = 1;
-    kNPerWarp = 1;
+    if (gemm_inst == GemmInst::kFMA) {
+      kMPerWarp = 1;
+      kNPerWarp = 1;
+    }
   }
   ICHECK(M % kMPerWarp == 0)
       << "M must be divisible by " << kMPerWarp << ", but got " << M;

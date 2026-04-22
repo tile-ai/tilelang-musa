@@ -9,6 +9,7 @@ tilelang.disable_cache()
 
 PASS_CONFIGS = {
     tilelang.PassConfigKey.TL_DISABLE_SQMMA: True,
+    tilelang.PassConfigKey.TL_DISABLE_PH1_WMMA: True,
 }
 
 
@@ -69,7 +70,7 @@ def _assert_case(elem_type, M, N, K, block_M, block_N, block_K):
 
 
 elem_type_list = [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
-size_list = [(1024, 1024, 1024)]
+size_list = [(256, 256, 256)]
 block_size_list = [(128, 128, 64), (32, 32, 32), (16, 16, 16), (8, 8, 8), (4, 4, 4), (2, 2, 2)]
 test_params = [
     (elem_type, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K)

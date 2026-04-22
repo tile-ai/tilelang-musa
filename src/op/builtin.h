@@ -72,6 +72,7 @@ static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableSQMMA = "tl.disable_sqmma";
+static constexpr const char *kDisablePH1WMMA = "tl.disable_ph1_wmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kEnableMusaBurst = "tl.enable_musa_burst";
 static constexpr const char *kEnableReduceBurst = "tl.enable_reduce_burst";
