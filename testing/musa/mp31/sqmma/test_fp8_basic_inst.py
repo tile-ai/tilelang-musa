@@ -7,10 +7,6 @@ import tilelang.language as T
 
 tilelang.disable_cache()
 
-WMMA_TOLERANCE_OVERRIDES = {
-    torch.float32: (1e-4, 1e-4),
-}
-
 
 def matmul(
     M,
@@ -109,25 +105,44 @@ def matmul(
     return gemm
 
 
+elem_type_list = [torch.float8_e4m3fn]
 size_list = [(256, 256, 256)]
-threads = 32
+threads = 128
 stage_list = [0, 2]
-type_block_list = [
-    (torch.float16, 16, 16, 32),
-    (torch.float16, 16, 16, 16),
-    (torch.float16, 16, 8, 16),
-    (torch.float16, 16, 8, 8),
-    (torch.bfloat16, 16, 16, 32),
-    (torch.bfloat16, 16, 16, 16),
-    (torch.bfloat16, 16, 8, 16),
-    (torch.bfloat16, 16, 8, 8),
-    (torch.float32, 16, 16, 16),
-    (torch.float32, 16, 8, 8),
-    (torch.float32, 16, 8, 4),
-    (torch.float8_e4m3fn, 16, 16, 64),
-    (torch.float8_e4m3fn, 16, 16, 32),
-    (torch.float8_e4m3fn, 16, 16, 16),
-    (torch.float8_e4m3fn, 16, 8, 16),
+block_list = [
+    (16, 64, 32),
+    (16, 64, 64),
+    (16, 64, 128),
+    (32, 32, 32),
+    (32, 32, 64),
+    (32, 32, 128),
+    (32, 64, 32),
+    (32, 64, 64),
+    (32, 64, 128),
+    (32, 128, 32),
+    (32, 128, 64),
+    (32, 128, 128),
+    (64, 16, 32),
+    (64, 16, 64),
+    (64, 16, 128),
+    (64, 32, 32),
+    (64, 32, 64),
+    (64, 32, 128),
+    (64, 64, 32),
+    (64, 64, 64),
+    (64, 64, 128),
+    (64, 128, 32),
+    (64, 128, 64),
+    (64, 128, 128),
+    (128, 32, 32),
+    (128, 32, 64),
+    (128, 32, 128),
+    (128, 64, 32),
+    (128, 64, 64),
+    (128, 64, 128),
+    (128, 128, 32),
+    (128, 128, 64),
+    (128, 128, 128),
 ]
 test_params = [
     (
@@ -144,8 +159,9 @@ test_params = [
         trans_B,
         disable_ws_tma,
     )
+    for elem_type in elem_type_list
     for (M, N, K) in size_list
-    for (elem_type, BLOCK_M, BLOCK_N, BLOCK_K) in type_block_list
+    for (BLOCK_M, BLOCK_N, BLOCK_K) in block_list
     for stages in stage_list
     for (trans_A, trans_B) in [(False, False), (True, True)]
     for disable_ws_tma in [False, True]
@@ -192,7 +208,6 @@ def test_mm_kernel(
         accum_dtype="float32",
     )
     pass_configs = {
-        tilelang.PassConfigKey.TL_DISABLE_SQMMA: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: disable_ws_tma,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: disable_ws_tma,
     }
@@ -210,7 +225,6 @@ def test_mm_kernel(
     rtol, atol = tilelang.testing.get_tolerance(
         elem_type,
         profile="gemm_contract",
-        overrides=WMMA_TOLERANCE_OVERRIDES,
     )
     ref_out = (logical_A.float() @ logical_B.float()).to(elem_type)
     C = kernel(A, B)
@@ -223,7 +237,7 @@ def test_mm_kernel(
     print(
         f"elem_type={elem_type}, M={M}, N={N}, K={K}, BLOCK_M={BLOCK_M}, "
         f"BLOCK_N={BLOCK_N}, BLOCK_K={BLOCK_K}, threads={threads}, "
-        f"trans_A={trans_A}, trans_B={trans_B}, "
+        f"stages={stages}, trans_A={trans_A}, trans_B={trans_B}, "
         f"disable_ws_tma={disable_ws_tma}"
     )
     print("Pass")
@@ -231,14 +245,14 @@ def test_mm_kernel(
 
 def main():
     test_mm_kernel(
-        elem_type=torch.float16,
+        elem_type=torch.float8_e4m3fn,
         M=256,
         N=256,
         K=256,
         BLOCK_M=16,
-        BLOCK_N=16,
+        BLOCK_N=64,
         BLOCK_K=32,
-        threads=32,
+        threads=128,
         stages=0,
         trans_A=False,
         trans_B=False,

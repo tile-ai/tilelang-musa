@@ -446,11 +446,15 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
   } else if (TargetIsCDNA(target)) {
     kNPerWarp = 16;
   } else if (TargetIsPH1(target)) {
-    kMPerWarp = 4;
-    kNPerWarp = 8;
     if (gemm_inst == GemmInst::kFMA) {
       kMPerWarp = 1;
       kNPerWarp = 1;
+    } else if (gemm_inst == GemmInst::kPH1WMMA) {
+      kMPerWarp = 8;
+      kNPerWarp = 8;
+    } else {
+      kMPerWarp = 4;
+      kNPerWarp = 8;
     }
   }
   ICHECK(M % kMPerWarp == 0)
