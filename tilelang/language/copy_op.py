@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import Literal, Any
-from tilelang._typing import BufferLikeType
+from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.language.frame import get_let_value, has_let_value
 from tilelang.utils.language import (
     to_buffer_region,
@@ -62,7 +62,7 @@ def copy(
     force_async_copy: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     src_robust_desc: tir.PrimExpr | None = None,
-    barrier: tir.Buffer | None = None,
+    barrier: BarrierType | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tir.PrimExpr | tir.Stmt:
@@ -78,7 +78,7 @@ def copy(
         eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
         src_robust_desc (Optional[tir.PrimExpr], keyword-only): MUSA robust source
             descriptor created by `T.make_robust_desc(addr, size_bytes)`.
-        barrier (Optional[tir.Buffer], keyword-only):
+        barrier (Optional[BarrierType], keyword-only):
             User-managed `shared.barrier` for TMA load synchronization. When
             provided, TileLang emits the TMA load against this barrier and
             leaves `T.barrier_arrive` / `T.barrier_wait` under user control.
@@ -125,11 +125,20 @@ def copy(
         raise ValueError("src_robust_desc must be created by T.make_robust_desc(addr, size_bytes)")
     barrier_expr = None
     if barrier is not None:
-        if barrier.scope() != "shared.barrier":
-            raise ValueError(f"barrier must be a tir.Buffer with scope 'shared.barrier', but got scope {barrier.scope()!r}")
-        if len(barrier.shape) != 1:
-            raise ValueError(f"barrier must be a 1-D buffer, but got shape {barrier.shape}")
-        barrier_expr = _manual_tma_barrier(tir.BufferLoad(barrier, [0]))
+        if isinstance(barrier, tir.Buffer):
+            barrier_load = tir.BufferLoad(barrier, [0])
+        elif isinstance(barrier, tir.BufferLoad):
+            barrier_load = barrier
+        else:
+            raise TypeError(f"barrier must be a tir.Buffer or tir.BufferLoad, but got {type(barrier)}")
+        barrier_buf = barrier_load.buffer
+        if barrier_buf.scope() != "shared.barrier":
+            raise ValueError(f"barrier must be in scope 'shared.barrier', but got scope {barrier_buf.scope()!r}")
+        if len(barrier_buf.shape) != 1:
+            raise ValueError(f"barrier must come from a 1-D buffer, but got shape {barrier_buf.shape}")
+        if len(barrier_load.indices) != 1:
+            raise ValueError(f"barrier index must be 1-D, but got {len(barrier_load.indices)} indices")
+        barrier_expr = _manual_tma_barrier(barrier_load)
 
     if isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
         if barrier_expr is not None:
