@@ -21,7 +21,9 @@
  */
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -38,7 +40,6 @@
 #include "../target/utils.h"
 #include "common/mbarrier.h"
 #include "multi_version_buffer_rewriter.h"
-#include "warp_specialized_rewriter.h"
 
 namespace tvm {
 namespace tl {
@@ -363,7 +364,7 @@ private:
   }
 
   void VisitStmt_(const BlockNode *op) final {
-    CollectBuffers(GetRef<Block>(op));
+    CollectBuffers(ffi::GetRef<Block>(op));
     StmtExprVisitor::VisitStmt_(op);
   }
 
@@ -424,7 +425,7 @@ private:
   }
 
   void VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
+    Var var = ffi::GetRef<Var>(op);
     if (bound_vars_.count(var) || buffer_data_to_buffer_.count(var)) {
       return;
     }
@@ -488,7 +489,7 @@ private:
       ICHECK_EQ(op->args.size(), 5);
       const auto *var = op->args[1].as<VarNode>();
       ICHECK(var);
-      auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+      auto it = buffer_data_to_buffer_.find(ffi::GetRef<Var>(var));
       if (it != buffer_data_to_buffer_.end() &&
           IsBranchPrivateBuffer(it->second)) {
         int rw_mask = GetConstAccessMask(op->args[4]);
@@ -1032,7 +1033,7 @@ AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
         ICHECK_EQ(op->args.size(), 5);
         const auto *var = op->args[1].as<VarNode>();
         ICHECK(var);
-        auto it = buffer_map_.find(GetRef<Var>(var));
+        auto it = buffer_map_.find(ffi::GetRef<Var>(var));
         if (it != buffer_map_.end() && it->second->data.same_as(buffer_data_)) {
           MarkAccess(op->args[4]);
         }
@@ -2031,7 +2032,7 @@ private:
     ws_transformed_ = true;
 
     // Rebuild BlockRealize.
-    BlockRealize new_realize = GetRef<BlockRealize>(orig_realize);
+    BlockRealize new_realize = ffi::GetRef<BlockRealize>(orig_realize);
     new_realize.CopyOnWrite()->block = new_block;
     return new_realize;
   }
@@ -2105,7 +2106,7 @@ private:
       if (!SameExpr(ge->b, consumer_extent_)) {
         return false;
       }
-      *branch = GetRef<IfThenElse>(if_node);
+      *branch = ffi::GetRef<IfThenElse>(if_node);
       return true;
     }
 
@@ -2336,7 +2337,7 @@ private:
       }
       Block block = realize->block;
       block.CopyOnWrite()->body = result.stmt;
-      BlockRealize new_realize = GetRef<BlockRealize>(realize);
+      BlockRealize new_realize = ffi::GetRef<BlockRealize>(realize);
       new_realize.CopyOnWrite()->block = block;
       return {new_realize, true};
     }
@@ -2346,7 +2347,7 @@ private:
       if (!result.found) {
         return {stmt, false};
       }
-      Block new_block = GetRef<Block>(block);
+      Block new_block = ffi::GetRef<Block>(block);
       new_block.CopyOnWrite()->body = result.stmt;
       return {new_block, true};
     }
@@ -2356,7 +2357,7 @@ private:
       if (!result.found) {
         return {stmt, false};
       }
-      AttrStmt new_attr = GetRef<AttrStmt>(attr);
+      AttrStmt new_attr = ffi::GetRef<AttrStmt>(attr);
       new_attr.CopyOnWrite()->body = result.stmt;
       return {new_attr, true};
     }

@@ -87,17 +87,6 @@ def InjectSoftwarePipeline():
     return _ffi_api.InjectSoftwarePipeline()  # type: ignore
 
 
-def FrontendLegalize():
-    """FrontendLegalize
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.FrontendLegalize()  # type: ignore
-
-
 def LegalizeNegativeIndex():
     """Legalize negative indices in buffer loads.
 
@@ -508,11 +497,6 @@ def FlattenBuffer():
     return _ffi_api.FlattenBuffer()  # type: ignore
 
 
-def EliminateStorageSyncForMBarrier():
-    """EliminateStorageSyncForMBarrier"""
-    return _ffi_api.EliminateStorageSyncForMBarrier()  # type: ignore
-
-
 def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_bytes: int = 16):
     """MergeSharedMemoryAllocations
 
@@ -537,20 +521,6 @@ def MarkCudaSyncCalls(have_pdl: bool = False):
 def PersistThreadblock():
     """PersistThreadblock"""
     return _ffi_api.PersistThreadblock()  # type: ignore
-
-
-def AlignDynamicSharedMemoryAllocations(align_bytes: int = 16):
-    """AlignDynamicSharedMemoryAllocations
-
-    Parameters
-    ----------
-    align_bytes: int
-        The alignment bytes.
-
-    Returns
-    -------
-    """
-    return _ffi_api.AlignDynamicSharedMemoryAllocations(align_bytes)  # type: ignore
 
 
 def LowerSharedBarrier():
