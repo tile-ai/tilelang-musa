@@ -5,146 +5,99 @@ import pytest
 
 
 @tilelang.jit
-def simple_invalid_loop(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
-    A = T.dynamic("A")
-
-    @T.prim_func
-    def main(
-        data: T.Tensor((128, A), dtype),  # type: ignore
-    ):
-        with T.Kernel(128, threads=num_threads) as (tid,):
-            data_frag = T.alloc_fragment([128], accum_dtype)
-
-            for i in T.Parallel(128):
-                if i < A:
-                    data_frag[i] = data[tid, i]
-
-            for i in T.Parallel(A):
-                data_frag[i] = 0
-
-    return main
+def simple_invalid_loop(A):
+    with T.Kernel(1, threads=128) as _:
+        data_frag = T.alloc_fragment([128], T.float32)
+        for i in T.Parallel(A):
+            data_frag[i] = 0
 
 
 @tilelang.jit
-def nested_invalid_loop(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
-    A = T.dynamic("A")
+def nested_invalid_loop(A):
+    with T.Kernel(1, threads=128) as _:
+        data_frag = T.alloc_fragment([128], T.float32)
 
-    @T.prim_func
-    def main(
-        data: T.Tensor((128, A), dtype),  # type: ignore
-    ):
-        with T.Kernel(128, threads=num_threads) as (tid,):
-            data_frag = T.alloc_fragment([128], accum_dtype)
-
-            for i in T.Parallel(128):
-                if i < A:
-                    data_frag[i] = data[tid, i]
-
-            for i in T.Parallel(A // 64):
-                for j in T.Parallel(64):
-                    data_frag[i * 64 + j] = 0
-
-    return main
+        for i in T.Parallel(A // 64):
+            for j in T.Parallel(64):
+                data_frag[i * 64 + j] = 0
 
 
 @tilelang.jit
-def invalid_loop_with_complex_dataflow(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
-    A = T.dynamic("A")
+def invalid_loop_with_complex_dataflow(A):
+    with T.Kernel(1, threads=128) as _:
+        data_frag = T.alloc_fragment([128], T.float32)
 
-    @T.prim_func
-    def main(
-        data: T.Tensor((128, A), dtype),  # type: ignore
-    ):
-        with T.Kernel(128, threads=num_threads) as (tid,):
-            data_frag = T.alloc_fragment([128], accum_dtype)
-
-            for i in T.Parallel(128):
-                if i < A:
-                    data_frag[i] = data[tid, i]
-
-            for i in T.Parallel(A):
-                data_frag[64 // 2 + i % 64] = 0
-
-    return main
+        for i in T.Parallel(A):
+            data_frag[i // 64 + i % 64] = 0
 
 
 @tilelang.jit
-def valid_loop_not_use_loop_var(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
-    A = T.dynamic("A")
-
-    @T.prim_func
-    def main(
-        data: T.Tensor((128, A), dtype),  # type: ignore
-    ):
-        with T.Kernel(128, threads=num_threads) as (tid,):
-            data_frag = T.alloc_fragment([128], accum_dtype)
-
-            for i in T.Parallel(128):
-                if i < A:
-                    data_frag[i] = data[tid, i]
-
-            for i in T.Parallel(A):  # noqa: B007
-                for j in T.Parallel(64):
-                    data_frag[j] = 0  # This is valid because we don't use i
-
-    return main
+def invalid_fragment_load(A):
+    with T.Kernel(1, threads=128) as _:
+        data_frag = T.alloc_fragment([128], T.float32)
+        data_shared = T.alloc_shared([128], T.float32)
+        for i in T.serial(128):
+            data_frag[i] = 0
+        for i in T.Parallel(A):
+            data_shared[i] = data_frag[i]
 
 
 @tilelang.jit
-def valid_loop_not_frag(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
-    A = T.dynamic("A")
+def valid_loop_not_use_loop_var(A):
+    with T.Kernel(1, threads=128) as _:
+        data_frag = T.alloc_fragment([128], T.float32)
 
-    @T.prim_func
-    def main(
-        data: T.Tensor((128, A), dtype),  # type: ignore
-    ):
-        with T.Kernel(128, threads=num_threads) as (tid,):
-            data_shared = T.alloc_shared([128], accum_dtype)
-
-            for i in T.Parallel(128):
-                if i < A:
-                    data_shared[i] = data[tid, i]
-
-            for i in T.Parallel(A):
-                data_shared[i] = 0  # Valid because this is shared memory
-
-    return main
+        for i in T.Parallel(A):  # noqa: B007
+            for j in T.Parallel(64):
+                data_frag[j] = 0  # This is valid because we don't use i
 
 
 @tilelang.jit
-def valid_loop_serial(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
-    A = T.dynamic("A")
+def valid_loop_use_shared(A):
+    with T.Kernel(1, threads=128) as _:
+        data_shared = T.alloc_shared([128], T.float32)
 
-    @T.prim_func
-    def main(
-        data: T.Tensor((128, A), dtype),  # type: ignore
-    ):
-        with T.Kernel(128, threads=num_threads) as (tid,):
-            data_shared = T.alloc_shared([128], accum_dtype)
+        for i in T.Parallel(A):
+            data_shared[i] = 0  # Valid because this is shared memory
 
-            for i in T.Parallel(128):
-                if i < A:
-                    data_shared[i] = data[tid, i]
 
-            for i in T.serial(A):
-                data_shared[i] = 0  # Valid because this is serial
+@tilelang.jit
+def valid_loop_use_local(A):
+    with T.Kernel(1, threads=128) as _:
+        data_local = T.alloc_local([128], T.float32)
 
-    return main
+        for i in T.Parallel(A):
+            data_local[i] = 0  # Valid because this is local memory
+
+
+@tilelang.jit
+def valid_loop_serial(A):
+    with T.Kernel(1, threads=128) as _:
+        data_frag = T.alloc_fragment([128], T.float32)
+
+        for i in T.serial(A):
+            data_frag[i] = 0  # Valid because this is serial
 
 
 def test_invalid_loop():
-    with pytest.raises(ValueError):
-        simple_invalid_loop()
-    with pytest.raises(ValueError):
-        nested_invalid_loop()
-    with pytest.raises(ValueError):
-        invalid_loop_with_complex_dataflow()
+    for case in [
+        simple_invalid_loop,
+        nested_invalid_loop,
+        invalid_loop_with_complex_dataflow,
+        invalid_fragment_load,
+    ]:
+        with pytest.raises(ValueError, match="fragment buffer"):
+            case.compile(A=T.dynamic("A"))
 
 
 def test_valid_loop():
-    valid_loop_not_use_loop_var()
-    valid_loop_not_frag()
-    valid_loop_serial()
+    for case in [
+        valid_loop_not_use_loop_var,
+        valid_loop_use_shared,
+        valid_loop_use_local,
+        valid_loop_serial,
+    ]:
+        case.compile(A=T.dynamic("A"))
 
 
 if __name__ == "__main__":
