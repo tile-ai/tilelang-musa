@@ -740,6 +740,11 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 
 void CodeGenTileLangMUSA::PrintVecConstructor(DataType t,
                                               std::ostream &os) { // NOLINT(*)
+  if (UseMusaNative16BitVector(t)) {
+    os << "make_";
+    PrintType(t, os);
+    return;
+  }
   if (t.is_float() && t.bits() == 32) {
     if (t.lanes() == 2) {
       os << "make_float2";
