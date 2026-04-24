@@ -333,6 +333,30 @@ def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_fdiv"), x, y, rounding_mode)
 
 
+_PACKED_X2_DTYPES = frozenset({"float32x2", "bfloat16x2", "float16x2"})
+
+
+def _validate_packed_x2_args(*args: PrimExpr) -> None:
+    for arg in args:
+        if not isinstance(arg, PrimExpr):
+            raise TypeError(f"Expected PrimExpr, got {type(arg)}: {arg}")
+        if arg.dtype not in _PACKED_X2_DTYPES:
+            raise ValueError(f"Expected dtype in {sorted(_PACKED_X2_DTYPES)}, got '{arg.dtype}'")
+
+
+def _packed_x2_lane(x: PrimExpr, lane: int) -> PrimExpr:
+    return tir.Shuffle([x], [lane])
+
+
+def _pack_x2(lo: PrimExpr, hi: PrimExpr) -> PrimExpr:
+    return tir.Shuffle([lo, hi], [0, 1])
+
+
+def _abs_scalar(x: PrimExpr) -> PrimExpr:
+    zero = tir.const(0, x.dtype)
+    return tir.Select(x < zero, -x, x)
+
+
 def _validate_f32x2_math_args(*args: PrimExpr) -> None:
     for arg in args:
         if not isinstance(arg, PrimExpr):
@@ -403,6 +427,35 @@ def fma_f32x2(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
     return fma2(x, y, z)
 
 
+def max2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed element-wise maximum."""
+    x = tir.convert(x)
+    y = tir.convert(y)
+    _validate_packed_x2_args(x, y)
+    return _pack_x2(
+        tir.max(_packed_x2_lane(x, 0), _packed_x2_lane(y, 0)),
+        tir.max(_packed_x2_lane(x, 1), _packed_x2_lane(y, 1)),
+    )
+
+
+def min2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed element-wise minimum."""
+    x = tir.convert(x)
+    y = tir.convert(y)
+    _validate_packed_x2_args(x, y)
+    return _pack_x2(
+        tir.min(_packed_x2_lane(x, 0), _packed_x2_lane(y, 0)),
+        tir.min(_packed_x2_lane(x, 1), _packed_x2_lane(y, 1)),
+    )
+
+
+def abs2(x: PrimExpr) -> PrimExpr:
+    """Packed element-wise absolute value."""
+    x = tir.convert(x)
+    _validate_packed_x2_args(x)
+    return _pack_x2(_abs_scalar(_packed_x2_lane(x, 0)), _abs_scalar(_packed_x2_lane(x, 1)))
+
+
 __all__ = [
     "__log",  # noqa: F401
     "__log2",  # noqa: F401
@@ -423,4 +476,7 @@ __all__ = [
     "fadd2",  # noqa: F401
     "fmul2",  # noqa: F401
     "fma2",  # noqa: F401
+    "max2",  # noqa: F401
+    "min2",  # noqa: F401
+    "abs2",  # noqa: F401
 ]
