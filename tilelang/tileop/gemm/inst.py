@@ -10,6 +10,8 @@ class GemmInst(IntEnum):
     MFMA = 3
     FMA = 4
     SQMMA = 5
+    # Keep numeric values aligned with src/op/gemm.h.
+    Scalar = 7
 
     def is_mma(self) -> bool:
         return self == GemmInst.MMA
@@ -28,6 +30,9 @@ class GemmInst(IntEnum):
 
     def is_sqmma(self) -> bool:
         return self == GemmInst.SQMMA
+
+    def is_scalar(self) -> bool:
+        return self == GemmInst.Scalar
 
     def __repr__(self) -> str:
         return self.name

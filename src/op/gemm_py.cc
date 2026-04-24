@@ -135,6 +135,8 @@ GemmInst GemmPyNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kMMA;
   } else if (TargetIsPH1(target)) {
     return allow_sqmma ? GemmInst::kSQMMA : GemmInst::kFMA;
+  } else if (TargetIsCPU(target)) {
+    return GemmInst::kScalar;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
     return GemmInst::kMMA; // This line will never be reached due to ICHECK, but

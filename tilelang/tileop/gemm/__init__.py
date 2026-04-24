@@ -13,6 +13,7 @@ from .gemm_tcgen05 import GemmTCGEN5
 from .gemm_mfma import GemmMFMA
 from .gemm_fma import GemmFMA
 from .gemm_sqmma import GemmSQMMA
+from .gemm_scalar import GemmScalar
 from tilelang import _ffi_api
 from tilelang.utils.target import target_is_volta
 
@@ -128,10 +129,11 @@ class GemmPy(Node, Scriptable):
         """Select the appropriate GEMM instruction based on target and thread configuration.
 
         The selection logic follows this priority:
-        1. WGMMA for Hopper architecture with sufficient matrix size and warp count
-        2. MFMA for CDNA (AMD) architecture
-        3. MMA for CUDA architecture
-        4. Fallback to MMA for other cases
+        1. TCGEN5MMA for Blackwell architecture
+        2. WGMMA for Hopper architecture with sufficient matrix size and warp count
+        3. MFMA for CDNA (AMD) architecture
+        4. MMA for CUDA architecture
+        5. Scalar for CPU target (scalar fallback)
 
         Args:
             thread_nums: Number of threads in the block
@@ -170,5 +172,7 @@ class GemmPy(Node, Scriptable):
             return GemmFMA
         elif gemm_inst.is_sqmma():
             return GemmSQMMA
+        elif gemm_inst.is_scalar():
+            return GemmScalar
         else:
             raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")

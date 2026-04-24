@@ -420,6 +420,8 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
       return GemmInst::kPH1WMMA;
     }
     return GemmInst::kFMA;
+  } else if (TargetIsCPU(target)) {
+    return GemmInst::kScalar;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target;
     return GemmInst::kMMA;
@@ -740,6 +742,59 @@ static int GetArchInt(Target target) {
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = getGemmInst(block_size, T.target);
+  if (TargetIsCPU(T.target) && gemm_inst == GemmInst::kScalar) {
+    auto clear_accum_bool = clearAccum_.as<Bool>();
+    ICHECK(clear_accum_bool.has_value())
+        << "clear_accum must be a constant Bool type, got " << clearAccum_;
+
+    auto A_buffer = aRegion_->buffer;
+    auto B_buffer = bRegion_->buffer;
+    auto C_buffer = cRegion_->buffer;
+
+    PrimExpr a0 = aRegion_->region[0]->min;
+    PrimExpr a1 = aRegion_->region[1]->min;
+    PrimExpr b0 = bRegion_->region[0]->min;
+    PrimExpr b1 = bRegion_->region[1]->min;
+    PrimExpr c0 = cRegion_->region[0]->min;
+    PrimExpr c1 = cRegion_->region[1]->min;
+
+    Var i("i", DataType::Int(32));
+    Var j("j", DataType::Int(32));
+    Var k("k", DataType::Int(32));
+
+    Buffer accum_buf = decl_buffer({IntImm(DataType::Int(32), 1)}, c_->dtype,
+                                   "accum", "local");
+    PrimExpr init_val = clear_accum_bool.value()
+                            ? make_const(c_->dtype, 0)
+                            : BufferLoad(C_buffer, {c0 + i, c1 + j});
+    Stmt init = BufferStore(accum_buf, init_val, {0});
+
+    Array<PrimExpr> a_indices{
+        a0 + (transA_ ? PrimExpr(k) : PrimExpr(i)),
+        a1 + (transA_ ? PrimExpr(i) : PrimExpr(k)),
+    };
+    Array<PrimExpr> b_indices{
+        b0 + (transB_ ? PrimExpr(j) : PrimExpr(k)),
+        b1 + (transB_ ? PrimExpr(k) : PrimExpr(j)),
+    };
+    PrimExpr a_val = Cast(c_->dtype, BufferLoad(A_buffer, a_indices));
+    PrimExpr b_val = Cast(c_->dtype, BufferLoad(B_buffer, b_indices));
+    PrimExpr update_val = BufferLoad(accum_buf, {0}) + a_val * b_val;
+    Stmt update = BufferStore(accum_buf, update_val, {0});
+    Stmt k_loop =
+        For(k, 0, IntImm(DataType::Int(32), k_), ForKind::kSerial, update);
+
+    Stmt store_c =
+        BufferStore(C_buffer, BufferLoad(accum_buf, {0}), {c0 + i, c1 + j});
+    Stmt body = SeqStmt({init, k_loop, store_c});
+    Stmt j_loop =
+        For(j, 0, IntImm(DataType::Int(32), n_), ForKind::kSerial, body);
+    Stmt i_loop =
+        For(i, 0, IntImm(DataType::Int(32), m_), ForKind::kSerial, j_loop);
+    return Allocate(accum_buf->data, accum_buf->dtype, accum_buf->shape,
+                    const_true(), i_loop);
+  }
+
   auto [warp_m, warp_n] =
       policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
   std::optional<std::array<int, 3>> ph1_mma_inst = std::nullopt;
@@ -993,6 +1048,10 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
   GemmInst gemm_inst = getGemmInst(block_size, T.target);
+  if (TargetIsCPU(T.target) && gemm_inst == GemmInst::kScalar) {
+    completed_ = true;
+    return {};
+  }
   auto [warp_m, warp_n] =
       policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
   if (TargetIsVolta(T.target)) {

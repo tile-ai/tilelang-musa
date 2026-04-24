@@ -16,6 +16,7 @@ bool TargetIsCuda(Target target);
 bool TargetIsMusa(Target target);
 bool TargetIsRocm(Target target);
 bool TargetIsMetal(Target target);
+bool TargetIsCPU(Target target);
 
 bool TargetIsVolta(Target target);
 bool TargetIsTuring(Target target);
