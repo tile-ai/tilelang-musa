@@ -200,11 +200,15 @@ def _bench_with_cupti(
     # Calculate average kernel time, excluding cache-clearing overhead
     total_cuda_time = 0.0
     excluded_time = 0.0
-    excluded_kernels = "at::native::vectorized_elementwise"
+    excluded_kernels = ["at::native::vectorized_elementwise"]
+    if IS_MUSA:
+        # torch_musa lowers cache.zero_() to a KernelFill kernel instead of
+        # the CUDA/PyTorch vectorized_elementwise name.
+        excluded_kernels.append("KernelFill<")
 
     for event in profiler.key_averages():
         total_cuda_time += event.self_device_time_total
-        if excluded_kernels in event.key:
+        if any(kernel_name in event.key for kernel_name in excluded_kernels):
             excluded_time += event.self_device_time_total
 
     kernel_time_us = (total_cuda_time - excluded_time) / n_repeat
