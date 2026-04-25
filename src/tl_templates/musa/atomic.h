@@ -66,6 +66,27 @@ template <typename T> TL_DEVICE T BitCastFromI32(int bits) {
   return caster.value;
 }
 
+template <typename T> TL_DEVICE unsigned long long BitCastToU64(T value) {
+  static_assert(sizeof(T) == sizeof(unsigned long long));
+  union {
+    T value;
+    unsigned long long bits;
+  } caster;
+  caster.value = value;
+  return caster.bits;
+}
+
+template <typename T>
+TL_DEVICE T BitCastFromU64(unsigned long long bits) {
+  static_assert(sizeof(T) == sizeof(unsigned long long));
+  union {
+    unsigned long long bits;
+    T value;
+  } caster;
+  caster.bits = bits;
+  return caster.value;
+}
+
 template <typename T1, typename T2>
 TL_DEVICE void AtomicMax(T1 &ref, T2 val, int memory_order = 0) {
   (void)memory_order;
@@ -219,12 +240,17 @@ TL_DEVICE T1 AtomicMinRet(T1 &ref, T2 val, int memory_order = 0) {
 template <typename T1, typename T2>
 TL_DEVICE void AtomicAdd(T1 &ref, T2 val, int memory_order = 0) {
   (void)memory_order;
-  static_assert(!std::is_same_v<T1, int64_t>,
-                "atomicAdd for int64_t is not supported");
   using RawT = std::remove_cv_t<T1>;
   using NT1 = typename normalize_atomic_type<RawT>::type;
   RawT *address = reinterpret_cast<RawT *>(&ref);
-  atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
+  if constexpr (std::is_same_v<RawT, int64_t>) {
+    // MTCC exposes 64-bit integer atomicAdd through the unsigned long long
+    // overload, so preserve the signed payload as raw bits on the way in.
+    atomicAdd(reinterpret_cast<NT1 *>(address),
+              BitCastToU64(static_cast<RawT>(val)));
+  } else {
+    atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
+  }
 }
 
 template <typename T1, typename T2>
@@ -233,8 +259,14 @@ TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val, int memory_order = 0) {
   using RawT = std::remove_cv_t<T1>;
   using NT1 = typename normalize_atomic_type<RawT>::type;
   RawT *address = reinterpret_cast<RawT *>(&ref);
-  return static_cast<T1>(
-      atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
+  if constexpr (std::is_same_v<RawT, int64_t>) {
+    auto old = atomicAdd(reinterpret_cast<NT1 *>(address),
+                         BitCastToU64(static_cast<RawT>(val)));
+    return static_cast<T1>(BitCastFromU64<RawT>(old));
+  } else {
+    return static_cast<T1>(
+        atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
+  }
 }
 
 // Helper to get integer type of same size for atomic operations
