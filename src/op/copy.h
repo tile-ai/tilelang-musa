@@ -320,8 +320,11 @@ protected:
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
+   * \param disable_safe_copy_predication Whether to omit automatic src/dst
+   *        safety predicates for this SIMT copy loop.
    */
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
+  For MakeSIMTLoop(arith::Analyzer *analyzer,
+                   bool disable_safe_copy_predication = false) const;
 
   /*!
    * \brief Compute linear layout for tma copy.

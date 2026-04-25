@@ -489,7 +489,8 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
 }
 
 // Constructs a SIMT-style nested loop that implements the copy.
-For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
+For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer,
+                           bool disable_safe_copy_predication) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
 
@@ -508,8 +509,12 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
-  PrimExpr src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
-  PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
+  PrimExpr src_predicate;
+  PrimExpr dst_predicate;
+  if (!disable_safe_copy_predication) {
+    src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
+    dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
+  }
 
   PrimExpr value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
@@ -1144,9 +1149,15 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
 // Lowers the copy using standard load/store with loop transformations.
 Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  bool disable_safe_copy_predication =
+      pass_ctx->GetConfig<Bool>(kDisableSafeCopyPredication, Bool(false))
+          .value();
+
   auto lower_single_copy = [&](const CopyNode &node) -> Stmt {
     bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
-    auto simt_loop = node.MakeSIMTLoop(analyzer);
+    auto simt_loop = node.MakeSIMTLoop(analyzer, disable_safe_copy_predication);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
     Stmt lowered_body;

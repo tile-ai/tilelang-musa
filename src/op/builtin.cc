@@ -19,6 +19,8 @@ namespace tl {
 TVM_REGISTER_PASS_CONFIG_OPTION(kDebugMergeSharedMemoryAllocations, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSafeMemoryLegalize, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSafeCopyPredication, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSafeRobustCopyPredication, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWarpSpecialized, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableThreadStorageSync, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kConfigIndexBitwidth, Integer);

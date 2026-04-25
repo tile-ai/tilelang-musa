@@ -36,7 +36,12 @@ public:
                                 bool disable_force_async_wait = false)
       : enable_auto_async_copy_(enable_auto_async_copy),
         async_without_async_commit_wait_(async_without_async_commit_wait),
-        disable_force_async_wait_(disable_force_async_wait) {}
+        disable_force_async_wait_(disable_force_async_wait),
+        disable_safe_robust_copy_predication_(
+            tvm::transform::PassContext::Current()
+                ->GetConfig<Bool>(kDisableSafeRobustCopyPredication,
+                                  Bool(false))
+                .value()) {}
 
   Stmt Finalize(Stmt body) {
     if (!pending_sync_copies_ || async_without_async_commit_wait_) {
@@ -530,7 +535,7 @@ private:
       auto [robust_base, robust_size] = GetRobustDescArgs(robust_desc);
       cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes),
                        robust_base, robust_size};
-      if (predicated) {
+      if (predicated && !disable_safe_robust_copy_predication_) {
         cp_async_args.push_back(predicate_value);
       }
     } else if (predicated) {
@@ -732,6 +737,7 @@ private:
   bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
   bool disable_force_async_wait_{false};
+  bool disable_safe_robust_copy_predication_{false};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;

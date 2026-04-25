@@ -94,6 +94,28 @@ class PassConfigKey(str, Enum):
     global memory access goes out of bounds.
     """
 
+    TL_DISABLE_SAFE_COPY_PREDICATION = "tl.disable_safe_copy_predication"
+    """Disable automatic src/dst predication emitted by normal SIMT `T.copy`
+    lowering. Default: False
+
+    This is separate from `TL_DISABLE_SAFE_MEMORY_ACCESS`: it affects predicates
+    generated directly by `T.copy` lowering before `tl.LegalizeSafeMemoryAccess`
+    runs. Enabling it is only safe when the copied ranges are guaranteed to be
+    in bounds by launch geometry or explicit user guards.
+    """
+
+    TL_DISABLE_SAFE_ROBUST_COPY_PREDICATION = "tl.disable_safe_robust_copy_predication"
+    """Disable the extra predication on MUSA robust async copy lowering. Default: False
+
+    When enabled, predicated `musa_cp_async_robust(..., predicate)` emission is
+    forced to drop the predicate and use plain `musa_cp_async_robust(...)`
+    instead. This currently only affects the robust async-copy lowering path
+    and does not disable general `T.copy` boundary predicates.
+
+    This option is unsafe unless the provided robust range already captures the
+    intended zero-fill / out-of-bounds semantics.
+    """
+
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
 
