@@ -6,6 +6,7 @@ import tile_kernels
 from tile_kernels.testing.bench import dtype_to_str, make_param_id
 from tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
 from tile_kernels.testing.numeric import assert_equal, count_bytes, check_bias
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -15,7 +16,7 @@ def generate_test_data(params):
     num_tokens = params['num_tokens']
     hidden = params['hidden']
     dtype = params['dtype']
-    x = torch.randn((num_tokens, hidden), dtype=dtype, device='cuda')
+    x = torch.randn((num_tokens, hidden), dtype=dtype, device='musa')
     return x
 
 
@@ -37,6 +38,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_per_channel_cast(params):
     num_per_tokens = params['num_per_tokens']
     round_sf = params['round_sf']
@@ -45,7 +47,7 @@ def test_per_channel_cast(params):
     x_fp8, per_channel_sf_inv = tile_kernels.quant.per_channel_cast(x, 'e4m3', num_per_tokens, round_sf)
     x_fp8_ref, per_channel_sf_inv_ref = tile_kernels.torch.cast(x, 'e4m3', block_size=(num_per_tokens, 1), round_sf=round_sf)
 
-    assert_equal(x_fp8, x_fp8_ref)
+    assert_equal(x_fp8.float(), x_fp8_ref.float())
     assert_equal(per_channel_sf_inv, per_channel_sf_inv_ref)
 
     # Check bias
@@ -55,6 +57,7 @@ def test_per_channel_cast(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_per_channel_cast_benchmark(benchmark_timer, benchmark_record, params):
     num_per_tokens = params['num_per_tokens']
     round_sf = params['round_sf']

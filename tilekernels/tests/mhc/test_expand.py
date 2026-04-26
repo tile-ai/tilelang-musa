@@ -2,12 +2,16 @@ from typing import Callable
 
 import pytest
 import torch
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.modeling.mhc.ops import expand_to_mhc
 from tile_kernels.torch.mhc import expand_to_mhc_ref
+import tilelang.testing
+
+DEVICE = get_runtime_device_type()
 
 
 def generate_expand_test_data(
-    n0: int, n1: int, mhc_mult: int, h: int, device: str = 'cuda'
+    n0: int, n1: int, mhc_mult: int, h: int, device: str = DEVICE
 ) -> dict[str, torch.Tensor]:
     torch.random.manual_seed(42)
 
@@ -21,6 +25,7 @@ def generate_expand_test_data(
 @pytest.mark.parametrize('n1', [1024, 4096])
 @pytest.mark.parametrize('mhc_mult', [2, 4, 8])
 @pytest.mark.parametrize('h', [1280, 2560, 7168])
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_expand_comprehensive(n0: int, n1: int, mhc_mult: int, h: int) -> None:
     test_data = generate_expand_test_data(n0=n0, n1=n1, mhc_mult=mhc_mult, h=h)
 

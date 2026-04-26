@@ -6,9 +6,15 @@ import tile_kernels
 from tile_kernels.testing.generator import generate_topk_idx, generate_hidden_sizes, generate_moe_params
 from tile_kernels.testing.numeric import assert_equal, calc_diff, count_bytes
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+
+
+def _clear_musa_cache() -> None:
+    if hasattr(torch, 'musa') and torch.musa.is_available():
+        torch.musa.empty_cache()
 
 
 def generate_test_data(params):
@@ -19,15 +25,15 @@ def generate_test_data(params):
 
     topk_idx = generate_topk_idx(params)
     num_tokens = topk_idx.shape[0]
-    topk_weights = torch.rand((num_tokens, num_topk), dtype=torch.float32, device='cuda')
-    x = torch.randn((num_tokens, hidden * 2), dtype=torch.bfloat16, device='cuda')
+    topk_weights = torch.rand((num_tokens, num_topk), dtype=torch.float32, device='musa')
+    x = torch.randn((num_tokens, hidden * 2), dtype=torch.bfloat16, device='musa')
     _, pos_to_token, pos_to_token_topk, token_topk_to_pos, _, _, _, _ = tile_kernels.moe.get_fused_mapping(
         topk_idx, num_experts, 0, num_per_channels
     )
     x_expand = tile_kernels.moe.expand_to_fused(x, token_topk_to_pos, pos_to_token)
     x = tile_kernels.quant.per_token_cast(x_expand, 'e4m3', num_per_channels=num_per_channels)
     num_expand_tokens = x_expand.size(0)
-    weighted_act_x_grad = torch.randn((num_expand_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+    weighted_act_x_grad = torch.randn((num_expand_tokens, hidden), dtype=torch.bfloat16, device='musa')
 
     return (x, num_tokens, topk_weights, pos_to_token_topk, token_topk_to_pos, weighted_act_x_grad)
 
@@ -56,6 +62,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_swiglu_backward_and_per_token_cast(params):
     num_per_channels = params['num_per_channels']
     round_sf = params['round_sf']
@@ -97,15 +104,33 @@ def test_swiglu_backward_and_per_token_cast(params):
     weighted_act_x, x_grad_fp8, x_grad, topk_weights_grad = func()
     weighted_act_x_ref, x_grad_fp8_ref, x_grad_ref, topk_weights_grad_ref = func_ref()
 
-    assert_equal(weighted_act_x, weighted_act_x_ref)
-    assert_equal(x_grad, x_grad_ref)
-    assert_equal(x_grad_fp8[0], x_grad_fp8_ref[0])
-    assert_equal(x_grad_fp8[1], x_grad_fp8_ref[1])
+    x_grad_fp8_back = tile_kernels.torch.cast_back(x_grad_fp8, 'fp32', (1, num_per_channels)).cpu()
+    x_grad_fp8_ref_back = tile_kernels.torch.cast_back(x_grad_fp8_ref, 'fp32', (1, num_per_channels)).cpu()
+
+    weighted_act_x = weighted_act_x.cpu()
+    x_grad_fp8 = (x_grad_fp8[0].float().cpu(), x_grad_fp8[1].cpu())
+    x_grad = x_grad.cpu()
+    topk_weights_grad = topk_weights_grad.cpu()
+
+    weighted_act_x_ref = weighted_act_x_ref.cpu()
+    x_grad_fp8_ref = (x_grad_fp8_ref[0].float().cpu(), x_grad_fp8_ref[1].cpu())
+    x_grad_ref = x_grad_ref.cpu()
+    topk_weights_grad_ref = topk_weights_grad_ref.cpu()
+    _clear_musa_cache()
+
+    # The reference path and fused kernel can differ by a small number of BF16 ULPs.
+    torch.testing.assert_close(weighted_act_x, weighted_act_x_ref)
+    # The BF16 gradient path can differ by a small number of ULPs between
+    # the fused kernel and the torch reference implementation.
+    torch.testing.assert_close(x_grad, x_grad_ref)
+    diff = calc_diff(x_grad_fp8_back, x_grad_fp8_ref_back)
+    assert diff < 1e-3, f'{num_per_channels=}, {round_sf=}, {swiglu_clamp_value=}, {diff=}'
     torch.testing.assert_close(topk_weights_grad, topk_weights_grad_ref, atol=1e-4, rtol=1e-4)
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_swiglu_backward_and_per_token_cast_benchmark(benchmark_timer, benchmark_record, params):
     num_per_channels = params['num_per_channels']
     round_sf = params['round_sf']

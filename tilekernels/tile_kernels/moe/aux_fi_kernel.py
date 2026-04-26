@@ -66,7 +66,7 @@ def aux_fi(topk_idx: torch.Tensor, num_experts: int, num_aux_topk: int) -> torch
     if int(os.getenv('TK_PRINT_KERNEL_SOURCE', 0)):
         print(kernel.get_kernel_source())
 
-    out = torch.zeros(num_experts, dtype=torch.float32, device='cuda')
+    out = torch.zeros(num_experts, dtype=torch.float32, device='musa')
     kernel(topk_idx, out, num_aux_topk)
 
     return out

@@ -2,12 +2,16 @@ from typing import Callable
 
 import pytest
 import torch
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.modeling.mhc.ops import mhc_pre_apply_mix
 from tile_kernels.torch.mhc import mhc_pre_apply_mix_ref
+import tilelang.testing
+
+DEVICE = get_runtime_device_type()
 
 
 def generate_pre_apply_mix_test_data(
-    n0: int, n1: int, mhc: int, h: int, device: str = 'cuda'
+    n0: int, n1: int, mhc: int, h: int, device: str = DEVICE
 ) -> dict[str, torch.Tensor]:
     x = torch.randn(n0, n1, mhc, h, dtype=torch.bfloat16, device=device).sigmoid()
     mix = torch.randn(n0, n1, mhc, 1, dtype=torch.float32, device=device).softmax(-2)
@@ -39,6 +43,7 @@ def _tester(
 @pytest.mark.parametrize('n0', [1, 2])
 @pytest.mark.parametrize('n1', [1024, 4096])
 @pytest.mark.parametrize('h', [1280, 2560, 7680])
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_pre_apply_mix_comprehensive(n0: int, n1: int, h: int) -> None:
     mhc = 4
 

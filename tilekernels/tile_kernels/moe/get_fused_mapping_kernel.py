@@ -7,6 +7,69 @@ from tile_kernels.config import get_num_sms
 from tile_kernels.utils import align
 
 
+def _get_fused_mapping_torch(
+    topk_idx: torch.Tensor,
+    num_experts: int,
+    num_expanded_tokens: int,
+    alignment: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+    """Torch fallback used on MUSA to avoid cooperative grid sync requirements."""
+    device = topk_idx.device
+    num_tokens, num_topk = topk_idx.shape
+    flat_topk_idx = topk_idx.reshape(-1)
+    valid_mask = flat_topk_idx >= 0
+    valid_flat_idx = torch.nonzero(valid_mask, as_tuple=False).flatten()
+    valid_expert_idx = flat_topk_idx[valid_mask].to(torch.int64)
+
+    counts = torch.bincount(valid_expert_idx, minlength=num_experts).to(torch.int32)
+    aligned_counts = ((counts + alignment - 1) // alignment) * alignment
+
+    expert_end = torch.cumsum(aligned_counts, dim=0)
+    expert_start = expert_end - aligned_counts
+    num_tokens_per_expert = aligned_counts.contiguous()
+    total_expanded = int(expert_end[-1].item()) if num_experts > 0 else 0
+
+    if num_expanded_tokens == 0:
+        num_expanded_tokens = total_expanded
+    else:
+        assert num_expanded_tokens >= total_expanded, (
+            f"num_expanded_tokens ({num_expanded_tokens}) must cover aligned total ({total_expanded})"
+        )
+
+    pos_to_expert = torch.full((num_expanded_tokens,), -1, dtype=torch.int32, device=device)
+    pos_to_token = torch.full((num_expanded_tokens,), -1, dtype=torch.int32, device=device)
+    pos_to_token_topk = torch.full((num_expanded_tokens,), -1, dtype=torch.int32, device=device)
+    token_topk_to_pos = torch.full((num_tokens, num_topk), -1, dtype=torch.int32, device=device)
+
+    if valid_flat_idx.numel() > 0:
+        sort_order = torch.argsort(valid_expert_idx, stable=True)
+        sorted_expert_idx = valid_expert_idx[sort_order]
+        sorted_flat_idx = valid_flat_idx[sort_order].to(torch.int32)
+
+        counts_i64 = counts.to(torch.int64)
+        expert_prefix = torch.cumsum(counts_i64, dim=0) - counts_i64
+        occurrence = torch.arange(sorted_flat_idx.numel(), device=device, dtype=torch.int64) - expert_prefix[sorted_expert_idx]
+        dst_pos = expert_start[sorted_expert_idx].to(torch.int64) + occurrence
+        dst_pos_i32 = dst_pos.to(torch.int32)
+
+        pos_to_expert[dst_pos] = sorted_expert_idx.to(torch.int32)
+        pos_to_token[dst_pos] = sorted_flat_idx // num_topk
+        pos_to_token_topk[dst_pos] = sorted_flat_idx
+        token_topk_to_pos.view(-1)[sorted_flat_idx.to(torch.int64)] = dst_pos_i32
+
+    num_tokens_per_expert_list = num_tokens_per_expert.tolist()
+    return (
+        pos_to_expert,
+        pos_to_token,
+        pos_to_token_topk,
+        token_topk_to_pos,
+        expert_start.contiguous(),
+        expert_end.contiguous(),
+        num_tokens_per_expert,
+        num_tokens_per_expert_list,
+    )
+
+
 @T.macro
 def divide_task(length: int, num_tasks: int, task_id: int, start: T.Ref, end: T.Ref):
     length_per_task = align(T.ceildiv(length, num_tasks), 32)
@@ -18,7 +81,6 @@ def divide_task(length: int, num_tasks: int, task_id: int, start: T.Ref, end: T.
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
-        tilelang.PassConfigKey.TL_DISABLE_OUT_OF_BOUND_WARNING: True,
     },
 )
 def get_get_fused_mapping_kernel(
@@ -198,6 +260,9 @@ def get_fused_mapping(
     num_tokens, num_topk = topk_idx.shape
     assert topk_idx.is_contiguous() and topk_idx.dtype == torch.int64
 
+    if topk_idx.device.type == "musa":
+        return _get_fused_mapping_torch(topk_idx, num_experts, num_expanded_tokens, alignment)
+
     should_sync = False
     if num_expanded_tokens == 0 and not force_no_sync:
         should_sync = True
@@ -205,14 +270,14 @@ def get_fused_mapping(
 
     # Allocate output
     num_sms = get_num_sms()
-    pos_to_expert = torch.empty((num_expanded_tokens, ), dtype=torch.int32, device='cuda')
-    pos_to_token = torch.empty((num_expanded_tokens, ), dtype=torch.int32, device='cuda')
-    pos_to_token_topk = torch.empty((num_expanded_tokens, ), dtype=torch.int32, device='cuda')
-    token_topk_to_pos = torch.empty((num_tokens, num_topk), dtype=torch.int32, device='cuda')
-    expert_start = torch.empty((num_experts, ), dtype=torch.int32, device='cuda')
-    expert_end = torch.empty((num_experts, ), dtype=torch.int32, device='cuda')
-    num_tokens_per_expert = torch.empty((num_experts, ), dtype=torch.int32, device='cuda')
-    num_experts_per_sm = torch.empty((num_sms, num_experts), dtype=torch.int32, device='cuda')
+    pos_to_expert = torch.empty((num_expanded_tokens, ), dtype=torch.int32, device='musa')
+    pos_to_token = torch.empty((num_expanded_tokens, ), dtype=torch.int32, device='musa')
+    pos_to_token_topk = torch.empty((num_expanded_tokens, ), dtype=torch.int32, device='musa')
+    token_topk_to_pos = torch.empty((num_tokens, num_topk), dtype=torch.int32, device='musa')
+    expert_start = torch.empty((num_experts, ), dtype=torch.int32, device='musa')
+    expert_end = torch.empty((num_experts, ), dtype=torch.int32, device='musa')
+    num_tokens_per_expert = torch.empty((num_experts, ), dtype=torch.int32, device='musa')
+    num_experts_per_sm = torch.empty((num_sms, num_experts), dtype=torch.int32, device='musa')
 
     # Get kernel and launch
     mapping_kernel = get_get_fused_mapping_kernel(num_experts, num_topk, alignment, num_sms)

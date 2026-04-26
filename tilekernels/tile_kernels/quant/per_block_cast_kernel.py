@@ -12,6 +12,7 @@ from tile_kernels.quant.common import *
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+        tilelang.PassConfigKey.TL_DISABLE_INDEX_TYPE_PROMOTION: True,
     },
 )
 def get_per_block_cast_kernel(

@@ -2,12 +2,16 @@ from typing import Callable
 
 import pytest
 import torch
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.modeling.mhc.ops import sinkhorn_normalize
 from tile_kernels.torch.mhc import sinkhorn_normalize_ref
+import tilelang.testing
+
+DEVICE = get_runtime_device_type()
 
 
 def generate_sinkhorn_test_data(
-    n0: int, n1: int, mhc: int, device: str = 'cuda'
+    n0: int, n1: int, mhc: int, device: str = DEVICE
 ) -> dict[str, torch.Tensor]:
     comb_res_mix = torch.randn((n0, n1, mhc, mhc), dtype=torch.float32, device=device)
     out_grad = torch.randn((n0, n1, mhc, mhc), dtype=torch.float32, device=device)
@@ -33,6 +37,7 @@ def _tester(
 @pytest.mark.parametrize('n0', [1, 2])
 @pytest.mark.parametrize('n1', [1, 1024, 4096])
 @pytest.mark.parametrize('mhc', [4])
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_sinkhorn_comprehensive(n0: int, n1: int, mhc: int) -> None:
     test_data = generate_sinkhorn_test_data(n0=n0, n1=n1, mhc=mhc)
 

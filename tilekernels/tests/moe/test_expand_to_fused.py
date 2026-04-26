@@ -7,9 +7,29 @@ import tile_kernels
 from tile_kernels.testing.generator import generate_topk_idx, generate_hidden_sizes, generate_moe_params
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+
+
+def _has_musa() -> bool:
+    return hasattr(torch, 'musa') and torch.musa.is_available()
+
+
+def _expand_to_fused_ref(
+    x: torch.Tensor,
+    token_topk_to_pos: torch.Tensor,
+    pos_to_expert: torch.Tensor,
+) -> torch.Tensor:
+    out = torch.zeros((pos_to_expert.shape[0], x.shape[1]), dtype=x.dtype, device=x.device)
+    num_tokens, num_topk = token_topk_to_pos.shape
+    for token in range(num_tokens):
+        for topk in range(num_topk):
+            pos = int(token_topk_to_pos[token, topk].item())
+            if pos >= 0:
+                out[pos] = x[token]
+    return out
 
 
 def generate_test_data_expand_to_fused(params):
@@ -19,7 +39,7 @@ def generate_test_data_expand_to_fused(params):
 
     topk_idx = generate_topk_idx(params)
     num_tokens = topk_idx.shape[0]
-    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='musa')
     pos_to_expert, _, _, token_topk_to_pos, _, _, _, _ = tile_kernels.moe.get_fused_mapping(topk_idx, num_experts, 0, 16)
 
     return (x, pos_to_expert, token_topk_to_pos, num_tokens)
@@ -34,6 +54,7 @@ def generate_test_params_expand(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params_expand(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_expand_to_fused(params):
     x, pos_to_expert, token_topk_to_pos, num_tokens = generate_test_data_expand_to_fused(params)
 
@@ -46,6 +67,7 @@ def test_expand_to_fused(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params_expand(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_expand_to_fused_benchmark(benchmark_timer, benchmark_record, params):
     x, pos_to_expert, token_topk_to_pos, num_tokens = generate_test_data_expand_to_fused(params)
 
@@ -66,6 +88,29 @@ def test_expand_to_fused_benchmark(benchmark_timer, benchmark_record, params):
     )
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+def test_expand_to_fused_musa_focused_correctness() -> None:
+    if not _has_musa():
+        pytest.skip("MUSA is not available")
+
+    x = torch.arange(4 * 256, device='musa', dtype=torch.float16).reshape(4, 256).contiguous()
+    pos_to_expert = torch.tensor([0, 0, 1, 1, 2, 2, 2, 3], device='musa', dtype=torch.int32)
+    token_topk_to_pos = torch.tensor(
+        [
+            [0, 2],
+            [3, 4],
+            [1, 5],
+            [6, 7],
+        ],
+        device='musa',
+        dtype=torch.int32,
+    ).contiguous()
+
+    expanded_x = tile_kernels.moe.expand_to_fused(x, token_topk_to_pos, pos_to_expert)
+    expanded_x_ref = _expand_to_fused_ref(x, token_topk_to_pos, pos_to_expert)
+    assert_equal(expanded_x, expanded_x_ref)
+
+
 def generate_test_data_expand_to_fused_with_sf(params):
     num_experts = params['num_experts']
     num_ep_ranks = params['num_ep_ranks']
@@ -77,7 +122,7 @@ def generate_test_data_expand_to_fused_with_sf(params):
 
     topk_idx = generate_topk_idx(params)
     num_tokens = topk_idx.shape[0]
-    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='musa')
     x_fp8, x_sf = tile_kernels.quant.per_token_cast(
         x, 'e4m3',
         num_per_channels=num_per_channels,
@@ -103,6 +148,7 @@ def generate_test_params_expand_with_sf(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params_expand_with_sf(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_expand_to_fused_with_sf(params):
     x_fp8, x_sf, pos_to_expert, token_topk_to_pos, num_tokens = generate_test_data_expand_to_fused_with_sf(params)
     num_per_channels = params['num_per_channels']
@@ -124,6 +170,7 @@ def test_expand_to_fused_with_sf(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params_expand_with_sf(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_expand_to_fused_with_sf_benchmark(benchmark_timer, benchmark_record, params):
     x_fp8, x_sf, pos_to_expert, token_topk_to_pos, num_tokens = generate_test_data_expand_to_fused_with_sf(params)
     num_per_channels = params['num_per_channels']

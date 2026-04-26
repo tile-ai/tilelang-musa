@@ -249,7 +249,7 @@ def swiglu_forward_and_per_token_cast(
         print(kernel.get_kernel_source())
 
     # Allocate output and launch
-    out = torch.empty((num_expanded_tokens, hidden), dtype=torch.float8_e4m3fn, device='cuda')
+    out = torch.empty((num_expanded_tokens, hidden), dtype=torch.float8_e4m3fn, device='musa')
     out_sf = alloc_scaling_factors((num_expanded_tokens, hidden), out_config)
     swiglu_clamp_value = 0 if swiglu_clamp_value is None else swiglu_clamp_value
     if num_expanded_tokens > 0:

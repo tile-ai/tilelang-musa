@@ -9,6 +9,7 @@ from tile_kernels.testing.numeric import count_bytes, assert_equal
 from tile_kernels.testing.bench import make_param_id
 
 from tile_kernels.torch import topk_sum_and_topk_group_idx as torch_topk_sum_and_topk_group_idx
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -25,7 +26,7 @@ def generate_test_data(params):
     num_groups = params['num_groups']
 
     num_experts_per_group = num_experts // num_groups
-    scores = torch.randn((num_tokens, num_groups, num_experts_per_group), dtype=torch.float, device='cuda')
+    scores = torch.randn((num_tokens, num_groups, num_experts_per_group), dtype=torch.float, device='musa')
 
     return (scores,)
 
@@ -49,6 +50,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_topk_sum_and_topk_group_idx(params):
     (scores,) = generate_test_data(params)
     num_group_sum_topk = params['num_group_sum_topk']
@@ -64,6 +66,7 @@ def test_topk_sum_and_topk_group_idx(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_topk_sum_and_topk_group_idx_benchmark(benchmark_timer, benchmark_record, params):
     (scores,) = generate_test_data(params)
     num_group_sum_topk = params['num_group_sum_topk']

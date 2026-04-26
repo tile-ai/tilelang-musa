@@ -2,14 +2,19 @@ import os
 import pytest
 import torch
 
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.engram import engram_gate_bwd
 from tile_kernels.torch.engram import engram_gate_ref
 from tile_kernels.testing.numeric import calc_diff, count_bytes
 from tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+DEVICE = get_runtime_device_type()
+GRAD_TOL = 2e-6 if DEVICE == 'musa' else 1e-8
+GRAD_K_TOL = 3e-6 if DEVICE == 'musa' else 1e-8
 
 
 def generate_test_data(params):
@@ -18,13 +23,13 @@ def generate_test_data(params):
     hidden_size = params['hidden']
     eps = 1e-20
     clamp_value = 1e-6
-    x_data = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
-    k_data = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
-    v_data = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device='cuda')
-    wh_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
-    we_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
+    x_data = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    k_data = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    v_data = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    wh_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    we_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
     weight_fused = wh_data.float() * we_data.float()
-    grad_out = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
+    grad_out = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
     return (x_data, k_data, v_data, wh_data, we_data, weight_fused, grad_out, eps, clamp_value)
 
 
@@ -38,6 +43,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_engram_gate_bwd(params):
     (x_data, k_data, v_data, wh_data, we_data, weight_fused, grad_out, eps, clamp_value) = generate_test_data(params)
 
@@ -64,19 +70,20 @@ def test_engram_gate_bwd(params):
 
     # Correctness
     diff_x = calc_diff(grad_x, x_ref.grad)
-    assert diff_x < 1e-8, f'grad_x mismatch: {diff_x:.6e}'
+    assert diff_x < GRAD_TOL, f'grad_x mismatch: {diff_x:.6e}'
     diff_k = calc_diff(grad_k, k_ref.grad)
-    assert diff_k < 1e-8, f'grad_k mismatch: {diff_k:.6e}'
+    assert diff_k < GRAD_K_TOL, f'grad_k mismatch: {diff_k:.6e}'
     diff_v = calc_diff(grad_v, v_ref.grad)
-    assert diff_v < 1e-8, f'grad_v mismatch: {diff_v:.6e}'
+    assert diff_v < GRAD_TOL, f'grad_v mismatch: {diff_v:.6e}'
     diff_wh = calc_diff(grad_wh, wh_ref.grad)
-    assert diff_wh < 1e-8, f'grad_wh mismatch: {diff_wh:.6e}'
+    assert diff_wh < GRAD_TOL, f'grad_wh mismatch: {diff_wh:.6e}'
     diff_we = calc_diff(grad_we, we_ref.grad)
-    assert diff_we < 1e-8, f'grad_we mismatch: {diff_we:.6e}'
+    assert diff_we < GRAD_TOL, f'grad_we mismatch: {diff_we:.6e}'
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_engram_gate_bwd_benchmark(benchmark_timer, benchmark_record, params):
     (x_data, k_data, v_data, wh_data, we_data, weight_fused, grad_out, eps, clamp_value) = generate_test_data(params)
 

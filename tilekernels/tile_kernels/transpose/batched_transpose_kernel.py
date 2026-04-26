@@ -4,7 +4,7 @@ import tilelang
 from tilelang import language as T
 
 
-def create_loop_layout_fn(block_x: int, num_threads: int = 256):
+def create_loop_layout_fn(block_x: int, num_threads: int):
     def loop_layout_fn(i, j):
         elems = i * block_x + j
         forward_thread = (elems // 4) % num_threads
@@ -15,21 +15,33 @@ def create_loop_layout_fn(block_x: int, num_threads: int = 256):
 
 
 @tilelang.jit(
+    target='musa -arch=mp_31',
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        tilelang.PassConfigKey.TL_ENABLE_MUSA_BURST: True,
+        tilelang.PassConfigKey.TL_ENABLE_REDUCE_BURST: True,
+        tilelang.PassConfigKey.TL_DISABLE_SAFE_MEMORY_ACCESS: True,
+        tilelang.PassConfigKey.TL_DISABLE_INDEX_TYPE_PROMOTION: True,
     },
 )
-def get_batched_transpose_kernel(shape_x_mod_128: int, shape_y_mod_128: int, dtype: T.dtype):
+def get_batched_transpose_kernel(
+    shape_x_mod_128: int,
+    shape_y_mod_128: int,
+    dtype: T.dtype,
+    num_threads: int,
+    prefer_64_y: bool,
+):
     assert shape_x_mod_128 in (0, 64) and shape_y_mod_128 in (0, 64)
+    assert num_threads in (128, 256)
     # Runtime symbols
     num_batches = T.dynamic('num_batches')
     shape_x = T.dynamic('shape_x')
     shape_y = T.dynamic('shape_y')
     stride_x = T.dynamic('stride_x')
 
-    num_threads = 256
     block_x = 128 if shape_x_mod_128 == 0 else 64
-    block_y = 128 if shape_y_mod_128 == 0 else 64
+    block_y = 64 if shape_y_mod_128 == 64 or prefer_64_y else 128
     block_k = 4
     num_threads_per_row = block_y // block_k
 
@@ -42,7 +54,7 @@ def get_batched_transpose_kernel(shape_x_mod_128: int, shape_y_mod_128: int, dty
     ):
         with T.Kernel(shape_y // block_y, shape_x // block_x, num_batches, threads=num_threads) as (pid_y, pid_x, pid_batch):
             # Shared padding to reduce bank conflict
-            out_shared = T.alloc_shared((block_y, block_x + block_k), dtype)
+            out_shared = T.alloc_shared((block_y, block_x + 1), dtype)
             tid = T.get_thread_binding()
             row, col = tid // num_threads_per_row, tid % num_threads_per_row
 
@@ -64,9 +76,8 @@ def get_batched_transpose_kernel(shape_x_mod_128: int, shape_y_mod_128: int, dty
 
                 # Copy into shared memory
                 for j in T.unroll(block_k):
-                    swizzle_j = (j + tid // (8 // dtype.bytes)) % block_k
                     for k in T.vectorized(block_k):
-                        out_shared[col * block_k + swizzle_j, i * block_k + k] = tmp[swizzle_j, k]
+                        out_shared[col * block_k + j, i * block_k + k] = tmp[j, k]
 
             T.sync_threads()
             # Write into output
@@ -106,13 +117,20 @@ def batched_transpose(x: torch.Tensor) -> torch.Tensor:
 
     assert shape_x % 64 == 0 and shape_y % 64 == 0 and x.stride(-2) % 4 == 0 and x.stride(-1) == 1
 
+    prefer_64_y = (x.dtype is not torch.bfloat16 and shape_y % 128 == 0) or (
+        x.dtype is torch.bfloat16 and num_batches > 1 and shape_y >= 4096 and shape_y % 128 == 0
+    )
+    num_threads = 256 if (num_batches == 1 and x.dtype is not torch.bfloat16) or (
+        x.dtype is torch.bfloat16 and num_batches > 1 and shape_y >= 4096 and shape_y % 128 == 0
+    ) else 128
+
     # Get kernel implement
-    kernel = get_batched_transpose_kernel(shape_x % 128, shape_y % 128, T.dtype(x.dtype))
+    kernel = get_batched_transpose_kernel(shape_x % 128, shape_y % 128, T.dtype(x.dtype), num_threads, prefer_64_y)
 
     if int(os.getenv('TK_PRINT_KERNEL_SOURCE', 0)):
         print(kernel.get_kernel_source())
 
-    out = torch.empty((num_batches, shape_y, shape_x), dtype=x.dtype, device='cuda')
+    out = torch.empty((num_batches, shape_y, shape_x), dtype=x.dtype, device=x.device)
     if num_batches > 0 and shape_x > 0 and shape_y > 0:
         kernel(x, out)
 

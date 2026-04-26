@@ -6,6 +6,7 @@ import tile_kernels
 from tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -15,7 +16,7 @@ def generate_test_data(params):
     num_tokens = params['num_tokens']
     hidden = params['hidden']
     dtype = torch.bfloat16
-    x = torch.randn((num_tokens, hidden * 2), dtype=dtype, device='cuda')
+    x = torch.randn((num_tokens, hidden * 2), dtype=dtype, device='musa')
     return x
 
 
@@ -42,6 +43,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_swiglu_forward_and_per_channel_cast_and_transpose(params):
     num_per_tokens = params['num_per_tokens']
     without_transpose = params['without_transpose']
@@ -78,11 +80,12 @@ def test_swiglu_forward_and_per_channel_cast_and_transpose(params):
     x_fp8_ref, x_sf_ref = func_ref()
 
     assert_equal(x_sf, x_sf_ref)
-    assert_equal(x_fp8, x_fp8_ref)
+    assert_equal(x_fp8.float(), x_fp8_ref.float())
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_swiglu_forward_and_per_channel_cast_and_transpose_benchmark(benchmark_timer, benchmark_record, params):
     num_per_tokens = params['num_per_tokens']
     without_transpose = params['without_transpose']

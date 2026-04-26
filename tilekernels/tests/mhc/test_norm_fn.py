@@ -1,7 +1,18 @@
 import pytest
 import torch
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.modeling.mhc.ops import mhc_pre_norm_fn
 from tile_kernels.torch.mhc import mhc_pre_norm_fn_ref
+import tilelang.testing
+
+DEVICE = get_runtime_device_type()
+
+
+def _set_musa_matmul_allow_tf32(enabled: bool) -> None:
+    musa_backends = getattr(torch.backends, 'musa', None)
+    matmul = getattr(musa_backends, 'matmul', None)
+    if matmul is not None and hasattr(matmul, 'allow_tf32'):
+        matmul.allow_tf32 = enabled
 
 
 def generate_norm_fn_test_data(
@@ -13,7 +24,7 @@ def generate_norm_fn_test_data(
     n0 = 1
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
     mhc_hidden_size = mhc_mult * hidden_size
-    device = 'cuda'
+    device = DEVICE
 
     residual = (
         torch.randn((n0, n1, mhc_mult, hidden_size), dtype=torch.float, device=device)
@@ -46,6 +57,7 @@ def generate_norm_fn_test_data(
 @pytest.mark.parametrize('n1', [4096, 8192])
 @pytest.mark.parametrize('hidden_size', [1280, 2560, 7168])
 @pytest.mark.parametrize('generate_normw', [False, True])
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_correctness(
     n1: int,
     hidden_size: int,
@@ -77,7 +89,8 @@ def test_correctness(
     residual_tl_grad = residual_tl.untyped_storage().grad_from_mhc_post = torch.zeros_like(residual_tl)
     torch.autograd.backward([out_tl], [test_data['out_grad']])
 
-    torch.backends.cuda.matmul.allow_tf32 = True
+    if torch.musa.is_available():
+        _set_musa_matmul_allow_tf32(True)
     out_ref = mhc_pre_norm_fn_ref(
         residual_ref,
         fn_ref,
@@ -85,8 +98,8 @@ def test_correctness(
         test_data['mhc_norm_eps'],
     )
     torch.autograd.backward([out_ref], [test_data['out_grad']])
-    torch.backends.cuda.matmul.allow_tf32 = False
-
+    if torch.musa.is_available():
+        _set_musa_matmul_allow_tf32(False)
     torch.testing.assert_close(out_tl, out_ref, atol=1e-3, rtol=1e-3)
     torch.testing.assert_close(residual_tl_grad, residual_ref.grad)
     torch.testing.assert_close(fn_tl.grad, fn_ref.grad, atol=3e-2, rtol=1e-3)
@@ -94,6 +107,7 @@ def test_correctness(
 
 @pytest.mark.parametrize('n1', [13, 48, 512])
 @pytest.mark.parametrize('hidden_size', [1280, 2560, 4096, 7168])
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_split_k_correctness(n1: int, hidden_size: int) -> None:
     mhc_mult = 4
 
@@ -118,13 +132,17 @@ def test_split_k_correctness(n1: int, hidden_size: int) -> None:
         n_splits=16,
     )
 
-    torch.backends.cuda.matmul.allow_tf32 = True
+    if torch.musa.is_available():
+        _set_musa_matmul_allow_tf32(True)
+
     out_ref = mhc_pre_norm_fn_ref(
         residual_ref,
         fn_ref,
         None,
         test_data['mhc_norm_eps'],
     )
-    torch.backends.cuda.matmul.allow_tf32 = False
+    if torch.musa.is_available():
+        _set_musa_matmul_allow_tf32(False)
+
 
     torch.testing.assert_close(out_tl, out_ref, atol=1e-3, rtol=1e-3)

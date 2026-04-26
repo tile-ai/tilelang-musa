@@ -5,7 +5,7 @@ from tilelang import language as T
 from typing import Optional
 
 from tile_kernels.utils import align, ceil_div
-from tile_kernels.quant.common import QuantTensor
+QuantTensor = tuple[torch.Tensor, torch.Tensor]
 
 
 @tilelang.jit(
@@ -123,7 +123,7 @@ def expand_to_fused(x: torch.Tensor, token_topk_to_pos: torch.Tensor, pos_to_exp
     if int(os.getenv('TK_PRINT_KERNEL_SOURCE', 0)):
         print(kernel.get_kernel_source())
 
-    out = torch.empty((num_expanded_tokens, hidden), dtype=x.dtype, device='cuda')
+    out = torch.empty((num_expanded_tokens, hidden), dtype=x.dtype, device='musa')
     if num_tokens > 0:
         kernel(x, None, out, None, token_topk_to_pos, pos_to_expert)
 
@@ -189,8 +189,8 @@ def expand_to_fused_with_sf(
     if int(os.getenv('TK_PRINT_KERNEL_SOURCE', 0)):
         print(kernel.get_kernel_source())
 
-    out = torch.empty((num_expanded_tokens, hidden), dtype=x.dtype, device='cuda')
-    out_sf = torch.empty((hidden_sf, num_expanded_sf_tokens) if use_tma_aligned_col_major_sf else (num_expanded_tokens, hidden_sf), dtype=x_sf.dtype, device='cuda')
+    out = torch.empty((num_expanded_tokens, hidden), dtype=x.dtype, device='musa')
+    out_sf = torch.empty((hidden_sf, num_expanded_sf_tokens) if use_tma_aligned_col_major_sf else (num_expanded_tokens, hidden_sf), dtype=x_sf.dtype, device='musa')
     out_sf = out_sf[:, :num_expanded_tokens] if use_tma_aligned_col_major_sf else out_sf
 
     if num_tokens > 0:

@@ -2,14 +2,16 @@ import os
 import pytest
 import torch
 
-from tile_kernels.config import get_num_sms
+from tile_kernels.config import get_num_sms, get_runtime_device_type
 from tile_kernels.engram import grad_w_reduce
 from tile_kernels.testing.numeric import calc_diff, count_bytes
 from tile_kernels.testing.generator import generate_hidden_sizes
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+DEVICE = get_runtime_device_type()
 
 
 def grad_w_reduce_ref(grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed):
@@ -22,9 +24,9 @@ def generate_test_data(params):
     hidden_size = params['hidden']
     hc_mult = 4
     num_persistent_blocks = get_num_sms()
-    grad_w_partial = torch.randn(num_persistent_blocks, hc_mult, hidden_size, dtype=torch.float32, device='cuda')
-    weight_hidden = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
-    weight_embed = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
+    grad_w_partial = torch.randn(num_persistent_blocks, hc_mult, hidden_size, dtype=torch.float32, device=DEVICE)
+    weight_hidden = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    weight_embed = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
     return (grad_w_partial, weight_hidden, weight_embed)
 
 
@@ -36,14 +38,15 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_engram_grad_w_reduce(params):
     hidden_size = params['hidden']
     grad_w_partial, weight_hidden, weight_embed = generate_test_data(params)
     hc_mult = grad_w_partial.shape[1]
 
     # Correctness
-    grad_wh_ref = torch.randn(hc_mult, hidden_size, dtype=torch.float32, device='cuda')
-    grad_we_ref = torch.randn(hc_mult, hidden_size, dtype=torch.float32, device='cuda')
+    grad_wh_ref = torch.randn(hc_mult, hidden_size, dtype=torch.float32, device=DEVICE)
+    grad_we_ref = torch.randn(hc_mult, hidden_size, dtype=torch.float32, device=DEVICE)
     grad_weight_hidden = grad_wh_ref.clone()
     grad_weight_embed = grad_we_ref.clone()
     grad_w_reduce_ref(grad_w_partial, weight_hidden, weight_embed, grad_wh_ref, grad_we_ref)
@@ -56,12 +59,13 @@ def test_engram_grad_w_reduce(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_engram_grad_w_reduce_benchmark(benchmark_timer, benchmark_record, params):
     hidden_size = params['hidden']
     grad_w_partial, weight_hidden, weight_embed = generate_test_data(params)
     hc_mult = grad_w_partial.shape[1]
-    grad_weight_hidden = torch.randn(hc_mult, hidden_size, dtype=torch.float32, device='cuda')
-    grad_weight_embed = torch.randn(hc_mult, hidden_size, dtype=torch.float32, device='cuda')
+    grad_weight_hidden = torch.randn(hc_mult, hidden_size, dtype=torch.float32, device=DEVICE)
+    grad_weight_embed = torch.randn(hc_mult, hidden_size, dtype=torch.float32, device=DEVICE)
 
     t_us = benchmark_timer(lambda: grad_w_reduce(grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed))
 

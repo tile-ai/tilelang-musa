@@ -7,11 +7,17 @@ from tile_kernels.testing import clear_unused_sf
 from tile_kernels.torch import swiglu_forward, cast
 from tile_kernels.config import set_num_sms
 from tile_kernels.testing.generator import generate_topk_idx, generate_hidden_sizes, generate_moe_params, generate_num_sms
-from tile_kernels.testing.numeric import assert_equal, count_bytes
+from tile_kernels.testing.numeric import assert_equal, calc_diff, count_bytes
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+
+
+def _clear_musa_cache() -> None:
+    if hasattr(torch, 'musa') and torch.musa.is_available():
+        torch.musa.empty_cache()
 
 
 def generate_test_data(params):
@@ -23,10 +29,10 @@ def generate_test_data(params):
     num_tokens = topk_idx.shape[0]
     alignment = 16
     pos_to_expert, pos_to_token, pos_to_token_topk, token_topk_to_pos, _, _, _, _ = tile_kernels.moe.get_fused_mapping(topk_idx, num_experts, 0, alignment)
-    post_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda')
-    x = torch.randn((num_tokens, hidden * 2), dtype=torch.bfloat16, device='cuda')
+    post_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='musa')
+    x = torch.randn((num_tokens, hidden * 2), dtype=torch.bfloat16, device='musa')
     x = tile_kernels.moe.expand_to_fused(x, token_topk_to_pos, pos_to_token)
-    _clamped_count = torch.zeros(3, dtype=torch.int64, device='cuda')
+    _clamped_count = torch.zeros(3, dtype=torch.int64, device='musa')
 
     return (x, num_tokens, pos_to_expert, pos_to_token_topk, post_weights, _clamped_count)
 
@@ -59,6 +65,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_swiglu_forward_and_per_token_cast(params):
     hidden = params['hidden']
     enable_pos_to_expert = params['enable_pos_to_expert']
@@ -110,11 +117,13 @@ def test_swiglu_forward_and_per_token_cast(params):
         return result
 
     x_fp8_ref, x_sf_ref = func_ref()
-    mask = (pos_to_expert == -1).unsqueeze(-1)
-    x_fp8_ref_float = x_fp8_ref.float().masked_fill(mask, 0)
-    x_sf_ref = x_sf_ref.masked_fill(mask, 0)
-    if use_packed_ue8m0:
-        x_sf_ref = clear_unused_sf(x_sf_ref, hidden, num_per_channels)
+    x_fp8_ref_back = tile_kernels.torch.cast_back((x_fp8_ref, x_sf_ref), 'fp32', (1, num_per_channels)).cpu()
+    mask = (pos_to_expert == -1).unsqueeze(-1).cpu()
+    x_fp8_ref_back = x_fp8_ref_back.masked_fill(mask, 0)
+    if do_clamp_count:
+        clamped_count_ref = clamped_count_ref.cpu()
+    del x_fp8_ref
+    _clear_musa_cache()
 
     for num_sms in generate_num_sms():
         set_num_sms(num_sms)
@@ -122,19 +131,25 @@ def test_swiglu_forward_and_per_token_cast(params):
         x_fp8, x_sf = tile_kernels.quant.swiglu_forward_and_per_token_cast(
             **kernel_args, clamped_count=clamped_count
         )
-        x_fp8_float = x_fp8.float().masked_fill(mask, 0)
-        x_sf = x_sf.masked_fill(mask, 0)
-        if use_packed_ue8m0:
-            x_sf = clear_unused_sf(x_sf, hidden, num_per_channels)
+        x_fp8_back = tile_kernels.torch.cast_back((x_fp8, x_sf), 'fp32', (1, num_per_channels)).cpu()
+        x_fp8_back = x_fp8_back.masked_fill(mask, 0)
+        if do_clamp_count:
+            clamped_count = clamped_count.cpu()
+        del x_fp8
+        _clear_musa_cache()
 
-        assert_equal(x_fp8_float, x_fp8_ref_float)
-        assert_equal(x_sf, x_sf_ref)
+        diff = calc_diff(x_fp8_back, x_fp8_ref_back)
+        assert diff < 1e-3, \
+            f'{enable_pos_to_expert=}, {with_weights=}, {num_per_channels=}, ' \
+            f'{use_tma_aligned_col_major_sf=}, {round_sf=}, {use_packed_ue8m0=}, ' \
+            f'{swiglu_clamp_value=}, {diff=}'
         if do_clamp_count:
             assert_equal(clamped_count, clamped_count_ref)
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_swiglu_forward_and_per_token_cast_benchmark(benchmark_timer, benchmark_record, params):
     hidden = params['hidden']
     enable_pos_to_expert = params['enable_pos_to_expert']

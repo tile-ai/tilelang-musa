@@ -24,6 +24,35 @@ def get_per_token_cast_kernel(
     sf_only: bool = False,
     cast_only: bool = False,
 ):
+    return _get_per_token_cast_kernel_impl(hidden, token_stride, in_config, out_config, sf_only, cast_only)
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: True,
+        tilelang.PassConfigKey.TL_DISABLE_INDEX_TYPE_PROMOTION: True,
+    },
+)
+def get_per_token_cast_kernel_int32_index(
+    hidden: int,
+    token_stride: int,
+    in_config: CastInputConfig,
+    out_config: CastOutputConfig,
+    sf_only: bool = False,
+    cast_only: bool = False,
+):
+    return _get_per_token_cast_kernel_impl(hidden, token_stride, in_config, out_config, sf_only, cast_only)
+
+
+def _get_per_token_cast_kernel_impl(
+    hidden: int,
+    token_stride: int,
+    in_config: CastInputConfig,
+    out_config: CastOutputConfig,
+    sf_only: bool = False,
+    cast_only: bool = False,
+):
     num_threads = 128
     num_elems_per_thread = 32
     num_elems_per_block = num_threads * num_elems_per_thread
@@ -42,6 +71,7 @@ def get_per_token_cast_kernel(
     num_groups = block_k // num_per_channels
 
     num_vectorize = min(get_best_vectorize_size(in_config.dtype), math.gcd(block_m * block_k // num_threads, 32))
+    direct_store = out_config.dtype == T.float8_e4m3fn
     if in_config.with_sf:
         assert not cast_only and not sf_only
         assert block_k % num_vectorize == 0
@@ -72,7 +102,8 @@ def get_per_token_cast_kernel(
         with T.Kernel(T.ceildiv(num_tokens, block_m), T.ceildiv(hidden, block_k), threads=num_threads) as (pid_token, pid_hidden):
             x_fragment = T.alloc_fragment((block_m, block_k), in_config.dtype)
             sf_inv_fragment = T.alloc_fragment((block_m, num_groups), T.float32)
-            out_shared = T.alloc_shared((block_m, block_k), out_config.dtype)
+            if not direct_store:
+                out_shared = T.alloc_shared((block_m, block_k), out_config.dtype)
 
             T.annotate_layout({
                 x_fragment: T.Fragment(
@@ -123,7 +154,10 @@ def get_per_token_cast_kernel(
                     for i, j in T.Parallel(block_m, block_k):
                         # Apply two multiplication at once to save the number of multiplication calculated
                         factor = x_sf_fragment[i // in_config.sf_block[0], j // in_config.sf_block[1]] * sf_inv_fragment[i, j // num_per_channels]
-                        out_shared[i, j] = T.float32(x_fragment[i, j]) * factor
+                        if direct_store:
+                            out[pid_token * block_m + i, pid_hidden * block_k + j] = T.float32(x_fragment[i, j]) * factor
+                        else:
+                            out_shared[i, j] = T.float32(x_fragment[i, j]) * factor
 
             else:
                 if cast_only:
@@ -148,9 +182,12 @@ def get_per_token_cast_kernel(
                 # Store casted values
                 if not sf_only:
                     for i, j in T.Parallel(block_m, block_k):
-                        out_shared[i, j] = x_fragment[i, j] * sf_inv_fragment[i, j // num_per_channels]
+                        if direct_store:
+                            out[pid_token * block_m + i, pid_hidden * block_k + j] = x_fragment[i, j] * sf_inv_fragment[i, j // num_per_channels]
+                        else:
+                            out_shared[i, j] = x_fragment[i, j] * sf_inv_fragment[i, j // num_per_channels]
 
-            if not sf_only:
+            if not sf_only and not direct_store:
                 T.copy(out_shared, out[pid_token * block_m, pid_hidden * block_k], disable_tma=True)
 
     return per_token_cast_kernel
@@ -181,8 +218,19 @@ def per_token_cast_impl(
     hidden = get_logical_hidden(hidden, x.dtype)
     assert num_per_channels in (16, 32, 64, 128) or (num_per_channels == hidden and hidden % 64 == 0)
 
+    use_int32_index_kernel = (
+        out_config.dtype == T.float8_e4m3fn
+        and not in_config.with_sf
+        and not sf_only
+        and sf is None
+        and num_per_channels == 128
+        and (hidden >= 7168 or x.dtype == torch.float32)
+    )
+
+    kernel_builder = get_per_token_cast_kernel_int32_index if use_int32_index_kernel else get_per_token_cast_kernel
+
     # Get kernel implement
-    kernel = get_per_token_cast_kernel(
+    kernel = kernel_builder(
         hidden=hidden,
         token_stride=get_logical_hidden(x.stride(0), x.dtype),
         in_config=in_config,

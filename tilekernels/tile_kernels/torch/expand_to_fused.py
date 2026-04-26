@@ -3,6 +3,17 @@ from tile_kernels.utils import align
 from tile_kernels.quant.types import QuantTensor
 
 
+def _needs_fp8_index_workaround(dtype: torch.dtype) -> bool:
+    return dtype == torch.float8_e4m3fn
+
+
+def _zeros_like_dtype(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device | str) -> torch.Tensor:
+    # Some MUSA builds do not support FillOp for FP8 tensors.
+    if _needs_fp8_index_workaround(dtype):
+        return torch.zeros(shape, dtype=torch.float32, device=device).to(dtype)
+    return torch.zeros(shape, dtype=dtype, device=device)
+
+
 def expand_to_fused(
     x: torch.Tensor,
     token_topk_to_pos: torch.Tensor,
@@ -27,14 +38,19 @@ def expand_to_fused(
     num_tokens, hidden = x.shape
     num_expanded_tokens = pos_to_expert.shape[0]
 
-    out = torch.zeros((num_expanded_tokens, hidden), dtype=x.dtype, device=x.device)
+    use_fp8_workaround = _needs_fp8_index_workaround(x.dtype)
+    work_dtype = torch.float32 if use_fp8_workaround else x.dtype
+    out = torch.zeros((num_expanded_tokens, hidden), dtype=work_dtype, device=x.device)
 
     pos_flat = token_topk_to_pos.reshape(-1)
     mask = pos_flat >= 0
     valid_pos = pos_flat[mask]
     num_topk = token_topk_to_pos.shape[1]
-    x_repeated = x.unsqueeze(1).expand(-1, num_topk, -1).reshape(-1, hidden)
+    x_repeated = x.to(work_dtype).unsqueeze(1).expand(-1, num_topk, -1).reshape(-1, hidden)
     out[valid_pos] = x_repeated[mask]
+
+    if use_fp8_workaround:
+        out = out.to(x.dtype)
 
     return out
 
@@ -66,26 +82,31 @@ def expand_to_fused_with_sf(
     num_expanded_tokens = pos_to_expert.shape[0]
     hidden_sf = x_sf.shape[1]
 
-    out = torch.zeros((num_expanded_tokens, hidden), dtype=x_data.dtype, device=x_data.device)
+    use_fp8_workaround = _needs_fp8_index_workaround(x_data.dtype)
+    work_dtype = torch.float32 if use_fp8_workaround else x_data.dtype
+    out = torch.zeros((num_expanded_tokens, hidden), dtype=work_dtype, device=x_data.device)
 
     # Construct output scaling factor tensor.
     if use_tma_aligned_col_major_sf:
         num_expanded_sf_tokens = align(num_expanded_tokens, 4)
-        out_sf = torch.zeros((hidden_sf, num_expanded_sf_tokens), dtype=x_sf.dtype, device=x_sf.device)
+        out_sf = _zeros_like_dtype((hidden_sf, num_expanded_sf_tokens), x_sf.dtype, x_sf.device)
         out_sf = out_sf[:, :num_expanded_tokens]
         out_sf = out_sf.T
     else:
-        out_sf = torch.zeros((num_expanded_tokens, hidden_sf), dtype=x_sf.dtype, device=x_sf.device)
+        out_sf = _zeros_like_dtype((num_expanded_tokens, hidden_sf), x_sf.dtype, x_sf.device)
 
     num_topk = token_topk_to_pos.shape[1]
     pos_flat = token_topk_to_pos.reshape(-1)  # (num_tokens * num_topk,)
     mask = pos_flat >= 0
     valid_pos = pos_flat[mask]
 
-    x_data_rep = x_data.unsqueeze(1).expand(-1, num_topk, -1).reshape(-1, hidden)
+    x_data_rep = x_data.to(work_dtype).unsqueeze(1).expand(-1, num_topk, -1).reshape(-1, hidden)
     out[valid_pos] = x_data_rep[mask]
 
     x_sf_rep = x_sf.unsqueeze(1).expand(-1, num_topk, -1).reshape(-1, hidden_sf)
     out_sf[valid_pos] = x_sf_rep[mask]
+
+    if use_fp8_workaround:
+        out = out.to(x_data.dtype)
 
     return out, out_sf

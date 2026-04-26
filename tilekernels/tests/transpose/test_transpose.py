@@ -3,9 +3,11 @@ import pytest
 import torch
 
 import tile_kernels
+from tile_kernels.config import get_device
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.testing.bench import dtype_to_str, make_param_id
 from tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -24,7 +26,7 @@ def generate_test_data_transpose(params):
     num_tokens = params['num_tokens']
     hidden = params['hidden']
     dtype = params['dtype']
-    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device=get_device())
     if dtype == torch.float8_e4m3fn:
         x = x.to(torch.float8_e4m3fn)
     if num_tokens > 0:
@@ -37,7 +39,7 @@ def generate_test_data_batched_transpose(params):
     hidden = params['hidden']
     num_experts = params['num_experts']
     dtype = params['dtype']
-    x = torch.randn((num_experts, num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+    x = torch.randn((num_experts, num_tokens, hidden), dtype=torch.bfloat16, device=get_device())
     if dtype == torch.float8_e4m3fn:
         x = x.to(torch.float8_e4m3fn)
     return (x,)
@@ -63,6 +65,7 @@ def generate_test_params_batched_transpose(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params_transpose(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_transpose(params):
     num_tokens = params['num_tokens']
     (x,) = generate_test_data_transpose(params)
@@ -71,11 +74,12 @@ def test_transpose(params):
         return
     y_ref = x.T.contiguous()
 
-    assert_equal(y, y_ref)
+    assert_equal(y.float(), y_ref.float())
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params_transpose(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_transpose_benchmark(benchmark_timer, benchmark_record, params):
     (x,) = generate_test_data_transpose(params)
 
@@ -92,16 +96,18 @@ def test_transpose_benchmark(benchmark_timer, benchmark_record, params):
 
 
 @pytest.mark.parametrize('params', generate_test_params_batched_transpose(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_batched_transpose(params):
     (x,) = generate_test_data_batched_transpose(params)
     y = tile_kernels.transpose.batched_transpose(x)
     y_ref = torch.transpose(x, 1, 2).contiguous()
 
-    assert_equal(y, y_ref)
+    assert_equal(y.float(), y_ref.float())
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params_batched_transpose(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_batched_transpose_benchmark(benchmark_timer, benchmark_record, params):
     (x,) = generate_test_data_batched_transpose(params)
 

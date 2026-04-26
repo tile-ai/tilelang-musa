@@ -90,28 +90,18 @@ def _mhc_pre_norm_fn_fwd_mul(
                 x_smem_16 = T.alloc_shared((token_block, hidden_block), T.bfloat16)
                 fn_smem = T.alloc_shared((32, hidden_block), T.float32)
 
-                T.annotate_layout({x_smem_16: tilelang.layout.make_swizzled_layout(x_smem_16)})
-
                 T.copy(x[pid_x * token_block, pid_y * rms_group_size + pz * hidden_block], x_smem_16)
                 T.copy(fn[0, pid_y * rms_group_size + pz * hidden_block], fn_smem)
 
-                x_frag_16 = T.alloc_fragment((token_block, hidden_block), T.bfloat16)
-                T.copy(x_smem_16, x_frag_16)
-                x_frag = T.alloc_fragment((token_block, hidden_block), T.float32)
-                T.copy(x_frag_16, x_frag)
-
                 for jj in T.serial(hidden_block // 4):
                     for i, j in T.Parallel(token_block, 4):
-                        sqrsum_part[i, j] += x_frag[i, jj * 4 + j] * x_frag[i, jj * 4 + j]
+                        x_val = T.cast(x_smem_16[i, jj * 4 + j], T.float32)
+                        sqrsum_part[i, j] += x_val * x_val
 
-                T.gemm(
-                    x_frag,
-                    fn_smem,
-                    out_frag,
-                    transpose_A=False,
-                    transpose_B=True,
-                    clear_accum=False,
-                )
+                # Use an explicit matmul here to avoid MUSA layout inference failures on this small 32xK by 24xK case.
+                for kk in T.serial(hidden_block):
+                    for i, j in T.Parallel(token_block, 32):
+                        out_frag[i, j] += T.cast(x_smem_16[i, kk], T.float32) * fn_smem[j, kk]
             sqrsum_l = T.alloc_fragment(token_block, T.float32)
             T.reduce_sum(sqrsum_part, sqrsum_l)
             for i in T.Parallel(token_block):
@@ -256,22 +246,14 @@ def _mhc_pre_norm_fn_bwd_mul(
                 x_grad_frag = T.alloc_fragment((token_block, hidden_block), T.float32)
                 T.copy(x_grad[px * token_block, yz], x_grad_frag)
 
-                T.gemm(
-                    padded_grad,
-                    x_smem,
-                    fn_grad_frag,
-                    transpose_A=True,
-                    transpose_B=False,
-                    clear_accum=False,
-                )
-                T.gemm(
-                    padded_grad,
-                    fn_smem,
-                    x_grad_frag,
-                    transpose_A=False,
-                    transpose_B=False,
-                    clear_accum=False,
-                )
+                for j in T.serial(32):
+                    for k in T.Parallel(hidden_block):
+                        for i in T.serial(token_block):
+                            fn_grad_frag[j, k] += padded_grad[i, j] * x_smem[i, k]
+
+                for i, k in T.Parallel(token_block, hidden_block):
+                    for j in T.serial(32):
+                        x_grad_frag[i, k] += padded_grad[i, j] * fn_smem[j, k]
 
                 sqrsum_grad_frag = T.alloc_fragment((token_block, 1), T.float32)
                 T.copy(sqrsum_grad[px * token_block, pid_y], sqrsum_grad_frag)

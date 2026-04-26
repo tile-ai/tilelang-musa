@@ -10,6 +10,11 @@ from tile_kernels.utils import align
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        tilelang.PassConfigKey.TL_ENABLE_MUSA_BURST: True,
+        tilelang.PassConfigKey.TL_ENABLE_REDUCE_BURST: True,
+        tilelang.PassConfigKey.TL_DISABLE_SAFE_MEMORY_ACCESS: True,
+        tilelang.PassConfigKey.TL_DISABLE_INDEX_TYPE_PROMOTION: True,
     },
 )
 def get_topk_gate_kernel(num_experts: int, num_topk: int):
@@ -25,32 +30,30 @@ def get_topk_gate_kernel(num_experts: int, num_topk: int):
         with T.Kernel(num_tokens, threads=num_threads) as pid:
             scores_fragment = T.alloc_fragment((num_aligned_experts,), T.float32)
             amax_fragment = T.alloc_fragment((1,), T.float32)
-            idx_fragment = T.alloc_fragment((num_aligned_experts,), T.int32)
             idx_reducer = T.alloc_reducer((1,), T.int32, 'min', replication='all')
             topk_idx_shared = T.alloc_shared((num_topk,), T.int32)
 
+            pid_i64 = T.alloc_var(dtype=T.int64, init=T.cast(pid, T.int64))
+
             for i in T.Parallel(num_aligned_experts):
                 if i < num_experts:
-                    scores_fragment[i] = scores[pid, i]
+                    scores_fragment[i] = scores[pid_i64, i]
                 else:
                     scores_fragment[i] = -T.infinity(T.float32)
-            for i in T.Parallel(num_aligned_experts):
-                idx_fragment[i] = i
-
             # Get topk via repeatly finding max
             for k in T.unroll(num_topk):
                 T.reduce_max(scores_fragment, amax_fragment)
                 T.fill(idx_reducer, T.max_value(T.int32))
                 for i in T.Parallel(num_aligned_experts):
                     if scores_fragment[i] == amax_fragment[0]:
-                        idx_reducer[0] = T.min(idx_reducer[0], idx_fragment[i])
+                        idx_reducer[0] = T.min(idx_reducer[0], i)
                 T.finalize_reducer(idx_reducer)
                 topk_idx_shared[k] = idx_reducer[0]
                 for i in T.Parallel(num_aligned_experts):
-                    if idx_fragment[i] == idx_reducer[0]:
+                    if i == idx_reducer[0]:
                         scores_fragment[i] = -T.infinity(T.float32)
 
-            T.copy(topk_idx_shared, topk_idx[pid, 0], disable_tma=True)
+            T.copy(topk_idx_shared, topk_idx[pid_i64, 0], disable_tma=True)
 
     return topk_gate_kernel
 

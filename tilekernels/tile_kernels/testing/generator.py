@@ -58,8 +58,8 @@ def generate_topk_idx(params: dict) -> torch.Tensor:
     num_ep_ranks = params['num_ep_ranks']
 
     if num_send_tokens == 0:
-        return torch.empty((0, num_topk), dtype=torch.int64, device='cuda')
-    scores = torch.rand((num_send_tokens * num_ep_ranks, num_experts * num_ep_ranks), dtype=torch.bfloat16, device='cuda')
+        return torch.empty((0, num_topk), dtype=torch.int64, device='musa')
+    scores = torch.rand((num_send_tokens * num_ep_ranks, num_experts * num_ep_ranks), dtype=torch.bfloat16, device='musa')
     _, topk_idx = torch.topk(scores, k=num_topk, dim=-1, sorted=False)
     mask = topk_idx >= num_experts
     topk_idx[mask] = -1
@@ -82,9 +82,9 @@ _E5M6_SPECIAL_VALUES = (
 
 def generate_e5m6_inputs(num_tokens: int, hidden: int, dtype: torch.dtype) -> Iterable[tuple[torch.Tensor, bool]]:
     '''Yield (x, is_special) pairs: one random tensor, then e5m6 special-value tensors.'''
-    yield torch.randn((num_tokens, hidden), dtype=dtype, device='cuda'), False
+    yield torch.randn((num_tokens, hidden), dtype=dtype, device='musa'), False
     for value in _E5M6_SPECIAL_VALUES:
-        x = torch.full((num_tokens, hidden), value, dtype=dtype, device='cuda')
+        x = torch.full((num_tokens, hidden), value, dtype=dtype, device='musa')
         x[:, -1] = 65024.0
         yield x, True
 
@@ -93,12 +93,12 @@ def generate_rand_float(shape: tuple[int, ...]) -> torch.Tensor:
     # We want to sample from a uniform distribution over the exponent of sf
     exp = random.randint(-110, 126)
     sf = float(2**exp)
-    float_tensor = torch.randn(shape, dtype=torch.float32, device='cuda') * sf
+    float_tensor = torch.randn(shape, dtype=torch.float32, device='musa') * sf
 
     mask = torch.logical_or(torch.isnan(float_tensor), torch.isinf(float_tensor))
     if mask.any():
         num_values = mask.to(torch.int32).sum().item()
-        normal_values = torch.randn((num_values,), dtype=torch.float32, device='cuda')
+        normal_values = torch.randn((num_values,), dtype=torch.float32, device='musa')
         float_tensor[mask] = normal_values
 
     max_value = torch.finfo(torch.float32).max / 8

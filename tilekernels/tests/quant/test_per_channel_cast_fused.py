@@ -8,6 +8,7 @@ from tile_kernels.testing.generator import generate_topk_idx, generate_hidden_si
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.testing.bench import make_param_id
 from tile_kernels.torch.per_channel_cast_fused import per_channel_cast_fused as torch_ref_per_channel_cast_fused
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -30,11 +31,11 @@ def generate_test_data(params):
         _, pos_to_token, _, token_topk_to_pos, _, _, _, _ = (
             tile_kernels.moe.get_fused_mapping(topk_idx, num_experts, 0, 128)
         )
-        x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+        x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='musa')
         x = tile_kernels.moe.expand_to_fused(x, token_topk_to_pos, pos_to_token)
     else:
         num_tokens = num_send_tokens
-        x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+        x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='musa')
 
     if is_fused_cast_back:
         x = tile_kernels.quant.per_token_cast(x, 'e4m3', num_per_channels)
@@ -74,18 +75,20 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_per_channel_cast_fused(params):
     _, _, _, func, func_ref = generate_test_data(params)
 
     x_fp8, x_fp8_sf = func()
     x_fp8_ref, x_fp8_sf_ref = func_ref()
 
-    assert_equal(x_fp8, x_fp8_ref)
+    assert_equal(x_fp8.float(), x_fp8_ref.float())
     assert_equal(x_fp8_sf, x_fp8_sf_ref)
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_per_channel_cast_fused_benchmark(benchmark_timer, benchmark_record, params):
     x, num_tokens, pos_to_token, func, func_ref = generate_test_data(params)
 

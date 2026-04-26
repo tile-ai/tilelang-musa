@@ -4,9 +4,27 @@ import torch
 _num_sms = 0
 
 
+def _get_device_module():
+    if hasattr(torch, 'musa') and torch.musa.is_available():
+        return torch.musa
+    raise RuntimeError('MUSA is required for mp31/tilekernels')
+
+
+def get_device() -> torch.device:
+    if hasattr(torch, 'musa') and torch.musa.is_available():
+        return torch.device('musa')
+    raise RuntimeError('MUSA is required for mp31/tilekernels')
+
+
+def get_runtime_device_type() -> str:
+    _get_device_module()
+    return 'musa'
+
+
 @functools.lru_cache(maxsize=None)
 def get_device_num_sms() -> int:
-    prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+    device_mod = _get_device_module()
+    prop = device_mod.get_device_properties(device_mod.current_device())
     return prop.multi_processor_count
 
 
@@ -25,5 +43,4 @@ def get_num_sms() -> int:
 
 @functools.lru_cache(maxsize=None)
 def get_max_smem_per_sm() -> int:
-    prop = torch.cuda.get_device_properties(torch.cuda.current_device())
-    return prop.shared_memory_per_multiprocessor
+    return 192 * 1024

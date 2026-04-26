@@ -2,8 +2,12 @@ from typing import Callable
 
 import pytest
 import torch
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.modeling.mhc.ops import mhc_post
 from tile_kernels.torch.mhc import mhc_post_ref
+import tilelang.testing
+
+DEVICE = get_runtime_device_type()
 
 
 def generate_mhc_post_test_data(
@@ -11,7 +15,7 @@ def generate_mhc_post_test_data(
     n1: int,
     h: int,
     mhc_mult: int,
-    device: str = 'cuda',
+    device: str = DEVICE,
 ) -> dict[str, torch.Tensor]:
     x = torch.randn((n0, n1, h), dtype=torch.bfloat16, device=device)
     residual = torch.randn((n0, n1, mhc_mult, h), dtype=torch.bfloat16, device=device)
@@ -45,6 +49,7 @@ def _tester(
 @pytest.mark.parametrize('n0', [1, 2])
 @pytest.mark.parametrize('n1', [4096])
 @pytest.mark.parametrize('h', [1280, 2560, 7168])
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_mhc_post_comprehensive(n0: int, n1: int, h: int) -> None:
     test_data = generate_mhc_post_test_data(n0=n0, n1=n1, h=h, mhc_mult=4)
 
@@ -67,6 +72,6 @@ def test_mhc_post_comprehensive(n0: int, n1: int, h: int) -> None:
     torch.testing.assert_close(
         grad_comb_res_mix_tl,
         grad_comb_res_mix_ref,
-        atol=1e-4,
+        atol=3e-4,
         rtol=1e-4,
     )

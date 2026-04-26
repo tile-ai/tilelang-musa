@@ -61,8 +61,8 @@ def normalize_weight(topk_weights: torch.Tensor) -> tuple[torch.Tensor, torch.Te
     if int(os.getenv('TK_PRINT_KERNEL_SOURCE', 0)):
         print(kernel.get_kernel_source())
 
-    denominator = torch.empty((num_tokens,), dtype=torch.float32, device='cuda')
-    normalized_weights = torch.empty((num_tokens, num_topk), dtype=torch.float32, device='cuda')
+    denominator = torch.empty((num_tokens,), dtype=torch.float32, device='musa')
+    normalized_weights = torch.empty((num_tokens, num_topk), dtype=torch.float32, device='musa')
 
     if num_tokens > 0:
         kernel(topk_weights, denominator, normalized_weights)

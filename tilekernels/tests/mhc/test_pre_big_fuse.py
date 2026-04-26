@@ -1,5 +1,7 @@
 import pytest
 import torch
+import tilelang.testing
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.modeling.mhc.ops import (
     mhc_pre_apply_mix,
     mhc_pre_big_fuse,
@@ -7,6 +9,8 @@ from tile_kernels.modeling.mhc.ops import (
     mhc_pre_split_mixes,
     sinkhorn_normalize,
 )
+
+DEVICE = get_runtime_device_type()
 
 
 def generate_big_fuse_test_data(
@@ -23,7 +27,7 @@ def generate_big_fuse_test_data(
     n0 = 1
     mhc_mult2 = mhc_mult * mhc_mult
     mhc_mult3 = mhc_mult * 2 + mhc_mult2
-    device = 'cuda'
+    device = DEVICE
 
     residual = (
         torch.randn((n0, n1, mhc_mult, hidden_size), dtype=torch.float, device=device)
@@ -96,6 +100,7 @@ def big_fuse_reference(
 @pytest.mark.parametrize('n1', [512, 1024, 2048, 8192])
 @pytest.mark.parametrize('hidden_size', [1280, 2560, 4096])
 @pytest.mark.parametrize('mhc_mult', [4])
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_correctness(
     n1: int,
     hidden_size: int,

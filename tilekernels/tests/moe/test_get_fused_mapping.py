@@ -9,9 +9,63 @@ from tile_kernels.config import set_num_sms
 from tile_kernels.testing.generator import generate_topk_idx, generate_moe_params, generate_num_sms
 from tile_kernels.testing.numeric import count_bytes
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+
+
+def _has_musa() -> bool:
+    return hasattr(torch, 'musa') and torch.musa.is_available()
+
+
+def _get_fused_mapping_ref(
+    topk_idx: torch.Tensor,
+    num_experts: int,
+    alignment: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+    device = topk_idx.device
+    num_tokens, num_topk = topk_idx.shape
+    flat_topk_idx = topk_idx.reshape(-1)
+    valid_mask = flat_topk_idx >= 0
+    valid_flat_idx = torch.nonzero(valid_mask, as_tuple=False).flatten()
+    valid_expert_idx = flat_topk_idx[valid_mask].to(torch.int64)
+
+    counts = torch.bincount(valid_expert_idx, minlength=num_experts).to(torch.int32)
+    aligned_counts = ((counts + alignment - 1) // alignment) * alignment
+    expert_end = torch.cumsum(aligned_counts, dim=0)
+    expert_start = expert_end - aligned_counts
+    total_expanded = int(expert_end[-1].item()) if num_experts > 0 else 0
+
+    pos_to_expert = torch.full((total_expanded,), -1, dtype=torch.int32, device=device)
+    pos_to_token = torch.full((total_expanded,), -1, dtype=torch.int32, device=device)
+    pos_to_token_topk = torch.full((total_expanded,), -1, dtype=torch.int32, device=device)
+    token_topk_to_pos = torch.full((num_tokens, num_topk), -1, dtype=torch.int32, device=device)
+
+    if valid_flat_idx.numel() > 0:
+        sort_order = torch.argsort(valid_expert_idx, stable=True)
+        sorted_expert_idx = valid_expert_idx[sort_order]
+        sorted_flat_idx = valid_flat_idx[sort_order].to(torch.int32)
+        counts_i64 = counts.to(torch.int64)
+        expert_prefix = torch.cumsum(counts_i64, dim=0) - counts_i64
+        occurrence = torch.arange(sorted_flat_idx.numel(), device=device, dtype=torch.int64) - expert_prefix[sorted_expert_idx]
+        dst_pos = expert_start[sorted_expert_idx].to(torch.int64) + occurrence
+
+        pos_to_expert[dst_pos] = sorted_expert_idx.to(torch.int32)
+        pos_to_token[dst_pos] = sorted_flat_idx // num_topk
+        pos_to_token_topk[dst_pos] = sorted_flat_idx
+        token_topk_to_pos.view(-1)[sorted_flat_idx.to(torch.int64)] = dst_pos.to(torch.int32)
+
+    return (
+        pos_to_expert,
+        pos_to_token,
+        pos_to_token_topk,
+        token_topk_to_pos,
+        expert_start.contiguous(),
+        expert_end.contiguous(),
+        aligned_counts.contiguous(),
+        aligned_counts.tolist(),
+    )
 
 
 def generate_test_data(params):
@@ -35,6 +89,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_get_fused_mapping(params):
     alignment = params['alignment']
 
@@ -67,7 +122,7 @@ def test_get_fused_mapping(params):
             t_values = pos_to_token_topk[non_negative_mask]
             token_indices = t_values // num_topk
             topk_indices = t_values % num_topk
-            expected_indices = torch.arange(pos_to_token_topk.numel(), device='cuda')[non_negative_mask]
+            expected_indices = torch.arange(pos_to_token_topk.numel(), device=pos_to_token_topk.device)[non_negative_mask]
             actual_indices = token_topk_to_pos[token_indices, topk_indices]
             assert torch.equal(actual_indices, expected_indices)
             assert torch.equal(topk_idx[token_indices, topk_indices], pos_to_expert[non_negative_mask])
@@ -80,6 +135,7 @@ def test_get_fused_mapping(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_get_fused_mapping_benchmark(benchmark_timer, benchmark_record, params):
     alignment = params['alignment']
 
@@ -101,3 +157,27 @@ def test_get_fused_mapping_benchmark(benchmark_timer, benchmark_record, params):
         time_us=t_us,
         bandwidth_gbs=bandwidth_gbs,
     )
+
+
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+def test_get_fused_mapping_musa_focused_correctness() -> None:
+    if not _has_musa():
+        pytest.skip("MUSA is not available")
+
+    topk_idx = torch.tensor(
+        [
+            [0, 1],
+            [1, 2],
+            [0, 2],
+            [2, 3],
+        ],
+        device='musa',
+        dtype=torch.int64,
+    ).contiguous()
+
+    result = tile_kernels.moe.get_fused_mapping(topk_idx, num_experts=4, num_expanded_tokens=0, alignment=1)
+    ref = _get_fused_mapping_ref(topk_idx, num_experts=4, alignment=1)
+
+    for got, expected in zip(result[:7], ref[:7]):
+        assert torch.equal(got, expected), f"Mismatch in get_fused_mapping output\n{got}\nvs\n{expected}"
+    assert result[7] == ref[7]

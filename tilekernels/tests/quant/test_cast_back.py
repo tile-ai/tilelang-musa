@@ -6,6 +6,7 @@ import tile_kernels
 from tile_kernels.testing.bench import dtype_to_str, make_param_id
 from tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
 from tile_kernels.testing.numeric import assert_equal, calc_diff, count_bytes
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -21,7 +22,7 @@ def generate_test_data_per_token(params):
     num_per_channels = params['num_per_channels']
     out_dtype = params['out_dtype']
 
-    x = torch.randn((num_tokens, hidden), dtype=out_dtype, device='cuda')
+    x = torch.randn((num_tokens, hidden), dtype=out_dtype, device='musa')
     x_fp8, x_sf = tile_kernels.quant.per_token_cast(
         x, fmt, num_per_channels=num_per_channels,
         use_tma_aligned_col_major_sf=use_tma_aligned_col_major_sf,
@@ -43,7 +44,7 @@ def generate_test_data(params):
     num_per_tokens = params['num_per_tokens']
     num_per_channels = params['num_per_channels']
 
-    x = torch.randn((num_tokens, hidden), dtype=out_dtype, device='cuda')
+    x = torch.randn((num_tokens, hidden), dtype=out_dtype, device='musa')
     x_casted, x_sf = tile_kernels.torch.cast(x, fmt, (num_per_tokens, num_per_channels), round_sf=round_sf)
     out_dtype_str = dtype_to_str(out_dtype)
     func = lambda: tile_kernels.quant.cast_back(
@@ -95,6 +96,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params_per_token(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_cast_back_per_token(params):
     hidden = params['hidden']
     fmt = params['fmt']
@@ -102,10 +104,10 @@ def test_cast_back_per_token(params):
 
     # Test correctness
     x, x_fp8, x_sf, out_dtype_str, func = generate_test_data_per_token(params)
-    x_fp8_bf16 = func()
-    x_fp8_bf16_ref = tile_kernels.torch.cast_back((x_fp8, x_sf), out_dtype_str, (1, num_per_channels))
+    x_fp8_bf16 = func().cpu()
+    x_fp8_bf16_ref = tile_kernels.torch.cast_back((x_fp8, x_sf), out_dtype_str, (1, num_per_channels)).cpu()
 
-    diff = calc_diff(x, x_fp8_bf16)
+    diff = calc_diff(x.cpu(), x_fp8_bf16)
     assert diff < (2e-2 if fmt == 'e2m1' else 1e-3), f'{x}, {x_fp8_bf16}, {fmt=}, {hidden=}, {num_per_channels=}, {diff=}'
 
     assert_equal(x_fp8_bf16, x_fp8_bf16_ref)
@@ -113,6 +115,7 @@ def test_cast_back_per_token(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params_per_token(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_cast_back_per_token_benchmark(benchmark_timer, benchmark_record, params):
     x, x_fp8, x_sf, out_dtype_str, func = generate_test_data_per_token(params)
 
@@ -129,6 +132,7 @@ def test_cast_back_per_token_benchmark(benchmark_timer, benchmark_record, params
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_cast_back(params):
     num_per_tokens = params['num_per_tokens']
     num_per_channels = params['num_per_channels']
@@ -142,6 +146,7 @@ def test_cast_back(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_cast_back_benchmark(benchmark_timer, benchmark_record, params):
     x, x_casted, x_sf, out_dtype_str, func = generate_test_data(params)
 

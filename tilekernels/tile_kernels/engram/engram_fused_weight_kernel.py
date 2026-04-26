@@ -12,11 +12,10 @@ from tilelang import language as T
 )
 def get_engram_fused_weight_kernel(hidden_size: int, hc_mult: int):
     """Elementwise bf16 x bf16 -> fp32 for weight_hidden * weight_embed."""
-    threads = 32
+    threads = 128
     vec_size = 8
     blk_d = threads * vec_size
-    assert hidden_size % blk_d == 0
-    num_blk = hidden_size // blk_d
+    num_blk = T.ceildiv(hidden_size, blk_d)
 
     @T.prim_func
     def engram_fused_weight_kernel(
@@ -26,13 +25,13 @@ def get_engram_fused_weight_kernel(hidden_size: int, hc_mult: int):
     ):
         with T.Kernel(hc_mult, num_blk, threads=threads) as (pid_h, pid_b):
             tid = T.get_thread_binding()
-            a_local = T.alloc_local((vec_size,), T.float)
-            b_local = T.alloc_local((vec_size,), T.float)
             for i_k in T.vectorized(vec_size):
-                a_local[i_k] = weight_hidden[pid_h, pid_b * blk_d + tid * vec_size + i_k]
-                b_local[i_k] = weight_embed[pid_h, pid_b * blk_d + tid * vec_size + i_k]
-            for i_k in T.vectorized(vec_size):
-                weight_fused[pid_h, pid_b * blk_d + tid * vec_size + i_k] = a_local[i_k] * b_local[i_k]
+                pid_d = pid_b * blk_d + tid * vec_size + i_k
+                if pid_d < hidden_size:
+                    weight_fused[pid_h, pid_d] = (
+                        T.cast(weight_hidden[pid_h, pid_d], T.float32)
+                        * T.cast(weight_embed[pid_h, pid_d], T.float32)
+                    )
 
     return engram_fused_weight_kernel
 

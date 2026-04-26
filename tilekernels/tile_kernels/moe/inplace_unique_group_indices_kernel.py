@@ -10,7 +10,6 @@ from tile_kernels.utils import align
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: True,
     }
 )
 def get_inplace_unique_group_indices_kernel(num_topk: int, num_groups_aligned: int, num_sms: int):

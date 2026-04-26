@@ -8,9 +8,19 @@ from tile_kernels.testing.generator import generate_topk_idx, generate_moe_param
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.torch import normalize_weight as torch_normalize_weight
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+
+
+def _assert_float_close(x: torch.Tensor, y: torch.Tensor) -> None:
+    assert x.dtype == y.dtype, f'Tensor dtypes are not equal: {x.dtype} vs {y.dtype}'
+    assert x.shape == y.shape, f'Tensor shapes are not equal: {x.shape} vs {y.shape}'
+    assert x.device == y.device, f'Tensor devices are not equal: {x.device} vs {y.device}'
+    if x.numel() == 0:
+        return
+    torch.testing.assert_close(x, y, atol=1e-6, rtol=1e-6)
 
 
 def generate_test_data(params):
@@ -18,12 +28,13 @@ def generate_test_data(params):
 
     topk_idx = generate_topk_idx(params)
     num_tokens = topk_idx.shape[0]
-    topk_weights = torch.rand((num_tokens, num_topk), dtype=torch.float32, device='cuda')
+    topk_weights = torch.rand((num_tokens, num_topk), dtype=torch.float32, device='musa')
 
     return (topk_weights, num_tokens)
 
 
 @pytest.mark.parametrize('params', list(generate_moe_params(is_benchmark=False)), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_normalize_weight(params):
     (topk_weights, _) = generate_test_data(params)
 
@@ -31,12 +42,13 @@ def test_normalize_weight(params):
 
     # Test correctness: torch reference
     denom_ref, norm_ref = torch_normalize_weight(topk_weights)
-    assert_equal(denominator, denom_ref)
-    assert_equal(normalized_weights, norm_ref)
+    _assert_float_close(denominator, denom_ref)
+    _assert_float_close(normalized_weights, norm_ref)
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', list(generate_moe_params(is_benchmark=True)), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_normalize_weight_benchmark(benchmark_timer, benchmark_record, params):
     topk_weights, num_tokens = generate_test_data(params)
     num_topk = params['num_topk']

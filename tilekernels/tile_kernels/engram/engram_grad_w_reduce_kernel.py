@@ -47,8 +47,13 @@ def get_engram_grad_w_reduce_kernel(
             T.copy(grad_weight_hidden[pid_h, pid_b * blk_d : (pid_b + 1) * blk_d], grad_wh_fragment)
             T.copy(grad_weight_embed[pid_h, pid_b * blk_d : (pid_b + 1) * blk_d], grad_we_fragment)
 
-            for i_r in T.Pipelined(0, num_batches, num_stages=2):
-                T.copy(grad_w_partial[i_r * num_rows : (i_r + 1) * num_rows, pid_h, pid_b * blk_d : (pid_b + 1) * blk_d], grad_w_shared)
+            # Use a plain staged loop here to avoid async/tma pipeline deadlock on MUSA.
+            for i_r in T.Serial(num_batches):
+                T.copy(
+                    grad_w_partial[i_r * num_rows : (i_r + 1) * num_rows, pid_h, pid_b * blk_d : (pid_b + 1) * blk_d],
+                    grad_w_shared,
+                    disable_tma=True,
+                )
 
                 for i in T.Serial(num_rows):
                     for j in T.Parallel(blk_d):

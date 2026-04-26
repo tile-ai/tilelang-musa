@@ -12,6 +12,7 @@ from tile_kernels.testing.bench import make_param_id
 
 from tile_kernels.torch import topk_sum_and_topk_group_idx as torch_topk_sum_and_topk_group_idx
 from tile_kernels.torch import top2_sum_gate as torch_top2_sum_gate
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -54,6 +55,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_top2_sum_gate(params):
     num_groups = params['num_groups']
     num_topk_groups = params['num_topk_groups']
@@ -89,8 +91,8 @@ def test_top2_sum_gate(params):
 
     def construct_input(scoring_func: ScoringFunc):
         while True:
-            logits = torch.randn((num_tokens + num_padded_tokens, num_routed_experts), dtype=torch.float, device='cuda')
-            bias = torch.randn(num_routed_experts, dtype=torch.float, device='cuda')
+            logits = torch.randn((num_tokens + num_padded_tokens, num_routed_experts), dtype=torch.float, device='musa')
+            bias = torch.randn(num_routed_experts, dtype=torch.float, device='musa')
             scores = get_scores(logits[:num_tokens], scoring_func)
 
             # NOTES: We expect the top-k group to be stable, and since the internal kernel uses low-precision operations,
@@ -123,33 +125,33 @@ def test_top2_sum_gate(params):
     def get_kwargs(use_shared_as_routed: bool, num_extra_experts: int, num_tokens: int, num_padded_tokens: int, fix_routing: bool):
         mask = None
         if num_padded_tokens > 0:
-            mask = torch.ones(num_tokens + num_padded_tokens, dtype=torch.bool, device='cuda')
+            mask = torch.ones(num_tokens + num_padded_tokens, dtype=torch.bool, device='musa')
             mask[-num_padded_tokens:] = False
 
         to_physical_map = None
         logical_count = None
         fix_routing_mask = None
-        unmapped_topk_idx = torch.zeros((num_tokens + num_padded_tokens, num_topk), dtype=torch.int64, device='cuda')
+        unmapped_topk_idx = torch.zeros((num_tokens + num_padded_tokens, num_topk), dtype=torch.int64, device='musa')
 
         # Test to physical map
         if use_shared_as_routed:
             assert num_shared_experts <= num_extra_experts
-            to_physical_map = torch.arange(0, num_routed_experts + num_shared_experts, dtype=torch.int, device='cuda')
+            to_physical_map = torch.arange(0, num_routed_experts + num_shared_experts, dtype=torch.int, device='musa')
             to_physical_map = to_physical_map.view(-1, 1).expand(-1, num_extra_experts + 1).contiguous()
-            logical_count = torch.ones((num_routed_experts + num_shared_experts,), dtype=torch.int, device='cuda')
+            logical_count = torch.ones((num_routed_experts + num_shared_experts,), dtype=torch.int, device='musa')
 
         # Test fix routing mask
         if fix_routing:
-            fix_routing_mask = torch.ones((num_tokens + num_padded_tokens,), dtype=torch.bool, device='cuda')
+            fix_routing_mask = torch.ones((num_tokens + num_padded_tokens,), dtype=torch.bool, device='musa')
             # NOTES: Use separate generator to generate the same value for same (num_tokens, num_topk)
-            unmapped_topk_idx_generator = torch.Generator(device='cuda').manual_seed(42)
+            unmapped_topk_idx_generator = torch.Generator(device='musa').manual_seed(42)
             unmapped_topk_idx = torch.randint(
                 0,
                 num_routed_experts,
                 (num_tokens + num_padded_tokens, num_topk),
                 generator=unmapped_topk_idx_generator,
                 dtype=torch.int64,
-                device='cuda',
+                device='musa',
             )
         return dict(
             mask=mask,
@@ -215,8 +217,8 @@ def test_top2_sum_gate(params):
 
     # Check sort stability
     tp_rank = 0
-    logits = torch.zeros((num_tokens + num_padded_tokens, num_routed_experts), dtype=torch.float, device='cuda')
-    bias = torch.zeros(num_routed_experts, dtype=torch.float, device='cuda')
+    logits = torch.zeros((num_tokens + num_padded_tokens, num_routed_experts), dtype=torch.float, device='musa')
+    bias = torch.zeros(num_routed_experts, dtype=torch.float, device='musa')
     args = (
         logits,
         bias,
@@ -261,37 +263,37 @@ def generate_benchmark_test_case(params):
     tp_rank = num_tp_ranks - 1
     fix_routing = False
 
-    logits = torch.randn((num_tokens + num_padded_tokens, num_routed_experts), dtype=torch.float, device='cuda')
-    bias = torch.randn(num_routed_experts, dtype=torch.float, device='cuda')
+    logits = torch.randn((num_tokens + num_padded_tokens, num_routed_experts), dtype=torch.float, device='musa')
+    bias = torch.randn(num_routed_experts, dtype=torch.float, device='musa')
 
     # noinspection PyShadowingNames
     def get_kwargs(use_shared_as_routed, num_extra_experts, num_tokens, num_padded_tokens, fix_routing):
         mask = None
         if num_padded_tokens > 0:
-            mask = torch.ones(num_tokens + num_padded_tokens, dtype=torch.bool, device='cuda')
+            mask = torch.ones(num_tokens + num_padded_tokens, dtype=torch.bool, device='musa')
             mask[-num_padded_tokens:] = False
 
         to_physical_map = None
         logical_count = None
         fix_routing_mask = None
-        unmapped_topk_idx = torch.zeros((num_tokens + num_padded_tokens, num_topk), dtype=torch.int64, device='cuda')
+        unmapped_topk_idx = torch.zeros((num_tokens + num_padded_tokens, num_topk), dtype=torch.int64, device='musa')
 
         if use_shared_as_routed:
             assert num_shared_experts <= num_extra_experts
-            to_physical_map = torch.arange(0, num_routed_experts + num_shared_experts, dtype=torch.int, device='cuda')
+            to_physical_map = torch.arange(0, num_routed_experts + num_shared_experts, dtype=torch.int, device='musa')
             to_physical_map = to_physical_map.view(-1, 1).expand(-1, num_extra_experts + 1).contiguous()
-            logical_count = torch.ones((num_routed_experts + num_shared_experts,), dtype=torch.int, device='cuda')
+            logical_count = torch.ones((num_routed_experts + num_shared_experts,), dtype=torch.int, device='musa')
 
         if fix_routing:
-            fix_routing_mask = torch.ones((num_tokens + num_padded_tokens,), dtype=torch.bool, device='cuda')
-            unmapped_topk_idx_generator = torch.Generator(device='cuda').manual_seed(42)
+            fix_routing_mask = torch.ones((num_tokens + num_padded_tokens,), dtype=torch.bool, device='musa')
+            unmapped_topk_idx_generator = torch.Generator(device='musa').manual_seed(42)
             unmapped_topk_idx = torch.randint(
                 0,
                 num_routed_experts,
                 (num_tokens + num_padded_tokens, num_topk),
                 generator=unmapped_topk_idx_generator,
                 dtype=torch.int64,
-                device='cuda',
+                device='musa',
             )
         return dict(
             mask=mask,
@@ -322,6 +324,7 @@ def generate_benchmark_test_case(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_top2_sum_gate_benchmark(benchmark_timer, benchmark_record, params):
     scoring_func = params['scoring_func']
 

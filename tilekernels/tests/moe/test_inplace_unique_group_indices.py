@@ -9,6 +9,7 @@ from tile_kernels.config import set_num_sms
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.testing.generator import generate_moe_params, generate_topk_idx, generate_num_sms
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -35,6 +36,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_inplace_unique_group_indices(params):
     _group_indices, num_tokens = generate_test_data(params)
     num_groups = params['num_groups']
@@ -54,6 +56,7 @@ def test_inplace_unique_group_indices(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_inplace_unique_group_indices_benchmark(benchmark_timer, benchmark_record, params):
     _group_indices, num_tokens = generate_test_data(params)
     num_groups = params['num_groups']

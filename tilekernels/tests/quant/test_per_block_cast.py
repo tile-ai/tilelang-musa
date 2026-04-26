@@ -7,6 +7,7 @@ from tile_kernels.testing.bench import dtype_to_str, make_param_id
 from tile_kernels.testing.numeric import assert_equal, count_bytes, check_bias
 from tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
 from tile_kernels.testing.quant import clear_unused_sf
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -22,7 +23,7 @@ def generate_test_data(params):
     round_sf = params['round_sf']
     use_packed_ue8m0 = params['use_packed_ue8m0']
 
-    x = torch.randn((num_tokens, hidden), dtype=in_dtype, device='cuda')
+    x = torch.randn((num_tokens, hidden), dtype=in_dtype, device='musa')
     base_args = dict(
         x=x, fmt=fmt, block_size=block_size,
         use_tma_aligned_col_major_sf=use_tma_aligned_col_major_sf,
@@ -55,6 +56,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_per_block_cast(params):
     hidden = params['hidden']
     use_tma_aligned_col_major_sf = params['use_tma_aligned_col_major_sf']
@@ -71,7 +73,7 @@ def test_per_block_cast(params):
         per_block_sf_inv = clear_unused_sf(per_block_sf_inv, hidden, block_size[1])
         per_block_sf_inv_ref = clear_unused_sf(per_block_sf_inv_ref, hidden, block_size[1])
     assert_equal(per_block_sf_inv, per_block_sf_inv_ref)
-    assert_equal(x_casted, x_casted_ref)
+    assert_equal(x_casted.float(), x_casted_ref.float())
 
     # Check bias
     check_bias(x_casted_back, x)
@@ -81,7 +83,7 @@ def test_per_block_cast(params):
         # TMA aligned or packed ue8m0 sf is used for FP8/FP4 GEMM, not for other cast
         x_casted = tile_kernels.quant.per_block_cast_with_precomputed_sf(**base_args, sf=per_block_sf_inv)
         x_casted_ref = tile_kernels.torch.cast(**base_args, sf=per_block_sf_inv)
-        assert_equal(x_casted, x_casted_ref)
+        assert_equal(x_casted.float(), x_casted_ref.float())
 
     # Test sf only mode
     twice_per_block_sf_inv = tile_kernels.quant.per_block_cast_with_sf_only(**base_args)
@@ -92,6 +94,7 @@ def test_per_block_cast(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_per_block_cast_benchmark(benchmark_timer, benchmark_record, params):
     x, args = generate_test_data(params)
 

@@ -4,15 +4,17 @@ import tilelang
 import torch
 from tilelang import language as T
 
-from tile_kernels.moe.common import get_topk_group_idx
-from tile_kernels.utils import align
+from tile_kernels.moe.common import write_topk_group_idx_global
 
 
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_OUT_OF_BOUND_WARNING: True,
         tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        tilelang.PassConfigKey.TL_ENABLE_MUSA_BURST: True,
+        tilelang.PassConfigKey.TL_ENABLE_REDUCE_BURST: True,
+        tilelang.PassConfigKey.TL_DISABLE_SAFE_MEMORY_ACCESS: True,
+        tilelang.PassConfigKey.TL_DISABLE_INDEX_TYPE_PROMOTION: True,
     },
 )
 def get_topk_sum_and_topk_group_idx_kernel(
@@ -21,9 +23,8 @@ def get_topk_sum_and_topk_group_idx_kernel(
     num_topk_groups: int,
     num_topk_sum: int,
 ):
-    num_threads = 32
+    num_threads = 128
     num_experts = num_experts_per_group * num_groups
-    num_aligned_experts = align(num_experts, num_threads)
     num_tokens_per_block = num_threads // 32
 
     assert num_groups <= 32, f'num_groups ({num_groups}) must be <= warp size (32)'
@@ -41,29 +42,22 @@ def get_topk_sum_and_topk_group_idx_kernel(
         scores: T.Tensor[(num_tokens, num_experts), T.float32],
         group_topk_idx: T.Tensor[(num_tokens, num_topk_groups), T.int64],
     ):
-        with T.Kernel(num_tokens, threads=num_threads) as pid:
-            scores_shared = T.alloc_shared((num_tokens_per_block, num_aligned_experts), T.float32)
-            topk_group_idx_shared = T.alloc_shared((num_tokens_per_block, num_topk_groups), T.int32)
-
+        with T.Kernel(T.ceildiv(num_tokens, num_tokens_per_block), threads=num_threads) as pid:
             thread_idx = T.get_thread_binding()
             warp_idx = thread_idx // 32
-            lane_idx = thread_idx % 32
+            global_token_idx = pid * num_tokens_per_block + warp_idx
 
-            T.copy(scores[pid * num_tokens_per_block, 0], scores_shared)
-            T.sync_warp()
-
-            get_topk_group_idx(
-                scores_shared=scores_shared,
-                topk_group_idx_shared=topk_group_idx_shared,
-                num_groups=num_groups,
-                num_experts_per_group=num_experts_per_group,
-                num_topk_groups=num_topk_groups,
-                num_topk_sum=num_topk_sum,
-                num_vectorize_for_grouped_expert=num_vectorize_for_grouped_expert,
-            )
-
-            if lane_idx < num_topk_groups:
-                group_topk_idx[pid * num_tokens_per_block + warp_idx, lane_idx] = topk_group_idx_shared[warp_idx, lane_idx]
+            if global_token_idx < num_tokens:
+                write_topk_group_idx_global(
+                    scores=scores,
+                    group_topk_idx=group_topk_idx,
+                    global_token_idx=global_token_idx,
+                    num_groups=num_groups,
+                    num_experts_per_group=num_experts_per_group,
+                    num_topk_groups=num_topk_groups,
+                    num_topk_sum=num_topk_sum,
+                    num_vectorize_for_grouped_expert=num_vectorize_for_grouped_expert,
+                )
 
     return topk_sum_and_topk_group_idx_kernel
 

@@ -57,10 +57,9 @@ def swiglu_forward(
         assert topk_weights is not None
         assert topk_weights.dim() == 2
 
-    # Split into left (gate) and right (value) halves
-    x_fp32 = x.float()
-    x_left = x_fp32[:, :hidden]
-    x_right = x_fp32[:, hidden:]
+    # Materialize the two halves directly to avoid keeping a full FP32 copy of x.
+    x_left = x[:, :hidden].float()
+    x_right = x[:, hidden:].float()
 
     # Optional clamp before activation
     if swiglu_clamp_value is not None:
@@ -149,14 +148,13 @@ def swiglu_backward(
     assert pos_to_token_topk.shape == (num_expand_tokens,)
     assert token_topk_to_pos.shape == (num_tokens, num_topk)
 
-    # Dequantize x from FP8 to FP32
-    # Expand sf to match x shape
-    x_sf_expanded = x_sf.repeat_interleave(num_per_channels, dim=1)
-    x_fp32 = x_data.float() * x_sf_expanded
-
-    # Split x into x and y parts
-    x_part = x_fp32[:, :hidden]
-    y_part = x_fp32[:, hidden:]
+    # Dequantize the two halves separately to reduce peak memory pressure.
+    num_channel_blocks = hidden // num_per_channels
+    x_part_sf = x_sf[:, :num_channel_blocks].repeat_interleave(num_per_channels, dim=1)
+    y_part_sf = x_sf[:, num_channel_blocks:].repeat_interleave(num_per_channels, dim=1)
+    x_part = x_data[:, :hidden].float() * x_part_sf
+    y_part = x_data[:, hidden:].float() * y_part_sf
+    del x_part_sf, y_part_sf
 
     # Apply SwiGLU clamp if needed
     use_clamp = swiglu_clamp_value is not None

@@ -1,8 +1,12 @@
 import pytest
 import torch
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.modeling.mhc.ops.multilayer_recompute import mhc_multilayer_recompute
 from tile_kernels.modeling.mhc.ops.post import mhc_post
 from tile_kernels.modeling.mhc.ops.pre_apply_mix import mhc_pre_apply_mix
+import tilelang.testing
+
+DEVICE = get_runtime_device_type()
 
 
 _CORRECTNESS_CASES = [
@@ -47,13 +51,13 @@ def generate_multilayer_recompute_test_data(
     list[torch.Tensor],
     list[torch.Tensor],
 ]:
-    initial_residual = torch.randn(bs, seq, mhc_mult, hidden, device='cuda', dtype=torch.bfloat16)
-    pre_mix_list = [torch.randn(bs, seq, mhc_mult, 1, device='cuda', dtype=torch.float32) for _ in range(num_layers)]
-    layer_output_list = [torch.randn(bs, seq, hidden, device='cuda', dtype=torch.bfloat16) for _ in range(num_post)]
-    post_mix_list = [torch.randn(bs, seq, mhc_mult, 1, device='cuda', dtype=torch.float32) for _ in range(num_post)]
-    comb_mix_list = [torch.randn(bs, seq, mhc_mult, mhc_mult, device='cuda', dtype=torch.float32) for _ in range(num_post)]
-    layer_input_list = [torch.empty(bs, seq, hidden, device='cuda', dtype=torch.bfloat16) for _ in range(num_layers)]
-    residual_list = [torch.empty(bs, seq, mhc_mult, hidden, device='cuda', dtype=torch.bfloat16) for _ in range(num_post)]
+    initial_residual = torch.randn(bs, seq, mhc_mult, hidden, device=DEVICE, dtype=torch.bfloat16)
+    pre_mix_list = [torch.randn(bs, seq, mhc_mult, 1, device=DEVICE, dtype=torch.float32) for _ in range(num_layers)]
+    layer_output_list = [torch.randn(bs, seq, hidden, device=DEVICE, dtype=torch.bfloat16) for _ in range(num_post)]
+    post_mix_list = [torch.randn(bs, seq, mhc_mult, 1, device=DEVICE, dtype=torch.float32) for _ in range(num_post)]
+    comb_mix_list = [torch.randn(bs, seq, mhc_mult, mhc_mult, device=DEVICE, dtype=torch.float32) for _ in range(num_post)]
+    layer_input_list = [torch.empty(bs, seq, hidden, device=DEVICE, dtype=torch.bfloat16) for _ in range(num_layers)]
+    residual_list = [torch.empty(bs, seq, mhc_mult, hidden, device=DEVICE, dtype=torch.bfloat16) for _ in range(num_post)]
     return initial_residual, pre_mix_list, layer_output_list, post_mix_list, comb_mix_list, layer_input_list, residual_list
 
 
@@ -89,6 +93,7 @@ def _compute_io_bytes(n: int, mhc_mult: int, hidden: int, num_layers: int, num_p
 
 
 @pytest.mark.parametrize('num_layers,num_post,hidden', _CORRECTNESS_CASES)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_mhc_multilayer_recompute_correctness(num_layers: int, num_post: int, hidden: int) -> None:
     torch.manual_seed(0)
     initial_residual, pre_mix_list, layer_output_list, post_mix_list, comb_mix_list, layer_input_list, residual_list = (
@@ -109,6 +114,7 @@ def test_mhc_multilayer_recompute_correctness(num_layers: int, num_post: int, hi
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('num_layers,num_post,bs,seq,mhc_mult,hidden', _BENCH_CASES)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_mhc_multilayer_recompute_benchmark(
     num_layers: int,
     num_post: int,

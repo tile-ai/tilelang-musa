@@ -8,6 +8,7 @@ from tile_kernels.testing.bench import dtype_to_str, make_param_id
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens, generate_e5m6_inputs
 from tile_kernels.torch import cast_to_e5m6
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -53,6 +54,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_per_token_cast_to_e5m6(params):
     num_tokens = params['num_tokens']
     hidden = params['hidden']
@@ -85,6 +87,7 @@ def test_per_token_cast_to_e5m6(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_per_token_cast_to_e5m6_benchmark(benchmark_timer, benchmark_record, params):
     hidden = params['hidden']
     use_tma_aligned_col_major_sf = params['use_tma_aligned_col_major_sf']

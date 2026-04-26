@@ -63,7 +63,7 @@ def group_count(group_idx: torch.Tensor, num_groups: int) -> torch.Tensor:
     if int(os.getenv('TK_PRINT_KERNEL_SOURCE', 0)):
         print(kernel.get_kernel_source())
 
-    out = torch.zeros(num_groups, dtype=torch.int32, device='cuda')
+    out = torch.zeros(num_groups, dtype=torch.int32, device='musa')
     kernel(group_idx, out)
 
     return out

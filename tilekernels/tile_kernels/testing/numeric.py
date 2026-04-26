@@ -2,6 +2,10 @@ import math
 import torch
 
 
+def _requires_bytewise_compare(dtype: torch.dtype) -> bool:
+    return 'float8' in str(dtype)
+
+
 def assert_equal(x: torch.Tensor, y: torch.Tensor,
                     check_dtype: bool = True,
                     check_shape: bool = True,
@@ -16,11 +20,25 @@ def assert_equal(x: torch.Tensor, y: torch.Tensor,
         f'Tensor devices are not equal: {x.device} vs {y.device}'
     # Hints: The tensor with a size of [32768, 1] and a stride of [1, 32768] is considered contiguous,
     # but using .view will cause an error. Therefore, .flatten is used to ensure the stride of the last dimension is 1.
+    x_bytes = x.contiguous().flatten().view(torch.uint8)
+    y_bytes = y.contiguous().flatten().view(torch.uint8)
+    if torch.equal(x_bytes, y_bytes):
+        return
+
+    if _requires_bytewise_compare(x.dtype):
+        mask = x_bytes != y_bytes
+        raise AssertionError(
+            f'Tensor values are not equal: {x.shape=} vs {y.shape=}\n'
+            f'byte_mask={torch.nonzero(mask)}\n'
+            f'x_bytes={x_bytes[mask]}\nvs\ny_bytes={y_bytes[mask]}'
+        )
+
     mask = x != y
-    assert torch.equal(x.contiguous().flatten().view(torch.uint8), y.contiguous().flatten().view(torch.uint8)), \
-        f'Tensor values are not equal: {x.shape=} vs {y.shape=}\n' \
-        f'mask={torch.nonzero(mask)}\n' \
-        f'{x[mask]}\nvs\n{y[mask]}' \
+    raise AssertionError(
+        f'Tensor values are not equal: {x.shape=} vs {y.shape=}\n'
+        f'mask={torch.nonzero(mask)}\n'
+        f'{x[mask]}\nvs\n{y[mask]}'
+    )
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:

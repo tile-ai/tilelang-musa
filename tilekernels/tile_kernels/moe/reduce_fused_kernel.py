@@ -3,7 +3,7 @@ import torch
 import tilelang
 from tilelang import language as T
 from typing import Optional, Union
-from tile_kernels.quant.common import *
+QuantTensor = tuple[torch.Tensor, torch.Tensor]
 
 
 @tilelang.jit(
@@ -112,7 +112,7 @@ def reduce_fused(
         num_tokens_, hidden_ = out.shape
         assert num_tokens == num_tokens_ and hidden == hidden_
     else:
-        out = torch.empty((num_tokens, hidden), dtype=out_dtype, device='cuda')
+        out = torch.empty((num_tokens, hidden), dtype=out_dtype, device='musa')
 
     if x_sf is not None:
         num_expanded_tokens_ = x_sf.shape[0]

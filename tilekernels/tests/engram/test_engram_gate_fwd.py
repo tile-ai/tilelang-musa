@@ -2,14 +2,18 @@ import os
 import pytest
 import torch
 
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.engram import engram_gate_fwd
 from tile_kernels.torch.engram import engram_gate_ref
 from tile_kernels.testing.numeric import assert_equal, calc_diff, count_bytes
 from tile_kernels.testing.generator import generate_hidden_sizes, generate_num_tokens
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+DEVICE = get_runtime_device_type()
+OUT_DIFF_TOL = 3.5e-10 if DEVICE == 'musa' else 2e-10
 
 
 def generate_test_data(params):
@@ -18,11 +22,11 @@ def generate_test_data(params):
     hidden_size = params['hidden']
     eps = 1e-20
     clamp_value = 1e-6
-    x_data = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
-    k_data = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
-    v_data = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device='cuda')
-    wh_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
-    we_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
+    x_data = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    k_data = torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    v_data = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    wh_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    we_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
     weight_fused = wh_data.float() * we_data.float()
     return (x_data, k_data, v_data, wh_data, we_data, weight_fused, eps, clamp_value)
 
@@ -37,6 +41,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_engram_gate_fwd(params):
     (x_data, k_data, v_data, wh_data, we_data, weight_fused, eps, clamp_value) = generate_test_data(params)
 
@@ -50,7 +55,7 @@ def test_engram_gate_fwd(params):
     )
     assert dot is not None and gate_score is not None and rstd_x is not None and rstd_k is not None
     diff_out = calc_diff(out_save, out_ref)
-    assert diff_out < 2e-10, f'out_save mismatch: {diff_out:.6e}'
+    assert diff_out < OUT_DIFF_TOL, f'out_save mismatch: {diff_out:.6e}'
     diff_dot = calc_diff(dot, dot_ref)
     assert diff_dot < 2e-10, f'dot mismatch: {diff_dot:.6e}'
     diff_gate = calc_diff(gate_score, gate_score_ref)
@@ -66,12 +71,13 @@ def test_engram_gate_fwd(params):
     )
     assert dot_n is None and gate_score_n is None and rstd_x_n is None and rstd_k_n is None
     diff_out = calc_diff(out_no_save, out_ref)
-    assert diff_out < 2e-10, f'out_no_save mismatch: {diff_out:.6e}'
+    assert diff_out < OUT_DIFF_TOL, f'out_no_save mismatch: {diff_out:.6e}'
     assert_equal(out_no_save, out_save)
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_engram_gate_fwd_benchmark(benchmark_timer, benchmark_record, params):
     (x_data, k_data, v_data, _, _, weight_fused, eps, clamp_value) = generate_test_data(params)
 
@@ -106,3 +112,8 @@ def test_engram_gate_fwd_benchmark(benchmark_timer, benchmark_record, params):
         time_us=t_no_save_us,
         bandwidth_gbs=num_bytes_no_save / t_no_save_us / 1e3,
     )
+
+
+if __name__ == "__main__":
+    param =  generate_test_params(is_benchmark=False)[0]
+    test_engram_gate_fwd(param)

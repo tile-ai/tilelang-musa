@@ -39,8 +39,10 @@ def get_per_channel_cast_fused_kernel(
     if in_config.with_sf:
         TILE_K = 256
 
-    # Set num_threads_per_token = 32 to avoid bank conflict
-    num_threads_per_token = 32
+    # Set num_threads_per_token = 32 to avoid bank conflict on the common path.
+    # For large hidden sizes, use a wider per-thread vector to reduce per-CTA
+    # thread grouping overhead while preserving contiguous vectorized access.
+    num_threads_per_token = 16 if hidden >= 6144 and not in_config.with_sf and not with_expand else 32
     assert TILE_K % num_threads_per_token == 0
 
     # Each thread processes a block of size VEC_M * VEC_K
@@ -195,8 +197,8 @@ def per_channel_cast_fused(
     if int(os.getenv('TK_PRINT_KERNEL_SOURCE', 0)):
         print(kernel.get_kernel_source())
 
-    out = torch.empty((num_tokens_out, hidden), dtype=out_config.torch_dtype, device='cuda')
-    out_sf = torch.empty((ceil_div(num_tokens_out, num_per_tokens), hidden), dtype=torch.float32, device='cuda')
+    out = torch.empty((num_tokens_out, hidden), dtype=out_config.torch_dtype, device='musa')
+    out_sf = torch.empty((ceil_div(num_tokens_out, num_per_tokens), hidden), dtype=torch.float32, device='musa')
     if num_tokens_out > 0:
         kernel(x, out, out_sf, x_sf_invs, pos_to_token)
 

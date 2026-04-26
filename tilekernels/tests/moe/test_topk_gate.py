@@ -7,6 +7,7 @@ from tile_kernels.testing.generator import generate_num_tokens
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.testing.bench import make_param_id
 from tile_kernels.torch import stable_topk as torch_stable_topk
+import tilelang.testing
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
 
@@ -28,7 +29,7 @@ _EXPERT_CONFIGS = [
 def generate_test_data(params):
     num_tokens = params['num_tokens']
     num_experts = params['num_experts']
-    scores = torch.randn((num_tokens, num_experts), dtype=torch.float, device='cuda')
+    scores = torch.randn((num_tokens, num_experts), dtype=torch.float, device='musa')
     return scores
 
 
@@ -45,6 +46,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_topk_gate(params):
     scores = generate_test_data(params)
     num_topk = params['num_topk']
@@ -56,6 +58,7 @@ def test_topk_gate(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_topk_gate_benchmark(benchmark_timer, benchmark_record, params):
     scores = generate_test_data(params)
     num_topk = params['num_topk']

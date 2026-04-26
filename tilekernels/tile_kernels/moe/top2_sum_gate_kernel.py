@@ -19,7 +19,6 @@ def warp_reduce_sum(x: T.Ref):
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_OUT_OF_BOUND_WARNING: True,
         tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
     },
 )
@@ -262,7 +261,7 @@ def get_top2_sum_gate_kernel(
             # Get topk sum
             topk_sum_var = 1e-20
             for i in T.unroll(num_topk):
-                topk_sum_var += T.shfl_sync(topk_score_var, i)
+                topk_sum_var += T.shfl_sync(0xFFFFFFFF, topk_score_var, i)
 
             # Ensure one warp can handle one token
             T.device_assert(num_physical_topk <= warp_size)

@@ -9,6 +9,7 @@ from tile_kernels.testing.generator import generate_topk_idx, generate_moe_param
 from tile_kernels.testing.numeric import calc_diff, count_bytes
 from tile_kernels.torch import aux_fi as torch_aux_fi
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
@@ -30,6 +31,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_aux_fi(params):
     topk_idx, num_tokens = generate_test_data(params)
     num_experts = params['num_experts']
@@ -46,6 +48,7 @@ def test_aux_fi(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_aux_fi_benchmark(benchmark_timer, benchmark_record, params):
     topk_idx, num_tokens = generate_test_data(params)
     num_experts = params['num_experts']

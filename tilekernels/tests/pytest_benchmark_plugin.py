@@ -62,25 +62,25 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line('markers', 'benchmark: mark test as benchmark (skip by default)')
-    # Bind each xdist worker to a GPU via CUDA_VISIBLE_DEVICES and restrict
+    # Bind each xdist worker to a GPU via MUSA_VISIBLE_DEVICES and restrict
     # per-process GPU memory so that concurrent workers don't OOM.
     worker_id = os.environ.get('PYTEST_XDIST_WORKER', None)
-    if worker_id is not None:
+    if worker_id is not None and hasattr(torch, 'musa') and torch.musa.is_available():
         gpu_id = int(worker_id.replace('gw', ''))
-        num_gpus = torch.cuda.device_count()
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id % num_gpus)
+        num_gpus = torch.musa.device_count()
+        os.environ['MUSA_VISIBLE_DEVICES'] = str(gpu_id % num_gpus)
 
         # Restrict each worker's GPU memory to (total - 10 GB) / workers_per_gpu.
         # PYTEST_XDIST_WORKER_COUNT is set by pytest-xdist automatically.
         total_workers = int(os.environ.get('PYTEST_XDIST_WORKER_COUNT', '1'))
         workers_per_gpu = math.ceil(total_workers / num_gpus)
         _reserve_bytes = 10 * (1024 ** 3)  # 10 GB reserved for system / frameworks
-        total_mem = torch.cuda.mem_get_info(0)[1]
+        total_mem = torch.musa.mem_get_info(0)[1]
         usable_mem = max(total_mem - _reserve_bytes, 0)
         mem_per_worker = usable_mem / workers_per_gpu
         fraction = mem_per_worker / total_mem
         fraction = max(min(fraction, 1.0), 0.0)
-        torch.cuda.set_per_process_memory_fraction(fraction)
+        torch.musa.set_per_process_memory_fraction(fraction)
 
     # Shared state for collecting benchmark results across this session
     config._benchmark_results = []
@@ -473,5 +473,4 @@ def _load_baselines():
             rec = json.loads(line)
             baselines[_make_key(rec)] = rec
     return baselines
-
 

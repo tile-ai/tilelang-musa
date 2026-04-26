@@ -59,7 +59,33 @@ def _float32_to_fp16_rtz_bits(x: torch.Tensor) -> torch.Tensor:
     result = torch.where(is_nan & (mant != 0), result | 0x7FFF, result)
     result = torch.where(underflow, sign.to(torch.int32), result)
 
-    return result.to(torch.uint16)
+    # Keep the bit pattern in int32 form so the reference path stays compatible
+    # with MUSA, which does not support materializing torch.uint16 tensors.
+    return result & 0xFFFF
+
+
+def _pack_uint32_words_to_bytes(words: torch.Tensor, num_tokens: int, hidden: int) -> torch.Tensor:
+    # Avoid materializing torch.uint32 tensors: torch_musa cannot convert them reliably.
+    bytes_ = torch.stack(
+        [
+            (words & 0xFF).to(torch.uint8),
+            ((words >> 8) & 0xFF).to(torch.uint8),
+            ((words >> 16) & 0xFF).to(torch.uint8),
+            ((words >> 24) & 0xFF).to(torch.uint8),
+        ],
+        dim=-1,
+    )
+    return bytes_.view(num_tokens, hidden // 8 * 12)
+
+
+def _unpack_uint32_words_from_bytes(x: torch.Tensor, num_tokens: int, hidden: int) -> torch.Tensor:
+    bytes_ = x.contiguous().view(num_tokens, hidden // 8, 3, 4).to(torch.int64)
+    return (
+        bytes_[..., 0]
+        | (bytes_[..., 1] << 8)
+        | (bytes_[..., 2] << 16)
+        | (bytes_[..., 3] << 24)
+    )
 
 
 def _cast_to_e5m6(x: torch.Tensor) -> torch.Tensor:
@@ -75,7 +101,7 @@ def _cast_to_e5m6(x: torch.Tensor) -> torch.Tensor:
     fp16_bits = _float32_to_fp16_rtz_bits(x)
 
     remain_bits = x_bits & 0x1FFFF
-    e5m6_bits = right_shift_unsigned(fp16_bits.to(torch.int32), 4)
+    e5m6_bits = right_shift_unsigned(fp16_bits, 4)
     lsb = e5m6_bits & 1
     cond = (lsb.to(torch.int64) + remain_bits.to(torch.int64)) > 0x10000
     e5m6_bits = (e5m6_bits + cond.to(torch.int32)) & 0xFFF
@@ -96,8 +122,7 @@ def _cast_to_e5m6(x: torch.Tensor) -> torch.Tensor:
     w2 = (h5 << 24) | (h6 << 12) | h7
 
     packed = torch.stack([w0, w1, w2], dim=-1)
-    packed = packed.to(torch.uint32).view(num_tokens, hidden // 8 * 3)
-    return packed.view(torch.uint8)
+    return _pack_uint32_words_to_bytes(packed, num_tokens, hidden)
 
 
 def _cast_back_from_e5m6(x: torch.Tensor) -> torch.Tensor:
@@ -108,12 +133,11 @@ def _cast_back_from_e5m6(x: torch.Tensor) -> torch.Tensor:
     hidden = packed_hidden * 2 // 3
     assert hidden % 8 == 0
 
-    words = x.contiguous().view(torch.uint32)
-    words = words.view(num_tokens, hidden // 8, 3)
+    words = _unpack_uint32_words_from_bytes(x, num_tokens, hidden)
 
-    w0 = words[..., 0].to(torch.int64)
-    w1 = words[..., 1].to(torch.int64)
-    w2 = words[..., 2].to(torch.int64)
+    w0 = words[..., 0]
+    w1 = words[..., 1]
+    w2 = words[..., 2]
 
     f16_0 = ((w0 >> 16) & 0xFFF0).to(torch.int32)
     f16_1 = ((w0 >> 4) & 0xFFF0).to(torch.int32)

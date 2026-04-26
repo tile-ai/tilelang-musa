@@ -141,7 +141,7 @@ def get_sf_shape(shape: tuple[int, int], config: BaseCastConfig) -> tuple[int, i
 def alloc_scaling_factors(
     shape: tuple[int, int],
     out_config: BaseCastConfig,
-    device: torch.device = 'cuda',
+    device: torch.device = 'musa',
 ) -> torch.Tensor:
     """
     Allocate scaling factors for quantization.

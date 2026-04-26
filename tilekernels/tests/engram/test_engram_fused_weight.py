@@ -2,20 +2,23 @@ import os
 import pytest
 import torch
 
+from tile_kernels.config import get_runtime_device_type
 from tile_kernels.engram import fused_weight
 from tile_kernels.testing.numeric import assert_equal, count_bytes
 from tile_kernels.testing.generator import generate_hidden_sizes
 from tile_kernels.testing.bench import make_param_id
+import tilelang.testing
 
 # Disable TileLang prints
 os.environ['TILELANG_PRINT_ON_COMPILATION'] = '0'
+DEVICE = get_runtime_device_type()
 
 
 def generate_test_data(params):
     hc_mult = params['hc']
     hidden_size = params['hidden']
-    wh_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
-    we_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device='cuda')
+    wh_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    we_data = torch.randn(hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE)
     return (wh_data, we_data)
 
 
@@ -28,6 +31,7 @@ def generate_test_params(is_benchmark: bool) -> list[dict]:
 
 
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=False), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_engram_fused_weight(params):
     wh_data, we_data = generate_test_data(params)
 
@@ -39,6 +43,7 @@ def test_engram_fused_weight(params):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(is_benchmark=True), ids=make_param_id)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_engram_fused_weight_benchmark(benchmark_timer, benchmark_record, params):
     wh_data, we_data = generate_test_data(params)
     out = fused_weight(wh_data, we_data)
