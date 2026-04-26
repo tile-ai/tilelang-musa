@@ -116,6 +116,7 @@ class LibraryGenerator:
                 get_mcc_compiler(),
                 src.name,
                 "-std=c++17",
+                "-Wno-error=address-of-temporary",
                 "--shared",
                 "-fPIC",
                 f"--offload-arch=mp_{target_arch}",

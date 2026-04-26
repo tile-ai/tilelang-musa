@@ -121,6 +121,7 @@ def tilelang_callback_musa_compile(code, target, pass_config=None):
     musa_arch_macro = target_arch + "0"
     options = [
         "-std=c++17",
+        "-Wno-error=address-of-temporary",
         "-I" + TILELANG_TEMPLATE_PATH,
         "-I" + MUTLASS_INCLUDE_DIR,
         f"-D__MUSA_ARCH_LIST__={musa_arch_macro}",
