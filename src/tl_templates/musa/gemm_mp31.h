@@ -600,8 +600,10 @@ public:
     }
   }
 
-  static TL_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC) {
-    const int tid = threadIdx.x;
+  static TL_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC,
+                             int thread_idx_base = 0) {
+    // Fragment layouts are bound to the local warp-specialized thread window.
+    const int tid = threadIdx.x - thread_idx_base;
     Tensor sA_all = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
                                 SmemLayoutA{});
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
@@ -723,8 +725,10 @@ public:
                 "num_warp_m must be a multiple of 4 for sqmma");
 
   template <int wg_wait = 0>
-  static TL_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC) {
-    const int tid = threadIdx.x;
+  static TL_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC,
+                             int thread_idx_base = 0) {
+    // Fragment layouts are bound to the local warp-specialized thread window.
+    const int tid = threadIdx.x - thread_idx_base;
     Tensor sA = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
                             SmemLayoutA{});
     Tensor sB = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
@@ -770,7 +774,8 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           int offset_a = 0, int offset_b = 0, bool use_sqmma = true,
           int inst_m = 0, int inst_n = 0, int inst_k = 0, int wg_wait = 0,
           typename A_type, typename B_type, typename C_type>
-TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
+TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum,
+                       int thread_idx_base = 0) {
   if constexpr (use_sqmma) {
     static_assert((trans_A && lda == M) || (!trans_A && lda == K),
                   "SQMMA doesn't support custom stride for A");
@@ -781,14 +786,14 @@ TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
     using MMA = mute::tl_sqmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
                                              trans_A, trans_B, clear_accum,
                                              A_type, B_type, C_type>;
-    MMA::template body<wg_wait>(pA, pB, accum);
+    MMA::template body<wg_wait>(pA, pB, accum, thread_idx_base);
   } else {
     using MMA =
         mute::tl_wmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                     trans_B, clear_accum, lda, ldb, offset_a,
                                     offset_b, inst_m, inst_n, inst_k, A_type,
                                     B_type, C_type>;
-    MMA::body(pA, pB, accum);
+    MMA::body(pA, pB, accum, thread_idx_base);
   }
 }
 

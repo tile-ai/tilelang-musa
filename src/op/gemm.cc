@@ -823,10 +823,11 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Var k_iter("k", DataType::Int(32));
 
     PrimExpr num_threads = T.thread_bounds->extent;
+    PrimExpr local_thread_var = T.thread_var - T.thread_bounds->min;
     PrimExpr total = IntImm(DataType::Int(32), m_ * n_);
     PrimExpr trip = FloorDiv(total + num_threads - 1, num_threads);
 
-    PrimExpr linear = idx_iter * num_threads + T.thread_var;
+    PrimExpr linear = idx_iter * num_threads + local_thread_var;
     PrimExpr guard = linear < total;
     PrimExpr i = FloorDiv(linear, n_);
     PrimExpr j = linear - i * n_;
@@ -1015,8 +1016,11 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
   ss << ">"; // tl::gemm op end
 
-  auto new_call = Call(DataType::Handle(), tl::tl_gemm(),
-                       Array<PrimExpr>{StringImm(ss.str()), Aptr, Bptr, Cptr});
+  Array<PrimExpr> gemm_args{StringImm(ss.str()), Aptr, Bptr, Cptr};
+  if (TargetIsPH1(T.target) && op_name == "tl::gemm_ss") {
+    gemm_args.push_back(T.thread_bounds->min);
+  }
+  auto new_call = Call(DataType::Handle(), tl::tl_gemm(), gemm_args);
   return AttrStmt(Integer(0), tl::kGemmInst,
                   Integer(static_cast<int>(gemm_inst)), Evaluate(new_call));
 }
