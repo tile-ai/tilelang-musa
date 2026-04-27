@@ -57,74 +57,71 @@ using v32i32_t = int32_t __attribute__((vector_size(128)));
 #define _AS1 __attribute__((address_space(1)))
 #define _AS3 __attribute__((address_space(3)))
 
-TL_HOST_DEVICE tl_h_elem_t make_tl_h_elem(half_t x) {
-  return *((tl_h_elem_t *)&x);
-}
+TL_DEVICE tl_h_elem_t make_tl_h_elem(half_t x) { return *((tl_h_elem_t *)&x); }
 
-TL_HOST_DEVICE tl_bf_elem_t make_tl_bf_elem(bfloat16_t x) {
+TL_DEVICE tl_bf_elem_t make_tl_bf_elem(bfloat16_t x) {
   return *((tl_bf_elem_t *)&x);
 }
 
-TL_HOST_DEVICE tl_h2 make_tl_h2(tl_h_elem_t x0, tl_h_elem_t x1) {
+TL_DEVICE tl_h2 make_tl_h2(tl_h_elem_t x0, tl_h_elem_t x1) {
   return tl_h2{x0, x1};
 }
 
-TL_HOST_DEVICE tl_h2 make_tl_h2(half_t x0, half_t x1) {
+TL_DEVICE tl_h2 make_tl_h2(half_t x0, half_t x1) {
   return make_tl_h2(make_tl_h_elem(x0), make_tl_h_elem(x1));
 }
 
-TL_HOST_DEVICE tl_h4 make_tl_h4(tl_h_elem_t x0, tl_h_elem_t x1, tl_h_elem_t x2,
-                                tl_h_elem_t x3) {
+TL_DEVICE tl_h4 make_tl_h4(tl_h_elem_t x0, tl_h_elem_t x1, tl_h_elem_t x2,
+                           tl_h_elem_t x3) {
   return tl_h4{x0, x1, x2, x3};
 }
 
-TL_HOST_DEVICE tl_h4 make_tl_h4(half_t x0, half_t x1, half_t x2, half_t x3) {
+TL_DEVICE tl_h4 make_tl_h4(half_t x0, half_t x1, half_t x2, half_t x3) {
   return make_tl_h4(make_tl_h_elem(x0), make_tl_h_elem(x1), make_tl_h_elem(x2),
                     make_tl_h_elem(x3));
 }
 
-TL_HOST_DEVICE tl_h8 make_tl_h8(tl_h_elem_t x0, tl_h_elem_t x1, tl_h_elem_t x2,
-                                tl_h_elem_t x3, tl_h_elem_t x4, tl_h_elem_t x5,
-                                tl_h_elem_t x6, tl_h_elem_t x7) {
+TL_DEVICE tl_h8 make_tl_h8(tl_h_elem_t x0, tl_h_elem_t x1, tl_h_elem_t x2,
+                           tl_h_elem_t x3, tl_h_elem_t x4, tl_h_elem_t x5,
+                           tl_h_elem_t x6, tl_h_elem_t x7) {
   return tl_h8{x0, x1, x2, x3, x4, x5, x6, x7};
 }
 
-TL_HOST_DEVICE tl_h8 make_tl_h8(half_t x0, half_t x1, half_t x2, half_t x3,
-                                half_t x4, half_t x5, half_t x6, half_t x7) {
+TL_DEVICE tl_h8 make_tl_h8(half_t x0, half_t x1, half_t x2, half_t x3,
+                           half_t x4, half_t x5, half_t x6, half_t x7) {
   return make_tl_h8(make_tl_h_elem(x0), make_tl_h_elem(x1), make_tl_h_elem(x2),
                     make_tl_h_elem(x3), make_tl_h_elem(x4), make_tl_h_elem(x5),
                     make_tl_h_elem(x6), make_tl_h_elem(x7));
 }
 
-TL_HOST_DEVICE tl_bf2 make_tl_bf2(tl_bf_elem_t x0, tl_bf_elem_t x1) {
+TL_DEVICE tl_bf2 make_tl_bf2(tl_bf_elem_t x0, tl_bf_elem_t x1) {
   return tl_bf2{x0, x1};
 }
 
-TL_HOST_DEVICE tl_bf2 make_tl_bf2(bfloat16_t x0, bfloat16_t x1) {
+TL_DEVICE tl_bf2 make_tl_bf2(bfloat16_t x0, bfloat16_t x1) {
   return make_tl_bf2(make_tl_bf_elem(x0), make_tl_bf_elem(x1));
 }
 
-TL_HOST_DEVICE tl_bf4 make_tl_bf4(tl_bf_elem_t x0, tl_bf_elem_t x1,
-                                  tl_bf_elem_t x2, tl_bf_elem_t x3) {
+TL_DEVICE tl_bf4 make_tl_bf4(tl_bf_elem_t x0, tl_bf_elem_t x1, tl_bf_elem_t x2,
+                             tl_bf_elem_t x3) {
   return tl_bf4{x0, x1, x2, x3};
 }
 
-TL_HOST_DEVICE tl_bf4 make_tl_bf4(bfloat16_t x0, bfloat16_t x1, bfloat16_t x2,
-                                  bfloat16_t x3) {
+TL_DEVICE tl_bf4 make_tl_bf4(bfloat16_t x0, bfloat16_t x1, bfloat16_t x2,
+                             bfloat16_t x3) {
   return make_tl_bf4(make_tl_bf_elem(x0), make_tl_bf_elem(x1),
                      make_tl_bf_elem(x2), make_tl_bf_elem(x3));
 }
 
-TL_HOST_DEVICE tl_bf8 make_tl_bf8(tl_bf_elem_t x0, tl_bf_elem_t x1,
-                                  tl_bf_elem_t x2, tl_bf_elem_t x3,
-                                  tl_bf_elem_t x4, tl_bf_elem_t x5,
-                                  tl_bf_elem_t x6, tl_bf_elem_t x7) {
+TL_DEVICE tl_bf8 make_tl_bf8(tl_bf_elem_t x0, tl_bf_elem_t x1, tl_bf_elem_t x2,
+                             tl_bf_elem_t x3, tl_bf_elem_t x4, tl_bf_elem_t x5,
+                             tl_bf_elem_t x6, tl_bf_elem_t x7) {
   return tl_bf8{x0, x1, x2, x3, x4, x5, x6, x7};
 }
 
-TL_HOST_DEVICE tl_bf8 make_tl_bf8(bfloat16_t x0, bfloat16_t x1, bfloat16_t x2,
-                                  bfloat16_t x3, bfloat16_t x4, bfloat16_t x5,
-                                  bfloat16_t x6, bfloat16_t x7) {
+TL_DEVICE tl_bf8 make_tl_bf8(bfloat16_t x0, bfloat16_t x1, bfloat16_t x2,
+                             bfloat16_t x3, bfloat16_t x4, bfloat16_t x5,
+                             bfloat16_t x6, bfloat16_t x7) {
   return make_tl_bf8(make_tl_bf_elem(x0), make_tl_bf_elem(x1),
                      make_tl_bf_elem(x2), make_tl_bf_elem(x3),
                      make_tl_bf_elem(x4), make_tl_bf_elem(x5),
