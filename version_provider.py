@@ -58,21 +58,14 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
             # only on macosx_11_0_arm64, not necessary
             # backend = 'metal'
             pass
-        elif _read_cmake_bool(os.environ.get("USE_MUSA", "")):
-            backend = "musa"
+        elif _read_cmake_bool(os.environ.get("USE_CUDA", "")):
+            backend = "cuda"
         elif _read_cmake_bool(os.environ.get("USE_ROCM", "")):
             backend = "rocm"
-        elif "USE_CUDA" in os.environ and not _read_cmake_bool(os.environ.get("USE_CUDA")):
+        elif "USE_MUSA" in os.environ and not _read_cmake_bool(os.environ.get("USE_MUSA")):
             backend = "cpu"
         else:  # cuda
-            # Read nvcc version from env.
-            # This is not exactly how it should be,
-            # but works for now if building in a nvidia/cuda image.
-            if cuda_version := os.environ.get("CUDA_VERSION"):
-                major, minor, *_ = cuda_version.split(".")
-                backend = f"cu{major}{minor}"
-            else:
-                backend = "cuda"
+            backend = "musa"
         if backend:
             exts.append(backend)
             if patch_version:
