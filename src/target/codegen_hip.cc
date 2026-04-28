@@ -125,7 +125,13 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    // AMD wavefront size is 64.  Sub-wavefront thread counts (e.g. 32)
+    // with __launch_bounds__ can cause the compiler to miscompile 64-bit
+    // shuffle operations when combined with #pragma unroll.  Only emit
+    // launch_bounds when we have at least a full wavefront.
+    if (threadIdx_ext_int->value >= 64) {
+      stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    }
   }
 }
 
@@ -1371,13 +1377,17 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangHIP *p) { // NOLINT(*)
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
-    os << "bfloat16_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << "bfloat16_t(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
     return;
   } else if (op->dtype.is_float8_e4m3fnuz() || op->dtype.is_float8_e4m3() ||
              op->dtype.is_float8_e4m3fn()) {
-    os << "fp8_e4_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << "fp8_e4_t(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
     return;
   }
   // Type code is kFloat
