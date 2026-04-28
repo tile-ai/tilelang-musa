@@ -78,11 +78,9 @@ else()
 endif()
 
 # Configs
-set(TILELANG_BACKENDS CUDA ROCM METAL MUSA)
+set(TILELANG_BACKENDS CUDA MUSA)
 
 set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
-set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
-set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
 set(TILELANG_BACKEND_DOC_MUSA "Enable MUSA backend (ON/OFF/or MUSA SDK path)")
 
 # TVM's config.cmake redefines USE_* options later, so we cache the user's choice
@@ -182,6 +180,8 @@ list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
 )
 
+set(TILELANG_OUTPUT_TARGETS tilelang tvm)
+
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -194,14 +194,7 @@ endforeach()
 
 # Only auto-select a backend when the user didn't specify one explicitly.
 if(NOT TILELANG_BACKEND_USER_SELECTED)
-  if($ENV{USE_METAL})
-    set(USE_METAL ON)
-  elseif(APPLE)
-    message(STATUS "Enable Metal support by default.")
-    set(USE_METAL ON)
-  elseif($ENV{USE_ROCM})
-    set(USE_ROCM ON)
-  elseif($ENV{USE_MUSA})
+  if($ENV{USE_MUSA})
     set(USE_MUSA ON)
   else()
     if($ENV{USE_CUDA})
@@ -216,168 +209,10 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
   endif()
 endif()
 
-if(USE_METAL)
-  if(NOT APPLE)
-    # On non-Apple platforms USE_METAL=ON enables only codegen (Metal source
-    # generation) without requiring the Metal/Foundation frameworks.
-    message(STATUS "Metal backend on non-Apple: enabling codegen-only mode (no Metal runtime)")
-    set(USE_METAL OFF)
-  endif()
-  file(GLOB TILE_LANG_METAL_SRCS
-    src/target/rt_mod_metal.cc
-  )
-  list(APPEND TILE_LANG_SRCS ${TILE_LANG_METAL_SRCS})
-  # FIXME: CIBW failed with backtrace, why???
-  set(TVM_FFI_USE_LIBBACKTRACE OFF)
-elseif(USE_ROCM)
-  set(CMAKE_HIP_STANDARD 17)
-  include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
-  find_rocm(${USE_ROCM})
-  add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
-
-  file(GLOB TILE_LANG_HIP_SRCS
-    src/target/codegen_hip.cc
-    src/target/rt_mod_hip.cc
-  )
-  list(APPEND TILE_LANG_SRCS ${TILE_LANG_HIP_SRCS})
-  list(APPEND TILE_LANG_INCLUDES ${ROCM_INCLUDE_DIRS})
-elseif(USE_MUSA)
-  if(DEFINED ENV{MUSA_HOME})
-    set(MUSA_HOME $ENV{MUSA_HOME})
-  else()
-    set(MUSA_HOME "/usr/local/musa")
-  endif()
-  list(APPEND CMAKE_MODULE_PATH ${MUSA_HOME}/cmake)
-  find_package(MUSAToolkit REQUIRED)
-  if(NOT MUSAToolkit_FOUND)
-    message(FATAL_ERROR "Cannot find MUSA, USE_MUSA=" ${USE_MUSA})
-  endif()
-  message(STATUS "Build with MUSA ${MUSAToolkit_VERSION} support")
-
-  add_compile_definitions("MUSA_MAJOR_VERSION=${MUSAToolkit_VERSION_MAJOR}")
-
-  file(GLOB TILE_LANG_MUSA_SRCS
-    src/runtime/runtime.cc
-    src/target/codegen_musa.cc
-    src/target/ptx.cc
-    src/target/rt_mod_musa.cc
-  )
-
-  list(APPEND TILE_LANG_SRCS ${TILE_LANG_MUSA_SRCS})
-  list(APPEND TILE_LANG_INCLUDES ${MUSAToolkit_INCLUDE_DIRS})
-elseif(USE_CUDA)
-  set(CMAKE_CUDA_STANDARD 17)
-  find_package(CUDAToolkit REQUIRED)
-  set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc")
-  add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
-
-  # Set `USE_CUDA=/usr/local/cuda-x.y`
-  cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
-
-  if(TILELANG_USE_CUDA_STUBS)
-    if(WIN32 AND NOT CYGWIN)
-      message(FATAL_ERROR "TILELANG_USE_CUDA_STUBS=ON is not supported on Windows. "
-                          "Please configure with -DTILELANG_USE_CUDA_STUBS=OFF.")
-    endif()
-
-    # ============================================================================
-    # CUDA Driver Stub Library (libcuda_stub.so)
-    # ============================================================================
-    # This library provides drop-in replacements for CUDA driver API functions.
-    # Instead of linking directly against libcuda.so (which would fail on
-    # CPU-only machines), we link against this stub which loads libcuda.so
-    # lazily at runtime on first API call.
-    #
-    # The stub exports global C functions matching the CUDA driver API:
-    #   - cuModuleLoadData, cuLaunchKernel, cuMemsetD32_v2, etc.
-    # These can be called directly without any wrapper macros.
-    # ============================================================================
-    add_library(cuda_stub SHARED src/target/stubs/cuda.cc)
-    target_include_directories(cuda_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-    # Export symbols with visibility="default" when building
-    target_compile_definitions(cuda_stub PRIVATE TILELANG_CUDA_STUB_EXPORTS)
-    # Use dlopen/dlsym for runtime library loading
-    target_link_libraries(cuda_stub PRIVATE ${CMAKE_DL_LIBS})
-    set_target_properties(cuda_stub PROPERTIES
-      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      # Use consistent naming
-      OUTPUT_NAME "cuda_stub"
-    )
-
-    # ============================================================================
-    # CUDA Runtime Stub Library (libcudart_stub.so)
-    # ============================================================================
-    # libcudart's SONAME includes its major version (e.g. libcudart.so.11.0 / .12 / .13).
-    # Link against this stub instead of the real libcudart so a single wheel can
-    # run in environments that provide different libcudart major versions.
-    #
-    # The stub exports a minimal set of CUDA Runtime API entrypoints used by TVM
-    # and lazily loads libcudart at runtime on first API call.
-    # ============================================================================
-    add_library(cudart_stub SHARED src/target/stubs/cudart.cc)
-    target_include_directories(cudart_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-    target_compile_definitions(cudart_stub PRIVATE TILELANG_CUDART_STUB_EXPORTS)
-    target_link_libraries(cudart_stub PRIVATE ${CMAKE_DL_LIBS})
-    set_target_properties(cudart_stub PROPERTIES
-      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      OUTPUT_NAME "cudart_stub"
-    )
-
-    # Make TVM link against our CUDA Runtime stub instead of the real libcudart.
-    #
-    # NOTE: TVM's `find_cuda()` calls `find_library(CUDA_CUDART_LIBRARY cudart ...)`.
-    # `find_library()` will not override an already-cached variable, so setting it
-    # here ensures TVM doesn't record a DT_NEEDED on `libcudart.so.<major>`.
-    set(CUDA_CUDART_LIBRARY cudart_stub CACHE STRING "CUDART library to link against" FORCE)
-
-    # ============================================================================
-    # NVRTC Stub Library (libnvrtc_stub.so)
-    # ============================================================================
-    # NVRTC's SONAME includes its major version (e.g. libnvrtc.so.11.2 / .12 / .13).
-    # Link against this stub instead of the real NVRTC library so a single wheel
-    # can run in environments that provide different NVRTC major versions.
-    #
-    # The stub exports a minimal set of NVRTC C API entrypoints used by TVM and
-    # lazily loads libnvrtc at runtime on first API call.
-    # ============================================================================
-    add_library(nvrtc_stub SHARED src/target/stubs/nvrtc.cc)
-    target_include_directories(nvrtc_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-    target_compile_definitions(nvrtc_stub PRIVATE TILELANG_NVRTC_STUB_EXPORTS)
-    target_link_libraries(nvrtc_stub PRIVATE ${CMAKE_DL_LIBS})
-    set_target_properties(nvrtc_stub PROPERTIES
-      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      OUTPUT_NAME "nvrtc_stub"
-    )
-
-    # Make TVM link against our NVRTC stub instead of the real libnvrtc.
-    #
-    # NOTE: TVM's `find_cuda()` calls `find_library(CUDA_NVRTC_LIBRARY nvrtc ...)`.
-    # `find_library()` will not override an already-cached variable, so setting it
-    # here ensures TVM doesn't record a DT_NEEDED on `libnvrtc.so.<major>`.
-    set(CUDA_NVRTC_LIBRARY nvrtc_stub CACHE STRING "NVRTC library to link against" FORCE)
-  endif()
-
-  file(GLOB TILE_LANG_CUDA_SRCS
-    src/runtime/runtime.cc
-    src/target/ptx.cc
-    src/target/codegen_cuda.cc
-    src/target/codegen_py.cc
-    src/target/codegen_utils.cc
-    src/target/codegen_cutedsl.cc
-    src/target/rt_mod_cuda.cc
-    src/target/rt_mod_cutedsl.cc
-  )
-  list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
-
-  list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
-  link_directories(${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR}/stubs)
-endif()
+# Backend-local CMake files own native source lists, stubs, include paths, and
+# compile definitions. Top-level CMake only selects and delegates.
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/backend/cuda/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/backend/musa/CMakeLists.txt")
 
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
 set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
@@ -457,17 +292,15 @@ if(USE_Z3 AND USE_PYPI_Z3)
   endif()
 endif()
 
-set(TILELANG_OUTPUT_TARGETS tilelang tvm)
-
-if(USE_CUDA AND TILELANG_USE_CUDA_STUBS)
-  # Link against CUDA stub library instead of libcuda.so
-  # This enables lazy loading of libcuda.so at runtime, allowing
-  # `import tilelang` to succeed on CPU-only machines.
+if(DEFINED TILELANG_ACTIVE_BACKEND_STUB_LINK)
   foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
-    target_link_libraries(${target} PUBLIC cuda_stub)
+    target_link_libraries(${target} PUBLIC ${TILELANG_ACTIVE_BACKEND_STUB_LINK})
   endforeach()
-  # Include CUDA stubs in output targets for RPATH configuration
-  list(APPEND TILELANG_OUTPUT_TARGETS cuda_stub cudart_stub nvrtc_stub)
+endif()
+
+# Append stub targets after the linking loop so they don't link to themselves
+if(DEFINED TILELANG_ACTIVE_BACKEND_STUB_TARGETS)
+  list(APPEND TILELANG_OUTPUT_TARGETS ${TILELANG_ACTIVE_BACKEND_STUB_TARGETS})
 endif()
 
 unset(PATCHELF_EXECUTABLE CACHE)
@@ -483,8 +316,8 @@ elseif(UNIX)
   if(USE_Z3 AND USE_PYPI_Z3)
     string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
   endif()
-  if(USE_CUDA)
-    string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../nvidia/cu${CUDAToolkit_VERSION_MAJOR}/lib")
+  if(DEFINED TILELANG_ACTIVE_BACKEND_RPATH_EXTRA)
+    string(APPEND TILELANG_INSTALL_RPATH "${TILELANG_ACTIVE_BACKEND_RPATH_EXTRA}")
   endif()
   find_program(PATCHELF_EXECUTABLE patchelf)
   if (NOT PATCHELF_EXECUTABLE)
@@ -502,25 +335,23 @@ foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
   )
 endforeach()
 
-# Exclude libcuda.so to allow importing on a CPU-only machine
-if(USE_CUDA AND TILELANG_USE_CUDA_STUBS AND PATCHELF_EXECUTABLE)
-  # Run `patchelf` on built libraries to remove libcuda.so dependency.
-  # Use `install(CODE ...)` instead of `add_custom_command(... POST_BUILD ...)`
-  # to avoid race conditions during linking.
+# Strip backend runtime dependencies for portable wheels
+if(DEFINED TILELANG_ACTIVE_BACKEND_PATCHELF_REMOVE AND PATCHELF_EXECUTABLE)
+  foreach(_needed IN LISTS TILELANG_ACTIVE_BACKEND_PATCHELF_REMOVE)
+    set(_patchelf_remove_args "${_patchelf_remove_args} --remove-needed ${_needed}")
+  endforeach()
   foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
     install(CODE "
       execute_process(
-        COMMAND ${PATCHELF_EXECUTABLE}
-          --remove-needed libcuda.so.1
-          --remove-needed libcuda.so
+        COMMAND ${PATCHELF_EXECUTABLE}${_patchelf_remove_args}
           \"$<TARGET_FILE:${target}>\"
         WORKING_DIRECTORY \"${CMAKE_INSTALL_PREFIX}\"
         RESULT_VARIABLE patchelf_result
       )
       if(patchelf_result EQUAL 0)
-        message(STATUS \"`patchelf` successfully removed dependency `libcuda.so` from $<TARGET_FILE:${target}>\")
+        message(STATUS \"patchelf: removed dependencies from $<TARGET_FILE:${target}>\")
       else()
-        message(WARNING \"`patchelf` failed to remove dependency `libcuda.so` from $<TARGET_FILE:${target}>\")
+        message(WARNING \"patchelf failed for $<TARGET_FILE:${target}>\")
       endif()
     ")
   endforeach()
