@@ -666,6 +666,14 @@ private:
 
     int buffer_vec_size = loop_extent_vector_size_;
 
+    // This prevents generating unsupported wide vector dtypes in arithmetic
+    // expressions (e.g. float32x16) after vector loop lowering.
+    int dtype_lane_cap =
+        vector_load_bits_max_ / (buffer->dtype.bits() * buffer->dtype.lanes());
+    if (dtype_lane_cap > 0) {
+      buffer_vec_size = arith::ZeroAwareGCD(buffer_vec_size, dtype_lane_cap);
+    }
+
     // Transform indices using layout_map if present
     auto transformed_indices = TransformIndices(indices, buffer);
 

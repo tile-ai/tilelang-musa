@@ -16,14 +16,6 @@ BF16 = "bfloat16"
 FP32 = "float32"
 
 
-def get_test_device() -> str:
-    if hasattr(torch, "musa") and torch.musa.is_available():
-        return "musa"
-    if torch.cuda.is_available():
-        return "cuda"
-    raise RuntimeError("Neither MUSA nor CUDA is available")
-
-
 @tilelang.jit(pass_configs=pass_configs)
 def fp8_gemm_kernel(N, K, out_dtype=BF16, accum_dtype="float32"):
     assert out_dtype in [BF16, "float32"]
@@ -128,7 +120,7 @@ def test_fp8_gemm(
     check_correctness: bool = True,
 ):
     torch.random.manual_seed(0)
-    device = get_test_device()
+    device = "musa"
 
     a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
     b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)

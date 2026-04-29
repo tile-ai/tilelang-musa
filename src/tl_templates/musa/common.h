@@ -417,8 +417,17 @@ struct float_e4m3_t : public mutlass::float_e4m3_t {
   float_e4m3_t() = default;
 
   TL_HOST_DEVICE
+  float_e4m3_t(mutlass::float_e4m3_t x) : mutlass::float_e4m3_t(x) {}
+
+  TL_HOST_DEVICE
   explicit float_e4m3_t(__mt_bfloat16 x)
       : float_e4m3_t(static_cast<float>(x)) {}
+
+  TL_HOST_DEVICE
+  float_e4m3_t &operator=(mutlass::float_e4m3_t x) {
+    mutlass::float_e4m3_t::operator=(x);
+    return *this;
+  }
 };
 
 struct float_e5m2_t : public mutlass::float_e5m2_t {
@@ -428,8 +437,17 @@ struct float_e5m2_t : public mutlass::float_e5m2_t {
   float_e5m2_t() = default;
 
   TL_HOST_DEVICE
+  float_e5m2_t(mutlass::float_e5m2_t x) : mutlass::float_e5m2_t(x) {}
+
+  TL_HOST_DEVICE
   explicit float_e5m2_t(__mt_bfloat16 x)
       : float_e5m2_t(static_cast<float>(x)) {}
+
+  TL_HOST_DEVICE
+  float_e5m2_t &operator=(mutlass::float_e5m2_t x) {
+    mutlass::float_e5m2_t::operator=(x);
+    return *this;
+  }
 };
 
 template <typename T> struct to_mute_type {

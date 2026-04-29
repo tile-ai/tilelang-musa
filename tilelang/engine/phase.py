@@ -225,12 +225,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
     # Decouple type cast vectorization constraints before vectorization.
-    # Keep MUSA behavior aligned with tilelang_musa_6 to preserve vectorized
-    # cast lowering in T.Parallel kernels.
-    from tilelang.jit.adapter.utils import is_musa_target
-
-    if not is_musa_target(target):
-        mod = tilelang.transform.DecoupleTypeCast()(mod)
+    mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
