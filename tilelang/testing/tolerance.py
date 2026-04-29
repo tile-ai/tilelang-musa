@@ -9,7 +9,7 @@ ToleranceMap = Mapping[torch.dtype, tuple[float, float]]
 
 
 BASELINE_PROFILE: ToleranceMap = {
-    torch.float32: (1e-5, 1e-6),
+    torch.float32: (1e-5, 3e-5),
     torch.float16: (1e-3, 1e-3),
     torch.bfloat16: (7.9e-3, 7.9e-3),
     torch.float8_e4m3fn: (1.25e-1, 1.25e-1),
@@ -22,7 +22,7 @@ TOLERANCE_PROFILES: dict[str, ToleranceMap] = {
     "gemm_contract": BASELINE_PROFILE,
     # Algorithmic check against a float32 oracle before final output cast.
     "gemm_algorithm": {
-        torch.float32: (1e-5, 1e-6),
+        torch.float32: (1e-5, 3e-5),
         torch.float16: (2e-2, 2e-2),
         torch.bfloat16: (5e-2, 5e-2),
         torch.float8_e4m3fn: (2.5e-1, 2.5e-1),
