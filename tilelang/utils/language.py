@@ -6,7 +6,7 @@ from tilelang.language.utils import get_buffer_region_from_load
 from functools import reduce
 from tvm import IRModule, DataType
 from tvm.tir import PrimFunc
-from tvm import ir, tir
+from tvm import ir, tir, arith
 from tvm.tir.expr import CallEffectKind
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
@@ -415,6 +415,28 @@ def prim_expr_equal(lhs, rhs) -> bool:
     if ir.structural_equal(lhs, rhs):
         return True
     return tir.analysis.expr_deep_equal(lhs, rhs)
+
+
+def prim_expr_provably_equal(lhs, rhs) -> bool:
+    """
+    Equality for PrimExpr with algebraic proving support.
+
+    This first uses ``prim_expr_equal`` (fast structural/deep checks).
+    If that fails, it falls back to arithmetic simplification and
+    ``Analyzer.can_prove_equal``.
+    """
+    if prim_expr_equal(lhs, rhs):
+        return True
+    if isinstance(lhs, int):
+        lhs = tir.IntImm("int32", lhs)
+    if isinstance(rhs, int):
+        rhs = tir.IntImm("int32", rhs)
+    analyzer = arith.Analyzer()
+    lhs_simplified = analyzer.simplify(lhs)
+    rhs_simplified = analyzer.simplify(rhs)
+    if prim_expr_equal(lhs_simplified, rhs_simplified):
+        return True
+    return analyzer.can_prove_equal(lhs_simplified, rhs_simplified)
 
 
 def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[list, list]:

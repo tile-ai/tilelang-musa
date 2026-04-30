@@ -82,5 +82,34 @@ def test_view_shape_mismatch():
         view_shape_mismatch_test(1024, 32, T.float32)
 
 
+def test_view_symbolic_shape_equivalence():
+    batch = T.dynamic("batch")
+    num_mp_parts = T.dynamic("num_mp_parts")
+    seq_len = T.dynamic("seq_len")
+    num_heads = 128
+
+    src = T.Tensor([batch + num_mp_parts, seq_len, num_heads], "float")
+    _ = T.view(
+        src,
+        [batch + num_mp_parts, seq_len * num_heads],
+        dtype="float",
+    )
+
+
+def test_view_symbolic_shape_real_mismatch():
+    batch = T.dynamic("batch")
+    num_mp_parts = T.dynamic("num_mp_parts")
+    seq_len = T.dynamic("seq_len")
+    num_heads = 128
+
+    src = T.Tensor([batch + num_mp_parts, seq_len, num_heads], "float")
+    with pytest.raises(AssertionError):
+        T.view(
+            src,
+            [batch + num_mp_parts, seq_len * (num_heads + 1)],
+            dtype="float",
+        )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
