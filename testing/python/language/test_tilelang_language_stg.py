@@ -143,8 +143,14 @@ def test_stg32_predicated_codegen():
     src = stg32_pred_kernel.get_kernel_source(N=128)
     print("=== stg32 predicated codegen ===")
     print(src)
-    # Verify codegen - should have store_global_32 with predicate
-    assert "store_global_32" in src, "Expected store_global_32 call in generated MUSA source"
+    assert "store_global_32_conditional" in src, "Expected store_global_32_conditional call in generated MUSA source"
+
+    Y_ref = torch.zeros(128, dtype=torch.float32, device="musa")
+    for i in range(128):
+        if i < 64:
+            Y_ref[i] = X[i]
+
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
 @tilelang.testing.requires_musa
@@ -171,7 +177,14 @@ def test_stg64_predicated_codegen():
     src = stg64_pred_kernel.get_kernel_source(N=128)
     print("=== stg64 predicated codegen ===")
     print(src)
-    assert "store_global_64" in src, "Expected store_global_64 call in generated MUSA source"
+    assert "store_global_64_conditional" in src, "Expected store_global_64_conditional call in generated MUSA source"
+
+    Y_ref = torch.zeros(128, dtype=torch.float32, device="musa")
+    for i in range(128):
+        if i < 64:
+            Y_ref[i] = X[i]
+
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
 @tilelang.testing.requires_musa
@@ -198,7 +211,14 @@ def test_stg128_predicated_codegen():
     src = stg128_pred_kernel.get_kernel_source(N=128)
     print("=== stg128 predicated codegen ===")
     print(src)
-    assert "store_global_128" in src, "Expected store_global_128 call in generated MUSA source"
+    assert "store_global_128_conditional" in src, "Expected store_global_128_conditional call in generated MUSA source"
+
+    Y_ref = torch.zeros(128, dtype=torch.float32, device="musa")
+    for i in range(128):
+        if i < 64:
+            Y_ref[i] = X[i]
+
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
 @tilelang.testing.requires_musa
@@ -225,7 +245,14 @@ def test_stg256_predicated_codegen():
     src = stg256_pred_kernel.get_kernel_source(N=256)
     print("=== stg256 predicated codegen ===")
     print(src)
-    assert "store_global_256" in src, "Expected store_global_256 call in generated MUSA source"
+    assert "store_global_256_conditional" in src, "Expected store_global_256_conditional call in generated MUSA source"
+
+    Y_ref = torch.zeros(256, dtype=torch.float32, device="musa")
+    for i in range(256):
+        if i < 128:
+            Y_ref[i] = X[i]
+
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":
