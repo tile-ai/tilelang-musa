@@ -121,17 +121,6 @@ def VerifyParallelLoop():
     return _ffi_api.VerifyParallelLoop()  # type: ignore
 
 
-def LowerHopperIntrin():
-    """LowerHopperIntrin
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f  # type: ignore
-
-
 def LowerPHIntrin():
     """LowerPHIntrin
 
