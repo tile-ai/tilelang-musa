@@ -23,6 +23,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../backend/cuda/op/copy.h"
+#include "../backend/musa/op/copy.h"
 #include "../target/utils.h"
 #include "tvm/ir/expr.h"
 
@@ -30,6 +32,33 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+bool GetBoolAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+bool GetIsTmaCopy(const CopyNode &op) {
+  return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target) {
+  if (TargetIsCuda(target) || TargetIsCuTeDSL(target)) {
+    return cuda::IsPipelineManagedCPAsyncCopy(op, target);
+  }
+  if (TargetIsMusa(target)) {
+    return musa::IsPipelineManagedCPAsyncCopy(op, target);
+  }
+  return false;
+}
+
+} // namespace
 
 /*!
  * \brief Check whether two regions have intersections.
@@ -905,13 +934,11 @@ private:
       if (!IsGlobalLikeBuffer(copy->src) || !IsSharedBuffer(copy->dst)) {
         return;
       }
-      if (copy->GetIsTmaCopy()) {
+      if (GetIsTmaCopy(*copy)) {
         return;
       }
       pinfo->copy_stage = true;
-      arith::Analyzer analyzer;
-      pinfo->cp_async_copy_stage =
-          copy->CheckPipelineManagedCPAsyncCopy(target_, &analyzer);
+      pinfo->cp_async_copy_stage = IsPipelineManagedCPAsyncCopy(*copy, target_);
       return;
     }
 
@@ -1077,7 +1104,7 @@ private:
         auto copy_tile_op = GetSinglePureCopyTileOp(pipeline_stmts[i]);
         if (copy_tile_op.defined()) {
           if (const auto *copy = copy_tile_op.value().as<CopyNode>()) {
-            if (copy->GetIsTmaCopy()) {
+            if (GetIsTmaCopy(*copy)) {
               pipeline_stage_infos.push_back(std::move(pinfo));
               continue;
             }

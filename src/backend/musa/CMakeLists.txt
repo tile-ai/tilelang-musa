@@ -22,7 +22,10 @@ file(GLOB TILE_LANG_MUSA_SRCS
   src/target/codegen_musa.cc
   src/target/ptx.cc
   src/target/rt_mod_musa.cc
+  src/backend/musa/op/*.cc
 )
 
+list(REMOVE_ITEM TILE_LANG_MUSA_SRCS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/musa/op/copy_analysis.cc")
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_MUSA_SRCS})
 list(APPEND TILE_LANG_INCLUDES ${MUSAToolkit_INCLUDE_DIRS})

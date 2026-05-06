@@ -29,6 +29,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../backend/cuda/op/copy.h"
+#include "../backend/musa/op/copy.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/fill.h"
@@ -601,6 +603,47 @@ static bool IsBarrierOrTmaControlCall(const CallNode *call) {
          call->op.same_as(builtin::tvm_storage_sync());
 }
 
+static bool HasGlobalToSharedCopyShape(const CopyNode *copy) {
+  return copy != nullptr && IsGlobalBuffer(copy->src) &&
+         IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
+}
+
+static cuda::CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode *copy,
+                                                           Target target) {
+  if (copy == nullptr) {
+    return {cuda::CopyInst::kNormal, true, ""};
+  }
+  if (!TargetIsCuda(target) && !TargetIsCuTeDSL(target)) {
+    return {cuda::CopyInst::kNormal, true, ""};
+  }
+  return cuda::ClassifyWarpSpecializedProducerCopy(*copy, target);
+}
+
+static musa::CopyInstSelection
+ClassifyWarpSpecializedMUSACopy(const CopyNode *copy, Target target) {
+  if (copy == nullptr) {
+    return {musa::CopyInst::kNormal, true, ""};
+  }
+  if (!TargetIsMusa(target)) {
+    return {musa::CopyInst::kNormal, true, ""};
+  }
+  return musa::ClassifyWarpSpecializedProducerCopy(*copy, target);
+}
+
+static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
+                                            Target target) {
+  if (copy == nullptr) {
+    return false;
+  }
+  if (TargetIsCuda(target) || TargetIsCuTeDSL(target)) {
+    return cuda::IsPipelineManagedCPAsyncCopy(*copy, target);
+  }
+  if (TargetIsMusa(target)) {
+    return musa::IsPipelineManagedCPAsyncCopy(*copy, target);
+  }
+  return false;
+}
+
 static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
   const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
   if (!call) {
@@ -611,13 +654,24 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
     return false;
   }
   const auto *copy = tile_op.as<CopyNode>();
-  if (copy == nullptr || !copy->CheckCPAsyncCopyPreconditions() ||
-      copy->GetIsTmaCopy() || copy->GetIsAsyncCopy()) {
+  if (copy == nullptr) {
     return false;
   }
 
-  arith::Analyzer analyzer;
-  return !copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/true);
+  if (TargetIsCuda(target) || TargetIsCuTeDSL(target)) {
+    cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
+    return HasGlobalToSharedCopyShape(copy) && result.supported &&
+           !cuda::CopyInstIsTMA(result.inst) &&
+           !cuda::CopyInstIsCPAsync(result.inst);
+  }
+  if (TargetIsMusa(target)) {
+    musa::CopyInstSelection result =
+        ClassifyWarpSpecializedMUSACopy(copy, target);
+    return HasGlobalToSharedCopyShape(copy) && result.supported &&
+           !musa::CopyInstIsTMA(result.inst) &&
+           !musa::CopyInstIsCPAsync(result.inst);
+  }
+  return false;
 }
 
 static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
@@ -767,43 +821,40 @@ static VarSet CollectPH1MmaTmaUnsafeDstBuffers(const Array<Stmt> &flat_stmts,
 }
 
 /// Classify a tile-op copy as TMA load producer, cp.async producer, or
-/// consumer. Replicates the coarse checks from InstructionAnnotation inline so
-/// that the tiled WS pass does not depend on a prior annotation pass.
+/// consumer using coarse pre-layout checks.
 static TileStmtKind
 ClassifyCopy(const CopyNode *copy, Target target,
              const VarSet *tma_unsafe_dst_buffers = nullptr) {
+  if (copy == nullptr) {
+    return TileStmtKind::kConsumer;
+  }
   if (tma_unsafe_dst_buffers != nullptr &&
       tma_unsafe_dst_buffers->count(copy->dst->data)) {
     return TileStmtKind::kConsumer;
   }
-  // Explicit T.tma_copy() is a load-side primitive: only treat valid
-  // global->shared TMA loads as producers.  TMA stores consume previously
-  // produced shared data and must stay on the consumer side to preserve
-  // per-iteration ordering.
-  if (copy->GetIsTmaCopy()) {
-    arith::Analyzer analyzer;
-    if (copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/false)) {
+
+  if (TargetIsCuda(target) || TargetIsCuTeDSL(target)) {
+    cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
+    if (cuda::CopyInstIsTMA(result.inst)) {
       return TileStmtKind::kTmaProducer;
     }
-    return TileStmtKind::kConsumer; // target doesn't support TMA
+    if (cuda::CopyInstIsCPAsync(result.inst)) {
+      return TileStmtKind::kCpAsyncProducer;
+    }
+    return TileStmtKind::kConsumer;
   }
-  // Explicit T.async_copy()
-  if (copy->GetIsAsyncCopy()) {
-    return TileStmtKind::kCpAsyncProducer;
-  }
-  // Generic T.copy(): check if TMA is possible
-  {
-    arith::Analyzer analyzer;
-    using namespace tvm::transform;
-    PassContext pass_ctx = PassContext::Current();
-    bool disable_tma_lower =
-        copy->GetDisableTMA() ||
-        pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-    if (!disable_tma_lower &&
-        copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/true)) {
+  if (TargetIsMusa(target)) {
+    musa::CopyInstSelection result =
+        ClassifyWarpSpecializedMUSACopy(copy, target);
+    if (musa::CopyInstIsTMA(result.inst)) {
       return TileStmtKind::kTmaProducer;
     }
+    if (musa::CopyInstIsCPAsync(result.inst)) {
+      return TileStmtKind::kCpAsyncProducer;
+    }
+    return TileStmtKind::kConsumer;
   }
+
   return TileStmtKind::kConsumer;
 }
 
@@ -926,11 +977,10 @@ private:
     if (copy == nullptr) {
       return false;
     }
-    return copy->CheckPipelineManagedCPAsyncCopy(target_, &analyzer_);
+    return CheckPipelineManagedCPAsyncCopy(copy, target_);
   }
 
   Target target_;
-  mutable arith::Analyzer analyzer_;
 };
 
 class LayoutAnnotatedBufferCollector : public StmtExprVisitor {
