@@ -2823,6 +2823,12 @@ def isfinite(x, span=None):
     y : PrimExpr
         The result.
     """
+    x_dtype = str(x.dtype)
+    base_dtype = x_dtype.split("x", 1)[0]
+    if base_dtype in ("float32", "float64"):
+        lanes = int(x_dtype.split("x", 1)[1]) if "x" in x_dtype else 1
+        out_dtype = "bool" if lanes == 1 else f"boolx{lanes}"
+        return call_pure_extern(out_dtype, "isfinite", x, span=span)
     return _tvm_op.isfinite(x, span)
 
 

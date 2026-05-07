@@ -150,12 +150,31 @@ static PrimExpr DispatchMUSAExp2(const PrimExpr &e) {
   return DispatchPureExtern<MUSAMath>(e);
 }
 
+static PrimExpr DispatchMUSAIsFinite(const PrimExpr &e) {
+  const CallNode *call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  ICHECK_EQ(call->args.size(), 1U);
+
+  DataType arg_dtype = call->args[0].dtype();
+  if (arg_dtype.is_float() &&
+      (arg_dtype.bits() == 32 || arg_dtype.bits() == 64)) {
+    Array<PrimExpr> new_args = {StringImm("isfinite"), call->args[0]};
+    return Call(call->dtype, builtin::call_pure_extern(), new_args,
+                call->annotations);
+  }
+
+  return e;
+}
+
 TVM_REGISTER_OP("tir.rsqrt")
     .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic",
                                DispatchPureExtern<MUSAMath>, 11);
 
 TVM_REGISTER_OP("tir.exp2")
     .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic", DispatchMUSAExp2, 11);
+
+TVM_REGISTER_OP("tir.isfinite")
+    .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic", DispatchMUSAIsFinite);
 
 } // namespace intrin
 } // namespace codegen
