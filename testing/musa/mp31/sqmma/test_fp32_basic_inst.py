@@ -2,7 +2,7 @@ import torch
 import pytest
 import tilelang
 import tilelang.testing
-from tilelang.testing import get_tilelang_type
+from tilelang.testing import get_tilelang_type, matmul_reference
 import tilelang.language as T
 
 tilelang.disable_cache()
@@ -210,18 +210,17 @@ def test_mm_kernel(
         verbose=True,
         pass_configs=pass_configs,
     )
-    print(kernel.get_kernel_source())
     logical_A = A.T if trans_A else A
     logical_B = B.T if trans_B else B
     rtol, atol = tilelang.testing.get_tolerance(
         elem_type,
         profile="gemm_contract",
     )
-    ref_out = (logical_A.float() @ logical_B.float()).to(elem_type)
+    ref_out = matmul_reference(logical_A, logical_B, out_dtype=elem_type)
     C = kernel(A, B)
     torch.testing.assert_close(
-        ref_out.to(torch.float32),
         C.to(torch.float32),
+        ref_out.to(torch.float32),
         rtol=rtol,
         atol=atol,
     )

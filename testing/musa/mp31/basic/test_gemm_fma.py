@@ -1,7 +1,7 @@
 import pytest
 import tilelang
 import tilelang.testing
-from tilelang.testing import get_tilelang_type
+from tilelang.testing import get_tilelang_type, matmul_reference
 import tilelang.language as T
 import torch
 
@@ -59,10 +59,10 @@ def _assert_case(elem_type, M, N, K, block_M, block_N, block_K):
     )
 
     out = kernel(a, b)
-    ref = (a.float() @ b.float()).to(elem_type)
+    ref = matmul_reference(a, b, out_dtype=elem_type)
     torch.testing.assert_close(
-        ref.to(torch.float32),
         out.to(torch.float32),
+        ref.to(torch.float32),
         rtol=rtol,
         atol=atol,
     )

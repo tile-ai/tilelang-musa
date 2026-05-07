@@ -19,6 +19,7 @@ from tilelang.utils.tensor import torch_assert_close as torch_assert_close
 from .perf_regression import process_func, regression
 from .tolerance import get_tolerance, list_tolerance_profiles
 from .dtypes import get_tilelang_type
+from .reference import cast_to_output_dtype, is_fp8_dtype, matmul_reference
 
 __all__ = (
     [
@@ -30,6 +31,9 @@ __all__ = (
         "requires_llvm",
         "main",
         "matmul_naive",
+        "matmul_reference",
+        "cast_to_output_dtype",
+        "is_fp8_dtype",
         "requires_cuda_compute_version",
         "requires_musa_compute_version",
         "process_func",
