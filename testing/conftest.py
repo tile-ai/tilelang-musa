@@ -2,24 +2,43 @@ import os
 import random
 import pytest
 
-os.environ["PYTHONHASHSEED"] = "0"
 
-random.seed(0)
+DEFAULT_TEST_SEED = int(os.environ.get("TL_TEST_SEED", "0"))
 
-try:
-    import torch
-except ImportError:
-    pass
-else:
-    torch.manual_seed(0)
-    torch.backends.mudnn.allow_tf32 = False
 
-try:
-    import numpy as np
-except ImportError:
-    pass
-else:
-    np.random.seed(0)
+def seed_everything(seed: int = DEFAULT_TEST_SEED):
+    random.seed(seed)
+
+    try:
+        import numpy as np
+    except ImportError:
+        pass
+    else:
+        np.random.seed(seed)
+
+    try:
+        import torch
+    except ImportError:
+        pass
+    else:
+        torch.manual_seed(seed)
+
+
+@pytest.fixture(scope="function", autouse=True)
+def _reset_random_seed():
+    seed_everything(DEFAULT_TEST_SEED)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _configure_torch_backend():
+    try:
+        import torch
+    except ImportError:
+        pass
+    else:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.mudnn.deterministic = True
+        torch.backends.mudnn.allow_tf32 = False
 
 
 collect_ignore = [
