@@ -1,5 +1,6 @@
 import contextlib
 import ctypes
+import atexit
 import logging
 import os
 import sys
@@ -148,6 +149,18 @@ if not env.is_light_import():
         # only load once here
         if env.SKIP_LOADING_TILELANG_SO == "0":
             _LIB, _LIB_PATH = _load_tile_lang_lib()
+
+        def _mark_musa_runtime_shutdown():
+            try:
+                mark_shutdown = tvm.get_global_func("runtime.musa.mark_shutdown", allow_missing=True)
+                if mark_shutdown is not None:
+                    mark_shutdown()
+            except Exception:
+                # Best-effort only: shutdown hooks must never make interpreter
+                # teardown fail.
+                pass
+
+        atexit.register(_mark_musa_runtime_shutdown)
 
     from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
     from .profiler import Profiler  # noqa: F401
