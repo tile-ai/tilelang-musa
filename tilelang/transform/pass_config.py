@@ -311,5 +311,8 @@ class PassConfigKey(str, Enum):
     TL_ENABLE_MUSA_BURST = "tl.enable_musa_burst"
     """Enable MUSA burst SIMD vectorization when True. Default: False"""
 
+    TL_ENABLE_MUSA_TMA_PREFETCH = "tl.enable_musa_tma_prefetch"
+    """Enable automatic MUSA TMA descriptor prefetch insertion. Default: False"""
+
     TL_ENABLE_REDUCE_BURST = "tl.enable_reduce_burst"
     """Enable MUSA reduce SIMD optimizations when True. Default: False"""

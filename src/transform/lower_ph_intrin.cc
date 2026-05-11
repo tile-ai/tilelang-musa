@@ -23,9 +23,10 @@ using namespace tir;
 
 class LowerPHIntrin : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
+  static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect,
+                             bool enable_tma_desc_prefetch) {
     PrimFuncNode *fptr = f.CopyOnWrite();
-    LowerPHIntrin substituter(disable_shuffle_elect);
+    LowerPHIntrin substituter(disable_shuffle_elect, enable_tma_desc_prefetch);
     fptr->body = substituter.VisitStmt(f->body);
     Map<Var, Array<PrimExpr>> init_desc_arg_map;
     // Collect prologue/epilogue statements for host-side setup/teardown
@@ -182,9 +183,12 @@ public:
         var = Var(name + "_desc_" + std::to_string(desc_index),
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
         desc_map_[tvm::ffi::GetRef<Call>(call)] = var;
-        // prefetch_calls_.push_back(
-        //     Evaluate(Call(DataType::Handle(), builtin::call_extern(),
-        //                   {StringImm("tl::prefetch_tma_descriptor"), var})));
+        if (enable_tma_desc_prefetch_ &&
+            call->op.same_as(create_tma_descriptor())) {
+          prefetch_calls_.push_back(
+              Evaluate(Call(DataType::Handle(), builtin::call_extern(),
+                            {StringImm("tl::prefetch_tma_descriptor"), var})));
+        }
       }
       return var;
     } else if (call->op.same_as(create_list_of_mbarrier())) {
@@ -206,9 +210,11 @@ private:
   Array<Stmt> prefetch_calls_;
   Array<Stmt> init_mbarrier_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
-  LowerPHIntrin(bool disable_shuffle_elect)
-      : disable_shuffle_elect_(disable_shuffle_elect) {}
+  LowerPHIntrin(bool disable_shuffle_elect, bool enable_tma_desc_prefetch)
+      : disable_shuffle_elect_(disable_shuffle_elect),
+        enable_tma_desc_prefetch_(enable_tma_desc_prefetch) {}
   bool disable_shuffle_elect_;
+  bool enable_tma_desc_prefetch_;
 };
 
 using namespace tir::transform;
@@ -217,7 +223,10 @@ tvm::transform::Pass LowerPHIntrin() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_shuffle_elect =
         ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
-    return LowerPHIntrin::Substitute(f, disable_shuffle_elect);
+    bool enable_tma_desc_prefetch =
+        ctx->GetConfig<Bool>(kEnableMusaTmaPrefetch, Bool(false)).value();
+    return LowerPHIntrin::Substitute(f, disable_shuffle_elect,
+                                     enable_tma_desc_prefetch);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerPHIntrin", {});
 }

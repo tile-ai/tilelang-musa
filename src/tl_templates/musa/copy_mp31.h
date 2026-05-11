@@ -19,6 +19,10 @@ TL_DEVICE void tma_store(void *gmem_ptr, void const *smem_ptr, uint32_t size) {
   mute::MP31_BLK_COPY_S2G::copy(smem_ptr, gmem_ptr, size);
 }
 
+TL_DEVICE void prefetch_tma_descriptor(const MUtensorDescriptor &descriptor) {
+  __musa_prefetch_only(&descriptor);
+}
+
 template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
           SmemSwizzleStride ss = SmemSwizzleStride::B256,
           SmemSwizzleLine sl = SmemSwizzleLine::B256,

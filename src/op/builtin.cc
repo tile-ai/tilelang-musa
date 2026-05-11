@@ -53,6 +53,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoUnroll, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSQMMA, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisablePH1WMMA, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableMusaBurst, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableMusaTmaPrefetch, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableReduceBurst, Bool);
 
 DataType cuTensorMapType() { return DataType::UInt(8, 128); }

@@ -10,6 +10,10 @@ from tilelang.utils.tensor import map_torch_type
 
 tilelang.disable_cache()
 
+PASS_CONFIGS = {
+    tilelang.PassConfigKey.TL_ENABLE_MUSA_TMA_PREFETCH: True,
+}
+
 BLOCK_CASES = [
     # 16x64
     (16, 64, 16),
@@ -203,7 +207,7 @@ def _build_test_cases():
 TEST_CASES = _build_test_cases()
 
 
-@tilelang.jit(target="musa")
+@tilelang.jit(target="musa", pass_configs=PASS_CONFIGS)
 def matmul(A, B, block_M, block_N, block_K, dtype, accum_dtype, num_warp, policy, num_stages):
     M, N, K = T.const("M N K")
     A: T.Tensor[[M, K], dtype]
