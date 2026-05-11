@@ -247,7 +247,7 @@ def test_pipeline_planning_prioritizes_groups_by_consumer_and_rebinds_wait0():
     )
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_pipeline_predicated_copy_preserves_shared_fill_correctness():
     @T.prim_func
     def main(
@@ -274,16 +274,16 @@ def test_pipeline_predicated_copy_preserves_shared_fill_correctness():
                 T.ptx_wait_group(0)
                 T.copy(S, B[0:16])
 
-    kernel = tl.compile(main, out_idx=[1], target="cuda")
+    kernel = tl.compile(main, out_idx=[1], target="musa")
     src = kernel.get_kernel_source()
-    assert "cp_async_gs_conditional<16>" in src, "Expected predicated cp.async in generated CUDA source"
+    assert "cp_async_gs_conditional<16>" in src, "Expected predicated cp.async in generated MUSA source"
 
-    a = torch.randn((8,), dtype=torch.float16, device="cuda")
+    a = torch.randn((8,), dtype=torch.float16, device="musa")
     b = kernel(a)
 
-    expected = torch.zeros((16,), dtype=torch.float16, device="cuda")
+    expected = torch.zeros((16,), dtype=torch.float16, device="musa")
     expected[:8] = a
-    torch.testing.assert_close(b, expected, rtol=0, atol=0)
+    tilelang.testing.torch_assert_close(b, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

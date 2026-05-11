@@ -829,16 +829,20 @@ private:
         if (marker_.GetRole(seq[j]) != Role::kProducer) {
           break;
         }
-        if (is_commit[j]) {
+        if (target_commit == -1 && is_commit[j]) {
           target_commit = j;
-          break;
+          continue;
         }
         if (target_wait == -1 && is_wait[j]) {
           target_wait = j;
+          break;
         }
       }
 
-      int target = target_commit != -1 ? target_commit : target_wait;
+      // Prefer binding release to a following wait_group when available.
+      // Releasing at commit can be too early because commit only closes the
+      // group but does not wait for completion.
+      int target = target_wait != -1 ? target_wait : target_commit;
       if (target == -1) {
         continue;
       }
