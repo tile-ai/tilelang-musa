@@ -21,6 +21,17 @@ namespace tl {
 
 using namespace tir;
 
+namespace {
+
+bool IsPH1SupportedFp8(DataType dtype) {
+  // PH1 MUSA FP8 tensor-core paths support E4M3, E4M3FN, and E5M2.
+  // FNUZ variants are intentionally excluded.
+  return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
+         dtype.is_float8_e5m2();
+}
+
+} // namespace
+
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
  * map.
@@ -194,10 +205,7 @@ GemmNode::SelectSQMMAInstShape(int block_size, Target target) const {
   } else if (a_dtype == DataType::Float(32) && b_dtype == DataType::Float(32) &&
              c_dtype == DataType::Float(32)) {
     type_class = SqmmaTypeClass::kTF32;
-  } else if (((a_dtype.is_float8_e4m3() && b_dtype.is_float8_e4m3()) ||
-              (a_dtype.is_float8_e5m2() && b_dtype.is_float8_e5m2()) ||
-              (a_dtype.is_float8_e4m3() && b_dtype.is_float8_e5m2()) ||
-              (a_dtype.is_float8_e5m2() && b_dtype.is_float8_e4m3())) &&
+  } else if (IsPH1SupportedFp8(a_dtype) && IsPH1SupportedFp8(b_dtype) &&
              c_dtype == DataType::Float(32)) {
     type_class = SqmmaTypeClass::kFP8;
   } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Int(8) &&
@@ -349,10 +357,7 @@ GemmNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
   } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::BFloat(16) &&
              c_dtype == DataType::Float(32)) {
     type_class = Ph1WmmaTypeClass::kS8BF16F32;
-  } else if (((a_dtype.is_float8_e4m3() && b_dtype.is_float8_e4m3()) ||
-              (a_dtype.is_float8_e5m2() && b_dtype.is_float8_e5m2()) ||
-              (a_dtype.is_float8_e4m3() && b_dtype.is_float8_e5m2()) ||
-              (a_dtype.is_float8_e5m2() && b_dtype.is_float8_e4m3())) &&
+  } else if (IsPH1SupportedFp8(a_dtype) && IsPH1SupportedFp8(b_dtype) &&
              c_dtype == DataType::Float(32)) {
     type_class = Ph1WmmaTypeClass::kFP8F32;
   } else {
