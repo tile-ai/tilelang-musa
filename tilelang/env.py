@@ -21,6 +21,19 @@ TL_TEMPLATE_NOT_FOUND_MESSAGE = "TileLang is not installed or found in the expec
 ", which may lead to compilation bugs when utilize tilelang backend."
 TVM_LIBRARY_NOT_FOUND_MESSAGE = "TVM is not installed or found in the expected path"
 
+TILELANG_DUMP_KERNEL_SOURCE_ENV = "TILELANG_DUMP_KERNEL_SOURCE"
+TILELANG_PRINT_ASM_ENV = "TILELANG_PRINT_ASM"
+TILELANG_DUMP_ASM_ENV = "TILELANG_DUMP_ASM"
+TILELANG_REPLACE_ASM_ENV = "TILELANG_REPLACE_ASM"
+MUSA_DEBUG_CACHE_DISABLE_ENVS = (
+    TILELANG_DUMP_KERNEL_SOURCE_ENV,
+    TILELANG_PRINT_ASM_ENV,
+    TILELANG_DUMP_ASM_ENV,
+    TILELANG_REPLACE_ASM_ENV,
+)
+ENV_FALSE_VALUES = ("0", "false", "no", "off")
+ENV_TRUE_VALUES = ("1", "true", "yes", "on")
+
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
 # Only expose the internal lib directory to sys.path to avoid shadowing
 # common top-level module names (e.g., utils, analysis) from user projects.
@@ -341,7 +354,11 @@ class Environment:
         CacheState.disable()
 
     def is_cache_globally_disabled(self) -> bool:
-        return self.TILELANG_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+        for name in MUSA_DEBUG_CACHE_DISABLE_ENVS:
+            value = os.environ.get(name)
+            if value and value.strip().lower() not in ENV_FALSE_VALUES:
+                return True
+        return self.TILELANG_DISABLE_CACHE.lower() in ENV_TRUE_VALUES
 
     def is_autotune_cache_disabled(self) -> bool:
         return self.TILELANG_AUTO_TUNING_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
@@ -400,6 +417,23 @@ is_cache_enabled = env.is_cache_enabled  # CacheState.is_enabled
 CUDA_HOME = env.CUDA_HOME
 ROCM_HOME = env.ROCM_HOME
 MUSA_HOME = env.MUSA_HOME
+
+
+def env_enabled_or_path(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    value = value.strip()
+    return value != "" and value.lower() not in ENV_FALSE_VALUES
+
+
+def env_path_or_default(name: str, default_name: str) -> str:
+    value = os.environ.get(name)
+    if value:
+        value = value.strip()
+    if value and value.lower() not in ENV_TRUE_VALUES:
+        return os.path.abspath(os.path.expanduser(value))
+    return os.path.join(os.getcwd(), default_name)
 
 
 def prepend_pythonpath(path):

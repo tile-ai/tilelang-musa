@@ -22,6 +22,7 @@ get_started/targets
 :caption: TUTORIALS
 
 tutorials/debug_tools_for_tilelang
+env_usage
 tutorials/auto_tuning
 tutorials/logging
 :::
