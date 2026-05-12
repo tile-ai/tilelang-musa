@@ -59,14 +59,14 @@ get_warp_group_idx(int warp_size = detail::default_warp_size(),
 
 TL_DEVICE void warpgroup_commit_batch() {
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310 &&              \
-    defined(MUSACC_VERSION) && (MUSACC_VERSION > 4)
+    defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
   __musa_tce_commit_group();
 #endif
 }
 
 template <int NumMma> TL_DEVICE void warpgroup_wait() {
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
-#if defined(MUSACC_VERSION) && (MUSACC_VERSION > 4)
+#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
   __musa_tce_wait_group(NumMma);
 #else
   __musa_sqmma_wait();
@@ -76,7 +76,7 @@ template <int NumMma> TL_DEVICE void warpgroup_wait() {
 
 TL_DEVICE void lma_wait() {
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310 &&              \
-    defined(MUSACC_VERSION) && (MUSACC_VERSION > 4)
+    defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
   __musa_lma_wait();
 #else
   __syncwarp();

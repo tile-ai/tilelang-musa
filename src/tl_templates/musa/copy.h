@@ -15,13 +15,13 @@
 namespace tl {
 
 TL_DEVICE void cp_async_commit() {
-#if defined(MUSACC_VERSION) && (MUSACC_VERSION > 4)
+#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
   __musa_memcpy_g2s_commit_group();
 #endif
 }
 
 template <int N> TL_DEVICE void cp_async_wait() {
-#if defined(MUSACC_VERSION) && (MUSACC_VERSION > 4)
+#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
   if constexpr (N == 0) {
     __musa_memcpy_g2s_wait();
   } else {
