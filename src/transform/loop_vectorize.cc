@@ -897,6 +897,116 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
   return false;
 }
 
+// Rewrite lane-sized offsets inside floor div/mod:
+//   (aligned_base + lane) // divisor -> aligned_base // divisor
+//   (aligned_base + lane) % divisor  -> aligned_base % divisor + lane
+// when aligned_base is vector_size aligned and divisor is a vector_size
+// multiple.
+class LaneOffsetDivModSimplifier : public StmtExprMutator {
+public:
+  LaneOffsetDivModSimplifier(int lane, int vector_size,
+                             arith::Analyzer *analyzer)
+      : lane_(lane), vector_size_(vector_size), analyzer_(analyzer) {}
+
+  PrimExpr Rewrite(const PrimExpr &expr) { return this->VisitExpr(expr); }
+
+private:
+  bool CanSimplifyWithLaneOffset(const PrimExpr &value, const PrimExpr &divisor,
+                                 PrimExpr *aligned_base) const {
+    if (lane_ == 0) {
+      return false;
+    }
+
+    auto divisor_int = as_const_int(analyzer_->Simplify(divisor));
+    if (!divisor_int || *divisor_int <= 0 || *divisor_int % vector_size_ != 0 ||
+        lane_ >= *divisor_int) {
+      return false;
+    }
+
+    PrimExpr lane = make_const(value.dtype(), lane_);
+    PrimExpr base = analyzer_->Simplify(value - lane);
+    PrimExpr vector_size = make_const(base.dtype(), vector_size_);
+    PrimExpr zero = make_const(base.dtype(), 0);
+    if (!analyzer_->CanProveEqual(FloorMod(base, vector_size), zero)) {
+      return false;
+    }
+
+    *aligned_base = base;
+    return true;
+  }
+
+  PrimExpr VisitExpr_(const FloorDivNode *op) final {
+    PrimExpr a = this->VisitExpr(op->a);
+    PrimExpr b = this->VisitExpr(op->b);
+    PrimExpr aligned_base;
+    if (CanSimplifyWithLaneOffset(a, b, &aligned_base)) {
+      return analyzer_->Simplify(FloorDiv(aligned_base, b));
+    }
+    if (a.same_as(op->a) && b.same_as(op->b)) {
+      return ffi::GetRef<PrimExpr>(op);
+    }
+    return FloorDiv(a, b);
+  }
+
+  PrimExpr VisitExpr_(const FloorModNode *op) final {
+    PrimExpr a = this->VisitExpr(op->a);
+    PrimExpr b = this->VisitExpr(op->b);
+    PrimExpr aligned_base;
+    if (CanSimplifyWithLaneOffset(a, b, &aligned_base)) {
+      PrimExpr lane = make_const(a.dtype(), lane_);
+      return analyzer_->Simplify(FloorMod(aligned_base, b) + lane);
+    }
+    if (a.same_as(op->a) && b.same_as(op->b)) {
+      return ffi::GetRef<PrimExpr>(op);
+    }
+    return FloorMod(a, b);
+  }
+
+  int lane_;
+  int vector_size_;
+  arith::Analyzer *analyzer_;
+};
+
+bool HasContiguousOffsetsInVectorBoundary(const PrimExpr &expr, Var var,
+                                          const PrimExpr &iter_var_size,
+                                          int target_vectorized_size,
+                                          arith::Analyzer *analyzer) {
+  PrimExpr target_size_for_expr =
+      make_const(expr.dtype(), target_vectorized_size);
+  PrimExpr zero_for_expr = make_const(expr.dtype(), 0);
+
+  auto extent = as_const_int(analyzer->Simplify(iter_var_size));
+  if (!extent || *extent % target_vectorized_size != 0) {
+    return false;
+  }
+
+  PrimExpr one_for_expr = make_const(expr.dtype(), 1);
+  for (int boundary = 0; boundary < *extent;
+       boundary += target_vectorized_size) {
+    PrimExpr base = analyzer->Simplify(
+        Substitute(expr, {{var, make_const(var.dtype(), boundary)}}));
+    if (!analyzer->CanProveEqual(FloorMod(base, target_size_for_expr),
+                                 zero_for_expr)) {
+      return false;
+    }
+
+    PrimExpr previous = base;
+    for (int lane = 1; lane < target_vectorized_size; ++lane) {
+      PrimExpr current = analyzer->Simplify(
+          Substitute(expr, {{var, make_const(var.dtype(), boundary + lane)}}));
+      current = analyzer->Simplify(
+          LaneOffsetDivModSimplifier(lane, target_vectorized_size, analyzer)
+              .Rewrite(current));
+      PrimExpr delta = analyzer->Simplify(current - previous);
+      if (!analyzer->CanProveEqual(delta, one_for_expr)) {
+        return false;
+      }
+      previous = current;
+    }
+  }
+  return true;
+}
+
 bool IndicesCanVectorize(const PrimExpr &expr, Var var,
                          const PrimExpr &iter_var_size,
                          int target_vectorized_size,
@@ -920,6 +1030,13 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
 
   if (IsExprInvariantInVectorBoundary(expr, var, target_vectorized_size,
                                       analyzer)) {
+    return true;
+  }
+
+  // Swizzled layouts can still be contiguous within each vector boundary even
+  // when the generic vectorizer cannot reduce their floor/mod form to a Ramp.
+  if (HasContiguousOffsetsInVectorBoundary(expr, var, iter_var_size,
+                                           target_vectorized_size, analyzer)) {
     return true;
   }
 

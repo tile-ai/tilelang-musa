@@ -45,5 +45,38 @@ def test_vectorize_access():
     assert_vectorize_access(64, 64)
 
 
+def test_swizzled_tail_access_keeps_vectorization():
+    @T.prim_func
+    def main(K: T.handle):
+        Kb = T.match_buffer(K, (1024, 1, 292), "bfloat16", strides=(292, 292, 1))
+        S = T.alloc_shared((64, 256), "bfloat16")
+        p = T.alloc_local((1,), "int32")
+        ty = T.alloc_local((1,), "int32")
+        kk = T.alloc_local((4,), "int32")
+        p[0] = 0
+        ty[0] = 0
+        kk[0] = 0
+        for r in T.unroll(4):
+            for v in T.vectorized(8):
+                S[
+                    (p[0] * 8 + v + 192) // 128 * 32 + (r * 16 + ty[0]) // 2,
+                    (r * 16 + ty[0]) % 2 * 128
+                    + T.bitwise_xor(
+                        (p[0] * 8 + v + 192) % 128 // 8,
+                        (r * 16 + ty[0]) % 16,
+                    )
+                    * 8
+                    + (p[0] * 8 + v + 192) % 8,
+                ] = Kb[kk[r], 0, p[0] * 8 + v + 224]
+
+    mod = tvm.IRModule.from_expr(main)
+    with tvm.target.Target("musa -arch=mp_31"):
+        transformed = tl.transform.LegalizeVectorizedLoop()(mod)
+
+    script = transformed.script()
+    assert "T.vectorized" in script
+    assert "for v in range(8):" not in script
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
