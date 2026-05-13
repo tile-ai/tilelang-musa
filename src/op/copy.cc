@@ -1819,7 +1819,9 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     auto s_range = shared_range[s_range_idx];
     s_range_idx++;
 
-    ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
+    auto g_extent = analyzer->Simplify(g_range->extent);
+    auto s_extent = analyzer->Simplify(s_range->extent);
+    ICHECK(analyzer->CanProveEqual(g_extent, s_extent))
         << global_tensor->name << "[" << i << "] is illegal, "
         << global_tensor->name << "[" << i << "] = " << g_range->extent << ", "
         << shared_tensor->name << "[" << s_range_idx
