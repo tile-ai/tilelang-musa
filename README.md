@@ -39,7 +39,7 @@ Install Tilelang_MUSA
 
 ```
 git clone --recursive https://github.com/MooreThreads/tilelang_musa.git
-cd tilelang
+cd tilelang_musa
 pip install -r ./requirements-dev.txt
 pip install -e . -v --no-build-isolation
 ```

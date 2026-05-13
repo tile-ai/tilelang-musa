@@ -300,7 +300,7 @@ private:
       ICHECK_GE(call->args.size(), 3)
           << "tvm_access_ptr must have at least 3 arguments";
       PrimExpr offset = call->args[2];
-      if (NeedsInt64Promotion(offset)) {
+      if (!disable_index_type_promotion_ && NeedsInt64Promotion(offset)) {
         Int64Promoter promoter;
         call.CopyOnWrite()->args.Set(2, promoter(offset));
       }
