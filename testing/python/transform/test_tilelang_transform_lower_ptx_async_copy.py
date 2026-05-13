@@ -346,5 +346,46 @@ def test_lower_ptx_async_copy_from_ramp():
     assert calls.get("tir.ptx_cp_async", 0) > 0
 
 
+def test_lower_ptx_async_copy_from_nested_swizzled_vector_index():
+    """Lower nested Add swizzled-contiguous vector stores to robust cp.async."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((1024,), T.bfloat16),
+        B: T.Tensor((1,), T.bfloat16),
+    ):
+        S = T.alloc_buffer((32768,), dtype=T.bfloat16, scope="shared")
+        for r in T.unroll(2):
+            for v in range(2):
+                T.attr(0, "tl.force_async_copy", 1)
+                T.attr(
+                    A.data,
+                    "tl.source_robust_desc",
+                    T.make_robust_desc(T.address_of(A[0]), 2048),
+                )
+                swizzle_stride: T.int32 = 8
+                stage_offset: T.int32 = 16384
+                S[
+                    T.Broadcast(r * 2048, 4)
+                    + T.bitwise_xor(
+                        T.Broadcast(T.bitwise_and(v + 8, 15), 4),
+                        T.Broadcast(T.bitwise_and(r, 15), 4),
+                    )
+                    * T.Broadcast(swizzle_stride, 4)
+                    + T.Broadcast(v * 4, 4)
+                    + T.Ramp(0, 1, 4)
+                    + T.Broadcast(stage_offset, 4)
+                ] = A[r * 64 + v * 4 : r * 64 + v * 4 + 4]
+        B[0] = S[0]
+
+    target = tvm.target.Target("musa -arch=mp_80")
+    func = before.with_attr("global_symbol", "main").with_attr("target", target)
+    mod = tvm.IRModule.from_expr(func)
+
+    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    calls = _count_calls(mod["main"])
+    assert calls.get("tl.musa_cp_async_robust", 0) > 0
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

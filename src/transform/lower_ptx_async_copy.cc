@@ -445,29 +445,15 @@ private:
     return PointerTypeInfo{dst_elem_type.value(), src_elem_type.value()};
   }
 
-  static PrimExpr ExtractVectorBase(const PrimExpr &index) {
-    if (index.dtype().lanes() == 1) {
-      return index;
-    }
-    if (const auto *broadcast = index.as<BroadcastNode>()) {
-      return broadcast->value;
-    }
-    if (const auto *ramp = index.as<RampNode>()) {
-      if (!is_one(ramp->stride)) {
-        return PrimExpr();
-      }
-      return ramp->base;
-    }
-
+  // Common pattern after flattening a vectorized N-D buffer access:
+  //   (broadcast(base_offset) + ramp(vec_base, 1, lanes))
+  // or its commuted form:
+  //   (ramp(vec_base, 1, lanes) + broadcast(base_offset))
+  static PrimExpr ExtractRampBroadcastAddBase(const PrimExpr &index) {
     const auto *add = index.as<AddNode>();
     if (!add) {
       return PrimExpr();
     }
-
-    // Common pattern after flattening a vectorized N-D buffer access:
-    //   (broadcast(base_offset) + ramp(vec_base, 1, lanes))
-    // or its commuted form:
-    //   (ramp(vec_base, 1, lanes) + broadcast(base_offset))
     const PrimExpr &lhs = add->a;
     const PrimExpr &rhs = add->b;
     if (const auto *lhs_ramp = lhs.as<RampNode>()) {
@@ -486,6 +472,129 @@ private:
         return tir::Add(rhs_ramp->base, lhs_broadcast->value);
       }
     }
+    return PrimExpr();
+  }
+
+  static bool IsLaneWiseScalarizableCall(const CallNode *call) {
+    return call->op.same_as(builtin::bitwise_and()) ||
+           call->op.same_as(builtin::bitwise_or()) ||
+           call->op.same_as(builtin::bitwise_xor()) ||
+           call->op.same_as(builtin::bitwise_not()) ||
+           call->op.same_as(builtin::shift_left()) ||
+           call->op.same_as(builtin::shift_right());
+  }
+
+  // Input: a scalar PrimExpr, or a vector PrimExpr whose lanes may all carry
+  // the same value.
+  //
+  // Output: the scalar expression shared by all lanes. If `expr` is already
+  // scalar, return it directly. If `expr` is a lane-invariant vector expression
+  // such as Broadcast(x, lanes) or a whitelisted lane-wise call over
+  // lane-invariant arguments, return the scalarized value. Otherwise return an
+  // undefined PrimExpr().
+  static PrimExpr ExtractLaneInvariantScalar(const PrimExpr &expr) {
+    if (expr.dtype().lanes() == 1) {
+      return expr;
+    }
+    if (const auto *broadcast = expr.as<BroadcastNode>()) {
+      return broadcast->value;
+    }
+    if (const auto *cast = expr.as<CastNode>()) {
+      PrimExpr value = ExtractLaneInvariantScalar(cast->value);
+      if (!value.defined() || value.dtype().lanes() != 1) {
+        return PrimExpr();
+      }
+      return tir::Cast(cast->dtype.with_lanes(1), value);
+    }
+    if (const auto *add = expr.as<AddNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(add->a);
+      PrimExpr b = ExtractLaneInvariantScalar(add->b);
+      return a.defined() && b.defined() ? tir::Add(a, b) : PrimExpr();
+    }
+    if (const auto *sub = expr.as<SubNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(sub->a);
+      PrimExpr b = ExtractLaneInvariantScalar(sub->b);
+      return a.defined() && b.defined() ? tir::Sub(a, b) : PrimExpr();
+    }
+    if (const auto *mul = expr.as<MulNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(mul->a);
+      PrimExpr b = ExtractLaneInvariantScalar(mul->b);
+      return a.defined() && b.defined() ? tir::Mul(a, b) : PrimExpr();
+    }
+    if (const auto *call = expr.as<CallNode>()) {
+      if (!IsLaneWiseScalarizableCall(call)) {
+        return PrimExpr();
+      }
+      Array<PrimExpr> args;
+      args.reserve(call->args.size());
+      for (const PrimExpr &arg : call->args) {
+        PrimExpr scalar_arg = ExtractLaneInvariantScalar(arg);
+        if (!scalar_arg.defined() || scalar_arg.dtype().lanes() != 1) {
+          return PrimExpr();
+        }
+        args.push_back(scalar_arg);
+      }
+      return tir::Call(call->dtype.with_lanes(1), call->op, args,
+                       call->annotations);
+    }
+    return PrimExpr();
+  }
+
+  // Nested Add tree where one term is a unit-stride Ramp and every other term
+  // is lane-invariant:
+  //   offset_0 + ... + ramp(vec_base, 1, lanes) + ... + offset_n
+  static PrimExpr ExtractNestedRampInvariantAddBase(const PrimExpr &index) {
+    if (const auto *ramp = index.as<RampNode>()) {
+      return is_one(ramp->stride) ? ramp->base : PrimExpr();
+    }
+
+    const auto *add = index.as<AddNode>();
+    if (!add) {
+      return PrimExpr();
+    }
+
+    PrimExpr lhs_base = ExtractNestedRampInvariantAddBase(add->a);
+    if (lhs_base.defined()) {
+      PrimExpr rhs_offset = ExtractLaneInvariantScalar(add->b);
+      if (rhs_offset.defined()) {
+        return tir::Add(lhs_base, rhs_offset);
+      }
+    }
+
+    PrimExpr rhs_base = ExtractNestedRampInvariantAddBase(add->b);
+    if (rhs_base.defined()) {
+      PrimExpr lhs_offset = ExtractLaneInvariantScalar(add->a);
+      if (lhs_offset.defined()) {
+        return tir::Add(rhs_base, lhs_offset);
+      }
+    }
+
+    return PrimExpr();
+  }
+
+  static PrimExpr ExtractVectorBase(const PrimExpr &index) {
+    if (index.dtype().lanes() == 1) {
+      return index;
+    }
+    if (const auto *broadcast = index.as<BroadcastNode>()) {
+      return broadcast->value;
+    }
+    if (const auto *ramp = index.as<RampNode>()) {
+      if (is_one(ramp->stride)) {
+        return ramp->base;
+      }
+    }
+
+    PrimExpr add_base = ExtractRampBroadcastAddBase(index);
+    if (add_base.defined()) {
+      return add_base;
+    }
+
+    PrimExpr nested_add_base = ExtractNestedRampInvariantAddBase(index);
+    if (nested_add_base.defined()) {
+      return nested_add_base;
+    }
+
     return PrimExpr();
   }
 
