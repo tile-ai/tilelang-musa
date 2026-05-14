@@ -36,6 +36,42 @@ namespace tl {
 using namespace tir;
 using namespace runtime;
 
+static bool Is1DTmaLoad(const CallNode *op) {
+  if (!op->op.same_as(tma_load())) {
+    return false;
+  }
+  const auto *arg0 = op->args[0].as<CallNode>();
+  return arg0 && !arg0->op.same_as(create_tma_descriptor()) &&
+         !arg0->op.same_as(create_tma_im2col_descriptor());
+}
+
+static int GetTmaBarrierArgIndex(const CallNode *op) {
+  return Is1DTmaLoad(op) ? 2 : 1;
+}
+
+static bool IsManualTmaLoad(const CallNode *op) {
+  if (!op->op.same_as(tma_load()) && !op->op.same_as(tma_load_im2col())) {
+    return false;
+  }
+  int barrier_arg_index = GetTmaBarrierArgIndex(op);
+  const auto *barrier = op->args[barrier_arg_index].as<CallNode>();
+  return barrier && barrier->op.same_as(manual_tma_barrier()) &&
+         barrier->args.size() == 1;
+}
+
+static bool ContainsManualTmaLoad(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (found) {
+      return;
+    }
+    if (const auto *call = node.as<CallNode>()) {
+      found = IsManualTmaLoad(call);
+    }
+  });
+  return found;
+}
+
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------
@@ -527,7 +563,8 @@ public:
         // Check Pattern 1/2: TMA producer + wait pair, optionally wrapped in a
         // simple guard/Block/Let/Attr shell. Recover the written shared buffer
         // when the tl.tma_copy_write_buffer annotation survives under wrappers.
-        if (write_buffer_data.defined() || ContainsTmaLoad(flat_stmts[i])) {
+        if ((write_buffer_data.defined() || ContainsTmaLoad(flat_stmts[i])) &&
+            !ContainsManualTmaLoad(flat_stmts[i])) {
           blocks.push_back({AsyncProducerKind::kTma,
                             StripTmaCopyWriteBufferAttr(flat_stmts[i]),
                             Optional<Stmt>(flat_stmts[i + 1]),
@@ -1935,6 +1972,7 @@ private:
       int local_count = 0;
       for (size_t i = 0; i + 1 < movable_begin; ++i) {
         if (ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
+            !ContainsManualTmaLoad(pre_loop_stmts[i]) &&
             IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1])) {
           ++local_count;
         }
@@ -2879,6 +2917,7 @@ private:
         for (size_t i = 0; i < op->seq.size(); ++i) {
           if (i + 1 < op->seq.size() &&
               parent_->ContainsTmaLoadStmt(op->seq[i]) &&
+              !ContainsManualTmaLoad(op->seq[i]) &&
               parent_->IsMbarrierWaitParityStmt(op->seq[i + 1])) {
             ICHECK_GE(parent_->pure_tma_preloop_fwd_base_, 0);
             ICHECK_LT(parent_->pure_tma_preloop_fwd_cursor_,
@@ -3086,6 +3125,7 @@ private:
 
       for (int i = static_cast<int>(movable_begin) - 1; i >= 0; --i) {
         if (i > 0 && ContainsTmaLoadStmt(pre_loop_stmts[i - 1]) &&
+            !ContainsManualTmaLoad(pre_loop_stmts[i - 1]) &&
             IsMbarrierWaitParityStmt(pre_loop_stmts[i])) {
           prefix_roles[i] = PrefixRole::kSkip;
           continue;
@@ -3093,6 +3133,7 @@ private:
 
         if (static_cast<size_t>(i + 1) < movable_begin &&
             ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
+            !ContainsManualTmaLoad(pre_loop_stmts[i]) &&
             IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1])) {
           Stmt producer_prefix_stmt =
               StripTmaCopyWriteBufferAttr(pre_loop_stmts[i]);

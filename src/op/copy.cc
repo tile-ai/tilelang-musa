@@ -2082,9 +2082,12 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
+  PrimExpr manual_mbar_handle;
   PrimExpr mbar_handle;
   if (is_load) {
-    if (auto user_barrier = annotations.Get("barrier")) {
+    if (IsManualTmaBarrierExpr(tma_barrier)) {
+      manual_mbar_handle = UnwrapManualTmaBarrierExpr(tma_barrier);
+    } else if (auto user_barrier = annotations.Get("barrier")) {
       mbar_handle = Downcast<PrimExpr>(user_barrier.value());
     } else if (GetIsTmaCopy()) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
@@ -2098,8 +2101,6 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       PrimExpr mbar_idx =
           IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
       mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
-    } else if (IsManualTmaBarrierExpr(tma_barrier)) {
-      mbar_handle = UnwrapManualTmaBarrierExpr(tma_barrier);
     }
   }
   PrimExpr load_barrier_arg = mbar_handle.defined() ? mbar_handle : tma_barrier;
@@ -2202,6 +2203,13 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
     tma_copy = SeqStmt(std::move(seq));
+  }
+
+  if (is_load && manual_mbar_handle.defined()) {
+    Stmt expect_tx = Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                                   {manual_mbar_handle, total_copy_bytes}));
+    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+                      SeqStmt({expect_tx, tma_copy}));
   }
 
   // For TMA loads with inline mbarrier: emit expect_tx before tma_load
@@ -2333,9 +2341,12 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
       is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
   PrimExpr total_bytes =
       analyzer->Simplify(elements * shared_tensor->dtype.bytes());
+  PrimExpr manual_mbar_handle;
   PrimExpr mbar_handle;
   if (is_load) {
-    if (auto user_barrier = annotations.Get("barrier")) {
+    if (IsManualTmaBarrierExpr(tma_barrier)) {
+      manual_mbar_handle = UnwrapManualTmaBarrierExpr(tma_barrier);
+    } else if (auto user_barrier = annotations.Get("barrier")) {
       mbar_handle = Downcast<PrimExpr>(user_barrier.value());
     } else if (GetIsTmaCopy()) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
@@ -2349,8 +2360,6 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
       PrimExpr mbar_idx =
           IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
       mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
-    } else if (IsManualTmaBarrierExpr(tma_barrier)) {
-      mbar_handle = UnwrapManualTmaBarrierExpr(tma_barrier);
     }
   }
   PrimExpr load_barrier_arg = mbar_handle.defined() ? mbar_handle : tma_barrier;
@@ -2374,6 +2383,13 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
     tma_copy = SeqStmt(std::move(seq));
+  }
+
+  if (is_load && manual_mbar_handle.defined()) {
+    Stmt expect_tx = Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                                   {manual_mbar_handle, total_bytes}));
+    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+                      SeqStmt({expect_tx, tma_copy}));
   }
 
   // For 1D TMA loads with inline mbarrier: emit expect_tx + tma_load

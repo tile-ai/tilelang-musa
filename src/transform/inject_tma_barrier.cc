@@ -80,16 +80,16 @@ int GetTmaBarrierArgIndex(const CallNode *op) {
   return Is1DTmaLoad(op) ? 2 : 1;
 }
 
-class ManualTmaBarrierIdRewriter : public StmtExprMutator {
+class ManualTmaBarrierIdCollector : public StmtExprVisitor {
 public:
-  static std::pair<Stmt, std::vector<PrimExpr>> Rewrite(const Stmt &stmt) {
-    ManualTmaBarrierIdRewriter rewriter;
-    Stmt rewritten = rewriter(stmt);
-    return {rewritten, rewriter.manual_barrier_ids_};
+  static std::vector<PrimExpr> Collect(const Stmt &stmt) {
+    ManualTmaBarrierIdCollector collector;
+    collector(stmt);
+    return collector.manual_barrier_ids_;
   }
 
 private:
-  PrimExpr VisitExpr_(const CallNode *call) final {
+  void VisitExpr_(const CallNode *call) final {
     if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       int barrier_arg_index = GetTmaBarrierArgIndex(call);
       PrimExpr barrier_id = call->args[barrier_arg_index];
@@ -97,18 +97,14 @@ private:
         PrimExpr unwrapped = UnwrapManualTmaBarrier(barrier_id);
         for (const auto &recorded : manual_barrier_ids_) {
           if (deep_equal_(recorded, unwrapped)) {
-            Array<PrimExpr> new_args = call->args;
-            new_args.Set(barrier_arg_index, unwrapped);
-            return Call(call->dtype, call->op, new_args, call->annotations);
+            StmtExprVisitor::VisitExpr_(call);
+            return;
           }
         }
         manual_barrier_ids_.push_back(unwrapped);
-        Array<PrimExpr> new_args = call->args;
-        new_args.Set(barrier_arg_index, unwrapped);
-        return Call(call->dtype, call->op, new_args, call->annotations);
       }
     }
-    return StmtExprMutator::VisitExpr_(call);
+    StmtExprVisitor::VisitExpr_(call);
   }
 
   std::vector<PrimExpr> manual_barrier_ids_;
@@ -264,8 +260,11 @@ public:
 
 private:
   bool IsRecordedManualBarrier(const PrimExpr &barrier_id) const {
+    PrimExpr unwrapped = IsManualTmaBarrier(barrier_id)
+                             ? UnwrapManualTmaBarrier(barrier_id)
+                             : barrier_id;
     for (const auto &manual_barrier_id : manual_barrier_ids_) {
-      if (deep_equal_(manual_barrier_id, barrier_id)) {
+      if (deep_equal_(manual_barrier_id, unwrapped)) {
         return true;
       }
     }
@@ -646,9 +645,8 @@ public:
       single_warp_arrive = target.value()->kind->name == "musa";
     }
     f = TmaExpectTxRewriter::Rewrite(f, analyzer);
-    auto [rewritten_body, manual_barrier_ids] =
-        ManualTmaBarrierIdRewriter::Rewrite(f->body);
-    f.CopyOnWrite()->body = std::move(rewritten_body);
+    std::vector<PrimExpr> manual_barrier_ids =
+        ManualTmaBarrierIdCollector::Collect(f->body);
     TmaBarrierCollector collector(buffer_data_to_buffer_, manual_barrier_ids);
     collector(f->body);
     bool has_create_list_of_mbarrier = false;
