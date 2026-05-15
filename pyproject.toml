@@ -201,6 +201,16 @@ ignore = [
 [tool.pytest.ini_options]
 verbosity_assertions = 3
 filterwarnings = ["always"]
+addopts = "--import-mode=importlib"
+markers = [
+    "perf: benchmark and performance API tests skipped by default",
+    "slow: long-running correctness sweeps",
+    "gpu: mark test as requiring GPU runtime.",
+    "rocm: mark test as requiring ROCm runtime.",
+    "llvm: mark test as requiring LLVM runtime.",
+    "cuda: mark test as requiring CUDA runtime.",
+    "musa: mark test as requiring MUSA runtime.",
+]
 
 [tool.cibuildwheel]
 archs = ["auto64"]
