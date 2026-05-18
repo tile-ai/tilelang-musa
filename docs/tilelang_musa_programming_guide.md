@@ -55,6 +55,40 @@ with T.Kernel(T.ceildiv(N, block_n), threads=128) as bx:
   - `barrier` 必须来自 `T.alloc_barrier(...)`，并且使用 `T.copy(..., barrier=barrier)` 后，必须由用户在消费目标 `shared buffer` 前调用对应的 `T.barrier_arrive(...)` 和 `T.barrier_wait(...)` 来完成同步。
   - `barrier` 只在该 `T.copy` 能 lowering 成 `TME copy` 时生效；普通 `scalar copy` 或 `SIMT copy` 不会使用这个 `barrier`。
 
+## TME cache policy hints
+```python
+## 示例 1：使用 MUSA inner/outer cache policy
+T.copy(
+    A_global[0:block_m, 0:block_n],
+    A_shared,
+    inner_cache_policy="cache_none",
+    outer_cache_policy="cache_persist",
+)
+
+## 示例 2：使用 NV-compatible eviction policy
+T.copy(
+    A_global[0:block_m, 0:block_n],
+    A_shared,
+    eviction_policy="evict_first",
+)
+
+## 示例 3：T.tma_copy 显式指定 cache policy
+barrier = T.alloc_barrier(128)
+T.tma_copy(
+    A_global[0:block_m, 0:block_n],
+    A_shared,
+    barrier=barrier,
+    inner_cache_policy="cache_once",
+    outer_cache_policy="cache_normal",
+)
+```
+- 功能：`T.copy(...)` 和 `T.tma_copy(...)` 支持给 MUSA `TME load` 指定 cache policy hint。可以通过 `inner_cache_policy` / `outer_cache_policy` 分别指定 MUSA inner/outer cache 行为，也可以通过 `eviction_policy` 使用 NV-compatible 的成对 hint。
+  - `inner_cache_policy` 和 `outer_cache_policy` 可选值为 `"cache_none"`、`"cache_once"`、`"cache_normal"`、`"cache_persist"`，省略时默认使用 `"cache_normal"`。
+  - `eviction_policy` 可选值为 `"evict_normal"`、`"evict_first"`、`"evict_last"`，分别映射为 `"cache_normal"`、`"cache_once"`、`"cache_persist"` 的 inner/outer 成对设置。
+- 注意：
+  - `eviction_policy` 不能和 `inner_cache_policy` 或 `outer_cache_policy` 同时设置；如果需要 MUSA inner/outer 分别控制，应直接使用 `inner_cache_policy` / `outer_cache_policy`。
+  - 当前 MUSA 后端显式 cache policy hint 只支持 descriptor 形式的 `TME load`；`1D TME load`、`TME store` 和 `tma_load_im2col` 目前只支持默认 `"cache_normal"`。
+
 ## T.gemm gemm_ss
 ```python
 ## 示例

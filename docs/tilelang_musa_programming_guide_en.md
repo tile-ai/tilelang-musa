@@ -55,6 +55,40 @@ with T.Kernel(T.ceildiv(N, block_n), threads=128) as bx:
   - `barrier` must come from `T.alloc_barrier(...)`. After using `T.copy(..., barrier=barrier)`, users must call the matching `T.barrier_arrive(...)` and `T.barrier_wait(...)` before consuming the destination `shared buffer`.
   - `barrier` only takes effect when that `T.copy` can be lowered into a `TME copy`. Normal `scalar copy` or `SIMT copy` will not use this `barrier`.
 
+## TME cache policy hints
+```python
+## Example 1: use MUSA inner/outer cache policy
+T.copy(
+    A_global[0:block_m, 0:block_n],
+    A_shared,
+    inner_cache_policy="cache_none",
+    outer_cache_policy="cache_persist",
+)
+
+## Example 2: use NV-compatible eviction policy
+T.copy(
+    A_global[0:block_m, 0:block_n],
+    A_shared,
+    eviction_policy="evict_first",
+)
+
+## Example 3: specify cache policy for T.tma_copy
+barrier = T.alloc_barrier(128)
+T.tma_copy(
+    A_global[0:block_m, 0:block_n],
+    A_shared,
+    barrier=barrier,
+    inner_cache_policy="cache_once",
+    outer_cache_policy="cache_normal",
+)
+```
+- Function: `T.copy(...)` and `T.tma_copy(...)` support specifying cache policy hints for MUSA `TME load`. Users can set MUSA inner/outer cache behavior separately with `inner_cache_policy` / `outer_cache_policy`, or use `eviction_policy` for NV-compatible paired hints.
+  - Valid values for `inner_cache_policy` and `outer_cache_policy` are `"cache_none"`, `"cache_once"`, `"cache_normal"`, and `"cache_persist"`. When omitted, they default to `"cache_normal"`.
+  - Valid values for `eviction_policy` are `"evict_normal"`, `"evict_first"`, and `"evict_last"`, which map to paired inner/outer settings of `"cache_normal"`, `"cache_once"`, and `"cache_persist"` respectively.
+- Note:
+  - `eviction_policy` cannot be combined with `inner_cache_policy` or `outer_cache_policy`. Use `inner_cache_policy` / `outer_cache_policy` directly when MUSA inner/outer cache behavior needs to be controlled separately.
+  - The current MUSA backend supports explicit cache policy hints only for descriptor-based `TME load`; `1D TME load`, `TME store`, and `tma_load_im2col` currently only support the default `"cache_normal"`.
+
 ## T.gemm gemm_ss
 ```python
 ## Example
