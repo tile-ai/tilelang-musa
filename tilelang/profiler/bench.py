@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Callable, Literal
+from typing import Literal
+from collections.abc import Callable
 
 import torch
 from tilelang.utils.device import synchronize, get_pt_device, GPUEvent, IS_MUSA

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir

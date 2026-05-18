@@ -2,7 +2,7 @@
 name = "tilelang_musa"
 description = "Tilelang with MUSA backend."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{name = "Moore Threads" }, { name = "TileLang Contributors" }, { name = "Tile-AI" }]
 maintainers = [
     { name = "Tianyi Xu", email = "tianyi.xu@mthreads.com" },
@@ -17,7 +17,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -137,7 +136,7 @@ skip = [
 ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 line-length = 140
 output-format = "full"
 

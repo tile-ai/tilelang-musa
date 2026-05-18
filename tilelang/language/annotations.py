@@ -1,7 +1,7 @@
 """Annotation helpers exposed on the TileLang language surface."""
 
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 from tilelang import tvm
 from tilelang.layout import Fragment, Layout
