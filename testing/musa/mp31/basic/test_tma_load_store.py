@@ -132,6 +132,8 @@ def _run_case(kernel_fn, shape):
         code = kernel.get_kernel_source()
         assert re.search(r"tl::tma_load", code), "tl::tma_load not found in generated code"
         assert re.search(r"tl::tma_store", code), "tl::tma_store not found in generated code"
+        assert re.search(r"tl::tma_store_arrive\(\)", code), "tl::tma_store_arrive() not found after tl::tma_store in generated code"
+        assert re.search(r"tl::tma_store_wait<0>\(\)", code), "tl::tma_store_wait<0>() not found after tl::tma_store in generated code"
 
         a = torch.randn(shape, device="musa", dtype=torch.float32)
         c = kernel(a)

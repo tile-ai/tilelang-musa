@@ -32,10 +32,12 @@ TL_DEVICE void mbarrier_arrive_expect_tx(uint32_t barrier_id,
   // #endif
 }
 
+TL_DEVICE void tma_store_arrive() { __musa_tme_store_commit(); }
+
 template <int Count> TL_DEVICE void tma_store_wait() {
-  // #if __MUSA_ARCH__ >= 310
-  __musa_tme_idf_l2();
-  // #endif
+  static_assert(Count == 0,
+                "MUSA tma_store_wait currently supports Count == 0");
+  __musa_tme_store_read_wait();
 }
 
 } // namespace tl

@@ -2194,9 +2194,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     }
   }
 
-  // Bulk TMA stores participate in the cp.async.bulk group mechanism on CUDA.
-  // MUSA PH1 does not provide tl::tma_store_arrive/fence_proxy_async support.
-  if (!is_load && !TargetIsMusa(T.target)) {
+  // Bulk TMA stores must be committed and waited before consumers read them.
+  if (!is_load) {
     Array<Stmt> seq;
     seq.reserve(3);
     seq.push_back(tma_copy);
@@ -2376,7 +2375,7 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
                               need_reduce, GetEvictionPolicy()}));
   }
 
-  if (!is_load && !TargetIsMusa(T.target)) {
+  if (!is_load) {
     Array<Stmt> seq;
     seq.reserve(3);
     seq.push_back(tma_copy);
