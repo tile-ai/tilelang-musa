@@ -167,13 +167,22 @@ private:
   int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
                               int32_t size);
 
-  std::vector<std::string> eviction_policy_names_ = {
-      "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};
+  std::vector<std::string> tma_cache_policy_names_ = {
+      "CacheHint::CACHE_NONE", "CacheHint::CACHE_ONCE",
+      "CacheHint::CACHE_NORMAL", "CacheHint::CACHE_PERSIST"};
   std::unordered_set<std::string> bf16_supported_ops_ = {
       "bf1622float2", "bf1622int16", "float22bf162", "bf162bf162"};
 
   std::vector<PrimExpr> GetTMASmemBox(const PrimExpr &desc) const;
   MUsmemSwizzleGranularity GetTMASwizzleGranularity(const PrimExpr &desc) const;
+  std::string GetTMACachePolicy(const PrimExpr &hint,
+                                const std::string &field_name) const;
+  std::string GetMUSATMALoadCallee(const PrimExpr &desc,
+                                   const std::string &inner_hint,
+                                   const std::string &outer_hint) const;
+  void CheckMUSATMACachePolicySupported(const std::string &op_name,
+                                        const std::string &inner_hint,
+                                        const std::string &outer_hint) const;
 };
 
 } // namespace codegen

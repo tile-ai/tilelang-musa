@@ -1872,10 +1872,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
-    ICHECK_GE(op->args.size(), 2);
+    ICHECK_GE(op->args.size(), 5);
     auto eviction_policy =
         this->eviction_policy_names_
-            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+            [op->args[op->args.size() - 3].as<IntImmNode>()->value];
     // Simplify the code by using the default eviction policy
     if (eviction_policy != "EVICT_NORMAL") {
       ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
@@ -1885,7 +1885,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto desc = op->args[0];
     ss << this->PrintExpr(desc) << ", ";
     ss << this->PrintExpr(op->args[1]) << ", ";
-    for (size_t i = 2; i < op->args.size() - 1; i++) {
+    for (size_t i = 2; i < op->args.size() - 3; i++) {
       if (i > 2)
         ss << ", ";
       ss << this->PrintExpr(op->args[i]);
@@ -1897,29 +1897,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::stringstream ss;
     auto eviction_policy =
         this->eviction_policy_names_
-            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+            [op->args[op->args.size() - 3].as<IntImmNode>()->value];
     if (eviction_policy != "EVICT_NORMAL") {
       ss << "tl::tma_load_im2col<tl::CacheHintSm90::" << eviction_policy << ">";
     } else {
       ss << "tl::tma_load_im2col";
     }
-    print_extern_call_stmt(ss.str(), 0, 1);
+    print_extern_call_stmt(ss.str(), 0, 3);
   } else if (op->op.same_as(tl::tma_store())) {
     std::stringstream ss;
-    auto need_reduce = op->args[op->args.size() - 2].as<IntImmNode>()->value;
+    auto need_reduce = op->args[op->args.size() - 4].as<IntImmNode>()->value;
     if (need_reduce) {
-      print_extern_call_stmt("tl::tma_store_add", 0, 2);
+      print_extern_call_stmt("tl::tma_store_add", 0, 4);
       return;
     }
     auto eviction_policy =
         this->eviction_policy_names_
-            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+            [op->args[op->args.size() - 3].as<IntImmNode>()->value];
     if (eviction_policy != "EVICT_NORMAL") {
       ss << "tl::tma_store<tl::CacheHintSm90::" << eviction_policy << ">";
     } else {
       ss << "tl::tma_store";
     }
-    print_extern_call_stmt(ss.str(), 0, 2);
+    print_extern_call_stmt(ss.str(), 0, 4);
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;

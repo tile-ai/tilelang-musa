@@ -1,7 +1,7 @@
 """Copy operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from typing import Literal, Any
+from typing import Any, Literal
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.language.frame import get_let_value, has_let_value
 from tilelang.utils.language import (
@@ -10,6 +10,35 @@ from tilelang.utils.language import (
 )
 from tilelang.language.utils import get_extent
 from tvm import ir, tir
+
+
+EvictionPolicy = Literal["evict_normal", "evict_first", "evict_last"]
+CachePolicy = Literal["cache_none", "cache_once", "cache_normal", "cache_persist"]
+_EVICTION_POLICY_MAP = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+_CACHE_POLICY_MAP = {
+    "cache_none": 0,
+    "cache_once": 1,
+    "cache_normal": 2,
+    "cache_persist": 3,
+}
+_EVICTION_TO_CACHE_POLICY = {
+    _EVICTION_POLICY_MAP["evict_normal"]: _CACHE_POLICY_MAP["cache_normal"],
+    _EVICTION_POLICY_MAP["evict_first"]: _CACHE_POLICY_MAP["cache_once"],
+    _EVICTION_POLICY_MAP["evict_last"]: _CACHE_POLICY_MAP["cache_persist"],
+}
+
+
+def _set_tma_cache_annotations(ann: dict) -> None:
+    if "eviction_policy" in ann:
+        if "inner_cache_policy" in ann or "outer_cache_policy" in ann:
+            raise ValueError("eviction_policy cannot be combined with inner_cache_policy or outer_cache_policy.")
+    else:
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP["evict_normal"]
+
+    if "inner_cache_policy" not in ann:
+        ann["inner_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
+    if "outer_cache_policy" not in ann:
+        ann["outer_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
 
 
 def _manual_tma_barrier(expr: tir.PrimExpr) -> tir.Call:
@@ -60,7 +89,9 @@ def copy(
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     force_async_copy: bool = False,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    eviction_policy: EvictionPolicy | None = None,
+    inner_cache_policy: CachePolicy | None = None,
+    outer_cache_policy: CachePolicy | None = None,
     src_robust_desc: tir.PrimExpr | None = None,
     barrier: BarrierType | None = None,
     annotations: dict | None = None,
@@ -75,7 +106,14 @@ def copy(
         disable_tma (bool, keyword-only): Whether to disable TMA acceleration. Defaults to False.
         force_async_copy (bool, keyword-only): Force MUSA async-copy lowering for
             this copy site. Defaults to False.
-        eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
+        eviction_policy (Optional[str], keyword-only): NV-compatible cache eviction policy.
+            Defaults to None.
+        inner_cache_policy (Optional[str], keyword-only): MUSA inner-cache policy.
+            One of ``cache_none``, ``cache_once``, ``cache_normal``, or ``cache_persist``.
+            Defaults to ``cache_normal`` when omitted.
+        outer_cache_policy (Optional[str], keyword-only): MUSA outer-cache policy.
+            One of ``cache_none``, ``cache_once``, ``cache_normal``, or ``cache_persist``.
+            Defaults to ``cache_normal`` when omitted.
         src_robust_desc (Optional[tir.PrimExpr], keyword-only): MUSA robust source
             descriptor created by `T.make_robust_desc(addr, size_bytes)`.
         barrier (Optional[BarrierType], keyword-only):
@@ -84,7 +122,7 @@ def copy(
             leaves `T.barrier_arrive` / `T.barrier_wait` under user control.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
             coalesced_width, disable_tma, force_async_copy, src_robust_desc, and
-            eviction_policy can also be specified here.
+            cache-policy fields can also be specified here.
             Values in annotations take precedence over individual arguments.
         loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy
             (only valid for normal SIMT copy; incompatible with TMA/LDSM/STSM/TMem). When provided,
@@ -174,9 +212,14 @@ def copy(
         ann["src_robust_desc"] = src_robust_desc
     if "barrier" not in ann and barrier_expr is not None:
         ann["barrier"] = barrier_expr
+
     if "eviction_policy" not in ann and eviction_policy is not None:
-        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
-        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
+    if "inner_cache_policy" not in ann and inner_cache_policy is not None:
+        ann["inner_cache_policy"] = _CACHE_POLICY_MAP[inner_cache_policy]
+    if "outer_cache_policy" not in ann and outer_cache_policy is not None:
+        ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
+    _set_tma_cache_annotations(ann)
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
@@ -234,7 +277,9 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    eviction_policy: EvictionPolicy | None = None,
+    inner_cache_policy: CachePolicy | None = None,
+    outer_cache_policy: CachePolicy | None = None,
     annotations: dict | None = None,
 ) -> tir.PrimExpr | tir.Stmt:
     """TMA copy — issues arrive_and_expect_tx + tma_load, no wait.
@@ -249,9 +294,13 @@ def tma_copy(
         barrier: Mbarrier (from T.alloc_barrier()) for TMA synchronization.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
-        eviction_policy: Cache eviction policy. Defaults to None.
-        annotations: Additional annotations dict. Values in annotations take
-            precedence over individual arguments.
+        eviction_policy: NV-compatible cache eviction policy. Defaults to None.
+        inner_cache_policy: MUSA inner-cache policy. Defaults to
+            ``cache_normal`` when omitted.
+        outer_cache_policy: MUSA outer-cache policy. Defaults to
+            ``cache_normal`` when omitted.
+        annotations: Additional annotations dict. Barrier and cache-policy
+            fields in annotations take precedence over individual arguments.
 
     Returns:
         tir.Call: A handle to the tma_copy operation
@@ -276,11 +325,16 @@ def tma_copy(
 
     from .builtin import _mbar_to_buffer_load
 
-    ann["barrier"] = _mbar_to_buffer_load(barrier)
+    if "barrier" not in ann:
+        ann["barrier"] = _mbar_to_buffer_load(barrier)
 
     if "eviction_policy" not in ann and eviction_policy is not None:
-        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
-        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
+    if "inner_cache_policy" not in ann and inner_cache_policy is not None:
+        ann["inner_cache_policy"] = _CACHE_POLICY_MAP[inner_cache_policy]
+    if "outer_cache_policy" not in ann and outer_cache_policy is not None:
+        ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
+    _set_tma_cache_annotations(ann)
 
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
 
@@ -294,7 +348,7 @@ def c2d_im2col(
     stride: int,
     dilation: int,
     pad: int,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    eviction_policy: EvictionPolicy | None = None,
 ) -> tir.PrimExpr:
     """Perform im2col transformation for 2D convolution.
 

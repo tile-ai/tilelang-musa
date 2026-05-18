@@ -124,6 +124,10 @@ public:
   //   - "disable_tma": Bool, whether to disable TMA acceleration
   //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
   //   2=last)
+  //   - "inner_cache_policy": IntImm, MUSA TME inner-cache policy
+  //     (0=none, 1=once, 2=normal, 3=persist)
+  //   - "outer_cache_policy": IntImm, MUSA TME outer-cache policy
+  //     (0=none, 1=once, 2=normal, 3=persist)
   //   - "force_async_copy": IntImm, force MUSA async-copy lowering
   //   - "src_robust_desc": PrimExpr, robust descriptor for guarded MUSA sources
   //   - "barrier": PrimExpr, user-managed TMA mbarrier expression
@@ -171,6 +175,24 @@ public:
       }
     }
     return 0; // default: evict_normal
+  }
+
+  int GetInnerCachePolicy() const {
+    if (auto val = annotations.Get("inner_cache_policy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 2; // default: cache_normal
+  }
+
+  int GetOuterCachePolicy() const {
+    if (auto val = annotations.Get("outer_cache_policy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 2; // default: cache_normal
   }
 
   bool GetForceAsyncCopy() const {

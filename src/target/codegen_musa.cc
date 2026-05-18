@@ -443,6 +443,47 @@ CodeGenTileLangMUSA::GetTMASwizzleGranularity(const PrimExpr &desc) const {
   return MUsmemSwizzleGranularity(sg->value);
 }
 
+std::string
+CodeGenTileLangMUSA::GetTMACachePolicy(const PrimExpr &hint,
+                                       const std::string &field_name) const {
+  const auto *hint_imm = hint.as<IntImmNode>();
+  ICHECK(hint_imm) << "MUSA TMA " << field_name
+                   << " cache policy must be an IntImm, got " << hint;
+  ICHECK_GE(hint_imm->value, 0)
+      << "MUSA TMA " << field_name
+      << " cache policy index must be non-negative, got " << hint_imm->value;
+  ICHECK_LT(static_cast<size_t>(hint_imm->value),
+            tma_cache_policy_names_.size())
+      << "MUSA TMA " << field_name << " cache policy index " << hint_imm->value
+      << " out of bounds (max " << tma_cache_policy_names_.size() - 1 << ")";
+  return tma_cache_policy_names_[hint_imm->value];
+}
+
+std::string
+CodeGenTileLangMUSA::GetMUSATMALoadCallee(const PrimExpr &desc,
+                                          const std::string &inner_hint,
+                                          const std::string &outer_hint) const {
+  std::ostringstream ss;
+  auto sg = GetTMASwizzleGranularity(desc);
+  ss << "tl::tma_load<" << ToString(sg)
+     << ", SmemSwizzleStride::B256, SmemSwizzleLine::B256, " << inner_hint
+     << ", " << outer_hint << ">";
+  return ss.str();
+}
+
+void CodeGenTileLangMUSA::CheckMUSATMACachePolicySupported(
+    const std::string &op_name, const std::string &inner_hint,
+    const std::string &outer_hint) const {
+  if (inner_hint == "CacheHint::CACHE_NORMAL" &&
+      outer_hint == "CacheHint::CACHE_NORMAL") {
+    return;
+  }
+  LOG(FATAL) << op_name
+             << " on MUSA does not support explicit TME cache policy "
+             << "hints yet (inner=" << inner_hint << ", outer=" << outer_hint
+             << ")";
+}
+
 std::string CodeGenTileLangMUSA::Finish() {
 
   decl_stream << "#include <tl_templates/musa/common.h>\n";
@@ -1808,11 +1849,16 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
-    ICHECK_GE(op->args.size(), 4U);
+    ICHECK_GE(op->args.size(), 6U);
+    auto inner_hint = GetTMACachePolicy(op->args[op->args.size() - 2], "inner");
+    auto outer_hint = GetTMACachePolicy(op->args[op->args.size() - 1], "outer");
     // 1D sTMA load: args[0] is address_of(smem), no descriptor variable
-    // Layout: {smem_ptr, gmem_ptr, mbarrier_id, ize_bytes, eviction_policy}
+    // Layout: {smem_ptr, gmem_ptr, mbarrier_id, size_bytes,
+    // eviction_policy, inner_cache_policy, outer_cache_policy}
     auto arg0_call = op->args[0].as<CallNode>();
     if (arg0_call && arg0_call->op.same_as(builtin::address_of())) {
+      ICHECK_EQ(op->args.size(), 7U);
+      CheckMUSATMACachePolicySupported("1D tma_load", inner_hint, outer_hint);
       ss << "tl::tma_load(";
       ss << this->PrintExpr(op->args[0]) << ", ";
       ss << this->PrintExpr(op->args[1]) << ", ";
@@ -1823,17 +1869,12 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ss.str();
       return;
     }
-    auto eviction_policy =
-        this->eviction_policy_names_
-            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
-    // Simplify the code by using the default eviction policy
     auto desc = op->args[0];
     auto smem = op->args[2];
-    auto sg = GetTMASwizzleGranularity(desc);
-    ss << "tl::tma_load<" << ToString(sg) << ">(";
+    ss << GetMUSATMALoadCallee(desc, inner_hint, outer_hint) << "(";
     auto tile_shape = GetTMASmemBox(desc);
     size_t coord_start = 3;
-    size_t coord_end = op->args.size() - 1;
+    size_t coord_end = op->args.size() - 3;
     ICHECK_GE(coord_end, coord_start);
     size_t coord_count = coord_end - coord_start;
     ICHECK_GT(coord_count, 0U);
@@ -1854,28 +1895,31 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
   } else if (op->op.same_as(tl::tma_load_im2col())) {
     std::stringstream ss;
-    auto eviction_policy =
-        this->eviction_policy_names_
-            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
-    if (eviction_policy != "EVICT_NORMAL") {
-      ss << "tl::tma_load_im2col<tl::CacheHintSm90::" << eviction_policy << ">";
-    } else {
-      ss << "tl::tma_load_im2col";
-    }
-    print_extern_call_stmt(ss.str(), 0, 1);
+    ICHECK_GE(op->args.size(), 4U);
+    auto inner_hint = GetTMACachePolicy(op->args[op->args.size() - 2], "inner");
+    auto outer_hint = GetTMACachePolicy(op->args[op->args.size() - 1], "outer");
+    CheckMUSATMACachePolicySupported("tma_load_im2col", inner_hint, outer_hint);
+    ss << "tl::tma_load_im2col";
+    print_extern_call_stmt(ss.str(), 0, 3);
   } else if (op->op.same_as(tl::tma_store())) {
     std::stringstream ss;
-    auto need_reduce = op->args[op->args.size() - 2].as<IntImmNode>()->value;
+    ICHECK_GE(op->args.size(), 7U);
+    auto need_reduce = op->args[op->args.size() - 4].as<IntImmNode>()->value;
     if (need_reduce) {
-      print_extern_call_stmt("tl::tma_store_add", 0, 2);
+      print_extern_call_stmt("tl::tma_store_add", 0, 4);
       return;
     }
-    ICHECK_GE(op->args.size(), 4U);
+    auto inner_hint = GetTMACachePolicy(op->args[op->args.size() - 2], "inner");
+    auto outer_hint = GetTMACachePolicy(op->args[op->args.size() - 1], "outer");
     // 1D TMA store: args[0] is address_of(gmem), no descriptor variable
-    // Layout: {gmem_ptr, smem_ptr, size_bytes, need_reduce, eviction_policy}
+    // Layout: {gmem_ptr, smem_ptr, size_bytes, need_reduce, eviction_policy,
+    // inner_cache_policy, outer_cache_policy}
     {
       auto arg0_call = op->args[0].as<CallNode>();
       if (arg0_call && arg0_call->op.same_as(builtin::address_of())) {
+        ICHECK_EQ(op->args.size(), 7U);
+        CheckMUSATMACachePolicySupported("1D tma_store", inner_hint,
+                                         outer_hint);
         ss << "tl::tma_store(";
         ss << this->PrintExpr(op->args[0]) << ", "; // gmem_ptr
         ss << this->PrintExpr(op->args[1]) << ", "; // smem_ptr
@@ -1889,17 +1933,11 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto desc = op->args[0];
     auto smem = op->args[1];
     auto sg = GetTMASwizzleGranularity(desc);
-    auto eviction_policy =
-        this->eviction_policy_names_
-            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
-    // MUSA tma_store template currently exposes swizzle knobs, but no
-    // cache-hint template parameter. Keep eviction policy parsed for IR
-    // compatibility while materializing a swizzle-consistent store call.
-    (void)eviction_policy;
+    CheckMUSATMACachePolicySupported("tma_store", inner_hint, outer_hint);
     ss << "tl::tma_store<" << ToString(sg) << ">(";
     auto tile_shape = GetTMASmemBox(desc);
     size_t coord_start = 2;
-    size_t coord_end = op->args.size() - 2;
+    size_t coord_end = op->args.size() - 4;
     ICHECK_GE(coord_end, coord_start);
     size_t coord_count = coord_end - coord_start;
     ICHECK_GT(coord_count, 0U);

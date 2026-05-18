@@ -2128,6 +2128,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       if (!is_load)
         call_args.push_back(need_reduce);
       call_args.push_back(GetEvictionPolicy());
+      call_args.push_back(GetInnerCachePolicy());
+      call_args.push_back(GetOuterCachePolicy());
       return Evaluate(Call(DataType::Handle(), op, call_args));
     };
 
@@ -2177,6 +2179,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       if (!is_load)
         args.push_back(need_reduce);
       args.push_back(GetEvictionPolicy());
+      args.push_back(GetInnerCachePolicy());
+      args.push_back(GetOuterCachePolicy());
       tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                      Evaluate(Call(DataType::Handle(), op, args)));
     } else {
@@ -2190,6 +2194,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       if (!is_load)
         args.push_back(need_reduce);
       args.push_back(GetEvictionPolicy());
+      args.push_back(GetInnerCachePolicy());
+      args.push_back(GetOuterCachePolicy());
       tma_copy = Evaluate(Call(DataType::Handle(), op, args));
     }
   }
@@ -2367,12 +2373,14 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
   if (is_load) {
     tma_copy = Evaluate(Call(DataType::Handle(), tma_load(),
                              {shared_addr, global_addr, load_barrier_arg,
-                              total_bytes, GetEvictionPolicy()}));
+                              total_bytes, GetEvictionPolicy(),
+                              GetInnerCachePolicy(), GetOuterCachePolicy()}));
   } else {
     int need_reduce = 0;
     tma_copy = Evaluate(Call(DataType::Handle(), tma_store(),
                              {global_addr, shared_addr, total_bytes,
-                              need_reduce, GetEvictionPolicy()}));
+                              need_reduce, GetEvictionPolicy(),
+                              GetInnerCachePolicy(), GetOuterCachePolicy()}));
   }
 
   if (!is_load) {
@@ -2621,6 +2629,8 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   for (auto offset : image_offset)
     args.push_back(offset);
   args.push_back(this->eviction_policy_);
+  args.push_back(2); // inner_cache_policy: cache_normal
+  args.push_back(2); // outer_cache_policy: cache_normal
   Stmt tma_copy_stmt =
       Evaluate(Call(DataType::Handle(), tma_load_im2col(), args));
 
