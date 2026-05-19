@@ -19,21 +19,35 @@ variables:
     K8S_IMAGE: "sh-harbor.mthreads.com/os-build/mt-build:develop"
     GIT_SUBMODULE_STRATEGY: none
 
-# 构建 Release 版本
-build-PH1:
-  extends:
-    - ".build-tilelang_musa-base"
-    - ".install-musa"
+.gpu-tilelang_musa-base:
+  extends: ".k8s-gpu-base"
+  needsSourceCode:
+    fetch: true
+    submodules: false
+  execution:
+    nodeSelector:
+      GPU_TYPE: 'S5000'
+      DDK_VERSION: 'master'
   variables:
-    MUSA_MODULE: 'MUSATOOLKITS'
+    MUSA_PATH: "${MUSA_PATH:-/usr/local/musa/bin}"
+    K8S_IMAGE: "sh-harbor.mthreads.com/tilelang-ci-smoke/tilelang_musa:20260518"
+    GIT_SUBMODULE_STRATEGY: none
+
+smoke-ci-test:
+  extends:
+    - ".gpu-tilelang_musa-base"
+    - ".install-musa"
+  timeout: 120m
+  variables:
+    MUSA_MODULE: "MUSATOOLKITS,MUSARUNTIME,MTCC,MUDNN,MCCL"
   withCredentials:
     - type: git
       id: sh-code
   script:
-    - "export PATH=/opt/_internal/cpython-3.10.19/bin:$PATH"
-    - "export LD_LIBRARY_PATH=/usr/local/musa/lib:$LD_LIBRARY_PATH"
-    - "export PATH=/usr/local/musa/bin:$PATH"
-    - "cd ${WORKSPACE}/${REPO_NAME}"
+    - "export WORKSPACE=${WORKSPACE:-$(pwd)}"
+    - "export REPO_DIR=${WORKSPACE}/$(basename \"$PWD\")"
+    - "test -f /usr/lib/x86_64-linux-gnu/libmusa.so.1"
+    - "cd ${REPO_DIR}"
     - "echo 'Cloning submodules in main repository (non-recursive)...'"
     - "git submodule update --init"
     - "echo 'Entering 3rdparty/tvm and cloning its submodules...'"
@@ -44,12 +58,11 @@ build-PH1:
     - "git config submodule.3rdparty/dlpack.url git@sh-code.mthreads.com:mirror/github.com/dmlc/dlpack.git"
     - "git config submodule.3rdparty/libbacktrace.url git@sh-code.mthreads.com:mirror/github.com/ianlancetaylor/libbacktrace.git"
     - "git submodule update --init"
-    - "cd ${WORKSPACE}/${REPO_NAME}"
+    - "cd ${REPO_DIR}"
     - "export USE_MUSA=1"
-    - "export PATH=$(python3.10 -c 'import sys; print(sys.prefix)')/bin:$PATH"
     - "python3 -m build --wheel -C cmake.define.USE_ALTERNATIVE_LINKER=OFF"
-    - "cd dist && pip install *.whl -i https://pypi.tuna.tsinghua.edu.cn/simple"
-  artifacts:
-    - type: "oss"
-      paths:
-        - "${WORKSPACE}/${REPO_NAME}/dist/*.whl"
+    - "export LD_LIBRARY_PATH=${REPO_DIR}/build/lib:$LD_LIBRARY_PATH"
+    - "python3 -m pip install --force-reinstall -i https://pypi.tuna.tsinghua.edu.cn/simple dist/*.whl"
+    - "python3 -c \"import tilelang; print('tilelang', tilelang.__version__, tilelang.__file__)\""
+    - "python3 -m pip install pytest-timeout -i https://pypi.tuna.tsinghua.edu.cn/simple"
+    - "bash testing/run_test.sh ci_smoke -vv -s --tb=short --durations=20 --timeout=60 --timeout-method=thread"

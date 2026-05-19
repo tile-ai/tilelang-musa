@@ -1,3 +1,4 @@
+import pytest
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
@@ -121,6 +122,7 @@ def test_gemm_f16f16f16_nn():
     )
 
 
+@pytest.mark.ci_smoke
 def test_gemm_f16f16f32_nn():
     run_gemm(
         512,
