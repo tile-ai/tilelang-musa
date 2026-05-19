@@ -44,22 +44,10 @@ private:
       PrimExpr simplified = analyzer_.Simplify(indices[i]);
       IndexSignState state = IndexSignState::kUnknown;
 
-      // Handle scalar indices with the standard analyzer
-      if (simplified.dtype().lanes() == 1) {
-        if (analyzer_.CanProve(simplified >= 0))
-          state = IndexSignState::kNonNegative;
-        else if (analyzer_.CanProve(simplified < 0))
-          state = IndexSignState::kNegative;
-        else
-          DLOG(WARNING)
-              << "LegalizeNegativeIndex: cannot prove non-negative index "
-              << simplified << " for buffer " << buffer_name << " (axis " << i
-              << ", index " + indices[i]->Script() + ").";
-      }
       // Vector indices: try to reason about non-negativity/negativity
       // Common patterns are Ramp(base, stride, lanes) and Broadcast(value,
       // lanes).
-      else if (const auto *ramp = simplified.as<RampNode>()) {
+      if (const auto *ramp = simplified.as<RampNode>()) {
         // Compute a safe lower/upper bound for the vector lanes
         // lower_bound = base_min + min(0, stride_min) * (lanes - 1)
         // upper_bound = base_max + max(0, stride_max) * (lanes - 1)
@@ -109,6 +97,16 @@ private:
                 << simplified << " for buffer " << buffer_name << " (axis " << i
                 << ", index " + indices[i]->Script() + ").";
         }
+      } else {
+        if (analyzer_.CanProve(simplified >= 0))
+          state = IndexSignState::kNonNegative;
+        else if (analyzer_.CanProve(simplified < 0))
+          state = IndexSignState::kNegative;
+        else
+          DLOG(WARNING)
+              << "LegalizeNegativeIndex: cannot prove non-negative index "
+              << simplified << " for buffer " << buffer_name << " (axis " << i
+              << ", index " + indices[i]->Script() + ").";
       }
       states.push_back(state);
     }
@@ -163,6 +161,39 @@ private:
                         const LoadStore2StateMap &states)
       : arith::IRMutatorWithAnalyzer(analyzer), states_(states) {}
 
+  PrimExpr TryRewriteMixedRamp(const PrimExpr &index,
+                               const PrimExpr &buffer_extent) {
+    PrimExpr value = analyzer_->Simplify(index);
+    const auto *ramp = value.as<RampNode>();
+    if (ramp == nullptr)
+      return PrimExpr();
+
+    int lanes = *as_const_int(ramp->lanes);
+    ffi::Array<PrimExpr> values;
+    ffi::Array<PrimExpr> shuffle_indices;
+    DataType dtype =
+        analyzer_->Simplify(buffer_extent + ramp->base).dtype().element_of();
+    for (int lane_id = 0; lane_id < lanes; ++lane_id) {
+      PrimExpr lane = analyzer_->Simplify(
+          ramp->base + ramp->stride * IntImm(ramp->stride.dtype(), lane_id));
+      if (analyzer_->CanProve(lane < 0))
+        lane = analyzer_->Simplify(buffer_extent + lane);
+      else if (!analyzer_->CanProve(lane >= 0))
+        return PrimExpr();
+      values.push_back(lane.dtype() == dtype ? lane : Cast(dtype, lane));
+      shuffle_indices.push_back(IntImm(DataType::Int(32), lane_id));
+    }
+    return analyzer_->Simplify(Shuffle(values, shuffle_indices, value->span));
+  }
+
+  BufferRegion UpdateRegion(BufferRegion region) {
+    for (const Range &range : region->region) {
+      if (analyzer_->CanProve(analyzer_->Simplify(range->min) < 0))
+        return BufferRegion::FullRegion(region->buffer);
+    }
+    return region;
+  }
+
   ffi::Array<PrimExpr> UpdateIdx(const ffi::Array<PrimExpr> &indices,
                                  const ffi::Array<PrimExpr> &buffer_shape,
                                  const std::vector<IndexSignState> &state_vec) {
@@ -171,9 +202,13 @@ private:
         << indices << ")";
     ffi::Array<PrimExpr> new_indices = indices;
     for (size_t i = 0; i < indices.size(); ++i) {
-      if (state_vec[i] != IndexSignState::kNegative)
-        continue;
-      new_indices.Set(i, analyzer_->Simplify(buffer_shape[i] + indices[i]));
+      if (state_vec[i] == IndexSignState::kNegative) {
+        new_indices.Set(i, analyzer_->Simplify(buffer_shape[i] + indices[i]));
+      } else if (state_vec[i] == IndexSignState::kUnknown) {
+        PrimExpr rewritten = TryRewriteMixedRamp(indices[i], buffer_shape[i]);
+        if (rewritten.defined())
+          new_indices.Set(i, rewritten);
+      }
     }
     return new_indices;
   }
@@ -200,6 +235,16 @@ private:
 
     auto indices = UpdateIdx(store->indices, store->buffer->shape, it->second);
     return BufferStore(store->buffer, store->value, indices, store->predicate);
+  }
+
+  Stmt VisitStmt_(const BlockNode *op) final {
+    Block block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    BlockNode *n = block.CopyOnWrite();
+    n->reads.MutateByApply(
+        [this](BufferRegion region) { return UpdateRegion(region); });
+    n->writes.MutateByApply(
+        [this](BufferRegion region) { return UpdateRegion(region); });
+    return block;
   }
 
 private:
