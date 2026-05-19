@@ -405,6 +405,21 @@ def VectorizeLoop(enable_vectorize: bool = True):
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
 
 
+def VectorizeSingleSide():
+    """Vectorize single-sided contiguous scalar copy groups into Ramp-based TIR.
+
+    This pass does not emit target intrinsics. It only canonicalizes eligible
+    scalar copy loops so LowerLDGSTG can consume the resulting Ramp-based global
+    accesses.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.VectorizeSingleSide()  # type: ignore
+
+
 def LateVectorizePlanner():
     """LateVectorizePlanner
 
@@ -644,7 +659,7 @@ def LowerLDGSTG():
     - Supports predicated loads (if_then_else with else=0)
     - Supports predicated stores (if in then case)
     - Skips loads in async scope (will be lowered to cp.async)
-    - Only enabled for CUDA targets
+    - Only enabled for CUDA and MUSA targets
 
     Returns
     -------

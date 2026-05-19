@@ -112,6 +112,8 @@ static constexpr const char *kEnableLowerLDGSTG = "tl.enable_lower_ldgstg";
  */
 static constexpr const char *kEnableLowerLDGSTGPredicated =
     "tl.enable_lower_ldgstg_predicated";
+static constexpr const char *kDisableVectorizeSingleSide =
+    "tl.disable_vectorize_single_side";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
 static constexpr const char *kASTPrintEnable = "tl.ast_print_enable";

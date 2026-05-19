@@ -155,6 +155,9 @@ class PassConfigKey(str, Enum):
     predicated stores (IfThenElse with empty then case) are lowered to
     ldg/stg intrinsics. Default: False"""
 
+    TL_DISABLE_VECTORIZE_SINGLE_SIDE = "tl.disable_vectorize_single_side"
+    """Disable VectorizeSingleSide. Default: False"""
+
     TL_ENABLE_VECTORIZE_PLANNER_VERBOSE = "tl.enable_vectorize_planner_verbose"
     """Enable verbose output for vectorize planner. When enabled, prints detailed
     information about each buffer's inferred vector size and which buffer determines

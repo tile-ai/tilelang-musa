@@ -878,6 +878,10 @@ void CodeGenTileLangMUSA::PrintVecConstructor(DataType t,
       return;
     }
   }
+  if (t.is_float8() && !t.is_scalar()) {
+    os << "make_" << GetTileLangFP8Type(t);
+    return;
+  }
   CodeGenC::PrintVecConstructor(t, os);
 }
 

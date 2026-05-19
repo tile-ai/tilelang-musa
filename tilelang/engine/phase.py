@@ -306,6 +306,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # the Legalization.
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
+    mod = tilelang.transform.VectorizeSingleSide()(mod)
     mod = tilelang.transform.LowerLDGSTG()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
     if mcc.is_ph1(target):
