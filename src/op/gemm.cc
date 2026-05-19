@@ -983,6 +983,34 @@ TIR_REGISTER_TL_TILE_OP(Gemm, gemm)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TVM_REGISTER_OP("tl.tileop.wgmma_gemm")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "wgmma_gemm")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_wgmma",
+                                       IntImm(DataType::Int(32), 1));
+                               return Gemm(args, ann);
+                             })
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.tileop.tcgen05_gemm")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "tcgen05_gemm")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_tcgen05",
+                                       IntImm(DataType::Int(32), 1));
+                               return Gemm(args, ann);
+                             })
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TVM_REGISTER_OP("tl.GemmWarpPolicy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
 

@@ -30,6 +30,7 @@
 #include <utility>
 
 #include "../op/builtin.h"
+#include "common/attr.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -106,7 +107,7 @@ private:
     }
     // Step 5. Materialize a lexical scope boundary only for blocks that were
     // explicitly marked by an earlier semantic lowering pass (for example
-    // gemm_py/gemm_sp_py). We intentionally avoid re-inferring this from the
+    // gemm/gemm_sp). We intentionally avoid re-inferring this from the
     // lowered alloc_buffers here because provenance has already been blurred by
     // earlier allocation planning/hoisting passes.
     if (HasLexicalAllocScopeAnnotation(new_block->annotations)) {
@@ -244,7 +245,7 @@ private:
     pragma_attrs->clear();
     for (const auto &kv : annotations) {
       const String &key = kv.first;
-      if (tir::attr::IsPragmaKey(key)) {
+      if (tir::attr::IsPragmaKey(key) || tl::attr::IsCodeBlockKey(key)) {
         pragma_attrs->emplace_back(key, ConvertAttrValue(key, kv.second));
       } else if (key == tl::attr::kLocalVarInit) {
         if (auto local_init_map = kv.second.try_cast<Map<Var, PrimExpr>>()) {
