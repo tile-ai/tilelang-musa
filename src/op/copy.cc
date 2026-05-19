@@ -2083,6 +2083,11 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
   PrimExpr manual_mbar_handle;
+
+  // For TMA loads, allocate mbarrier(s) for synchronous semantics.
+  // Determine the mbarrier handle for TMA loads.
+  // T.tma_copy(): requires user-provided barrier
+  // T.copy(): allocates internal mbarrier via AllocMBarrier
   PrimExpr mbar_handle;
   if (is_load) {
     if (IsManualTmaBarrierExpr(tma_barrier)) {
@@ -2093,14 +2098,11 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
-      int num_barriers = T.pipeline_num_stages;
       int barrier_base_id = T.AllocMBarrier(1);
-      for (int i = 1; i < num_barriers; i++) {
-        T.AllocMBarrier(1);
-      }
-      PrimExpr mbar_idx =
-          IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-      mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+      PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
+      mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
+    } else if (IsManualTmaBarrierExpr(tma_barrier)) {
+      mbar_handle = UnwrapManualTmaBarrierExpr(tma_barrier);
     }
   }
   PrimExpr load_barrier_arg = mbar_handle.defined() ? mbar_handle : tma_barrier;
@@ -2357,14 +2359,11 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
-      int num_barriers = T.pipeline_num_stages;
       int barrier_base_id = T.AllocMBarrier(1);
-      for (int i = 1; i < num_barriers; i++) {
-        T.AllocMBarrier(1);
-      }
-      PrimExpr mbar_idx =
-          IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-      mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+      PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
+      mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
+    } else if (IsManualTmaBarrierExpr(tma_barrier)) {
+      mbar_handle = UnwrapManualTmaBarrierExpr(tma_barrier);
     }
   }
   PrimExpr load_barrier_arg = mbar_handle.defined() ? mbar_handle : tma_barrier;
@@ -2607,14 +2606,9 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   int barrier_base_id = -1;
   PrimExpr mbar_handle;
   if (T.AllocMBarrier) {
-    int num_barriers = T.pipeline_num_stages;
     barrier_base_id = T.AllocMBarrier(1);
-    for (int i = 1; i < num_barriers; i++) {
-      T.AllocMBarrier(1);
-    }
-    PrimExpr mbar_idx =
-        IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-    mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+    PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
+    mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
   }
 
   Array<PrimExpr> args;

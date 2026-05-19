@@ -160,17 +160,6 @@ def LowerReduceBarrier():
     return _ffi_api.LowerReduceBarrier() if hasattr(_ffi_api, "LowerReduceBarrier") else lambda f: f  # type: ignore
 
 
-def WarpSpecializedPipeline():
-    """WarpSpecializedPipeline
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.WarpSpecializedPipeline()  # type: ignore
-
-
 def RewriteWgmmaSync():
     """RewriteWgmmaSync
 
@@ -217,11 +206,6 @@ def ThreadPartialSync(storage_scope: str):
 def UnifiedBarrier():
     """Unify MUSA barrier setup and rewrite partial sync to barrier synchronization."""
     return _ffi_api.UnifiedBarrier() if hasattr(_ffi_api, "UnifiedBarrier") else lambda f: f  # type: ignore
-
-
-def OffsetMbarrierId():
-    """Offset mbarrier ids in MUSA lowering path."""
-    return _ffi_api.OffsetMbarrierId() if hasattr(_ffi_api, "OffsetMbarrierId") else lambda f: f  # type: ignore
 
 
 def IfStmtBinding():
@@ -306,17 +290,6 @@ def AnnotateWarpGroupRegAlloc():
         The result pass
     """
     return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
-
-
-def InjectTmaBarrier():
-    """InjectTmaBarrier
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.InjectTmaBarrier()  # type: ignore
 
 
 def LowerManualTmaBarrier():

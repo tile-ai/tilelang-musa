@@ -104,8 +104,7 @@ public:
   Array<Stmt> MakeInitStmts() {
     Array<Stmt> stmts;
     for (const auto &[id, thread_count] : barrier_inits_) {
-      auto barrier = Call(DataType::Handle(), get_mbarrier(),
-                          {IntImm(DataType::Int(32), id)});
+      PrimExpr barrier = IntImm(DataType::Int(32), id);
       auto count = VisitExpr(thread_count);
       auto init =
           Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
@@ -127,16 +126,14 @@ private:
     return StmtExprMutator::VisitStmt_(op);
   }
 
-  // Rewrite partial_barrier_sync(offset) to
-  // partial_barrier_sync(get_mbarrier(id)).
+  // Rewrite partial_barrier_sync(offset) to partial_barrier_sync(id).
   std::optional<Stmt> RewritePartialBarrierSync(const CallNode *call) {
     ICHECK_EQ(call->args.size(), 1);
     const auto *offset_imm = call->args[0].as<IntImmNode>();
     ICHECK(offset_imm) << "partial_barrier_sync offset must be IntImm";
     auto offset = offset_imm->value;
-    int new_id = base_count_ + offset;
-    Array<PrimExpr> args = {Call(DataType::Handle(), get_mbarrier(),
-                                 {IntImm(DataType::Int(32), new_id)})};
+    int new_id = base_count_ + offset + 1;
+    Array<PrimExpr> args = {IntImm(DataType::Int(32), new_id)};
     auto new_call = Call(call->dtype, partial_barrier_sync(), args);
     return Evaluate(new_call);
   }
@@ -348,8 +345,8 @@ PrimFunc RewriteUnifiedBarrier(PrimFunc f) {
     std::vector<std::pair<int, PrimExpr>> barrier_inits;
     barrier_inits.reserve(sync_thread_counts.size());
     for (size_t offset = 0; offset < sync_thread_counts.size(); ++offset) {
-      barrier_inits.push_back(
-          {base_count + static_cast<int>(offset), sync_thread_counts[offset]});
+      barrier_inits.push_back({base_count + static_cast<int>(offset) + 1,
+                               sync_thread_counts[offset]});
     }
 
     MbarrierSyncRewriter rewriter(base_count, std::move(barrier_inits));

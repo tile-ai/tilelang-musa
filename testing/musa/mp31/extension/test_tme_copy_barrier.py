@@ -50,7 +50,10 @@ def copy_with_manual_tma_barrier_dynamic_index(A, block_n, dtype="float32"):
 
 def _assert_tma_barrier_source(source, expected_bytes, require_non_constant=False):
     flat_source = " ".join(source.split())
-    expect_tx = re.search(rf"__musa_async_add_trans\(([^,]+),\s*{expected_bytes}\)", flat_source)
+    expect_tx = re.search(
+        rf"(?:tl::mbarrier_arrive_expect_tx|__musa_async_add_trans)\(([^,]+),\s*{expected_bytes}\)",
+        flat_source,
+    )
     assert expect_tx, source
     barrier_expr = expect_tx.group(1).strip()
     if require_non_constant:

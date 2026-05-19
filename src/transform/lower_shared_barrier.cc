@@ -87,8 +87,6 @@ private:
     Array<Var> barrier_vars;
     Array<Stmt> init_mbarrier_calls_;
     for (auto buffer : barrier_buffers) {
-      ICHECK(buffer->name != "mbarrier")
-          << "Shared barrier's name 'mbarrier' is reserved";
       auto data = buffer->data;
       ICHECK(barrier_init_map.count(data))
           << "Barrier buffer " << buffer->name

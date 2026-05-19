@@ -147,11 +147,6 @@ TIR_DEFINE_TL_BUILTIN(rng_rand_float)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(create_list_of_mbarrier)
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
 TIR_DEFINE_TL_BUILTIN(layout_marker)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -179,11 +174,6 @@ TIR_DEFINE_TL_BUILTIN(make_robust_desc)
 
 TIR_DEFINE_TL_BUILTIN(create_tma_im2col_descriptor)
     .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure));
-
-TIR_DEFINE_TL_BUILTIN(get_mbarrier)
-    .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 

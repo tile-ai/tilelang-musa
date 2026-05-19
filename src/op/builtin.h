@@ -261,24 +261,8 @@ TVM_DLL const Op &make_robust_desc();
  *
  */
 TVM_DLL const Op &create_tma_im2col_descriptor();
-
-/*!
- * \brief Create a list of mbarrier with arrive_counts for each barrier
- *
- * create_list_of_mbarrier(arrive_counts0, arrive_counts1, ...)
- *
- */
-TVM_DLL const Op &create_list_of_mbarrier();
 TVM_DLL const Op &layout_marker();
 TVM_DLL const Op &manual_tma_barrier();
-
-/*!
- * \brief Get the mbarrier injected by compiler via barrier_id
- *
- * int64_t* get_mbarrier(barrier_id)
- *
- */
-TVM_DLL const Op &get_mbarrier();
 
 /*!
  * \brief Internal marker op for UnifiedBarrier pass.

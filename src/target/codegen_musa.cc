@@ -1770,10 +1770,6 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
     this->PrintIndent();
     this->stream << "__musa_async_bar_record(" << barrier_count << ");\n";
-  } else if (op->op.same_as(tl::get_mbarrier())) {
-    ICHECK_EQ(op->args.size(), 1);
-    std::string barrier_id = this->PrintExpr(op->args[0]);
-    os << barrier_id;
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     if (op->args.size() == 1) {
       this->PrintIndent();
@@ -1803,10 +1799,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto mbarrier_id = print_mbarrier_id(op->args[0]);
       auto transaction_bytes = this->PrintExpr(op->args[1]);
       this->PrintIndent();
-      this->stream << "__musa_async_add_trans(" << mbarrier_id << ", "
+      this->stream << "tl::mbarrier_arrive_expect_tx(" << mbarrier_id << ", "
                    << transaction_bytes << ");\n";
-      this->PrintIndent();
-      this->stream << "__musa_async_arrive(" << mbarrier_id << ");\n";
     } else if (op->args.size() == 4) {
       this->PrintIndent();
       auto mbarrier_id = print_mbarrier_id(op->args[0]);

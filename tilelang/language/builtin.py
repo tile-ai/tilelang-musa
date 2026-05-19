@@ -29,7 +29,7 @@ def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
     raise TypeError(f"Expect warp sizing argument to be int or PrimExpr, but got {type(value)}.")
 
 
-def _mbar_to_buffer_load(mbar: BarrierType | Call) -> BufferLoad | Call:
+def _mbar_to_buffer_load(mbar: BarrierType) -> BufferLoad:
     """Normalize a memory barrier argument for intrinsic emission.
 
     Args:
@@ -37,20 +37,15 @@ def _mbar_to_buffer_load(mbar: BarrierType | Call) -> BufferLoad | Call:
             The memory barrier to convert
 
     Returns:
-        Union[tir.BufferLoad, tir.Call]: A lowered barrier handle argument.
+        tir.BufferLoad: A lowered barrier handle argument.
     """
     if isinstance(mbar, tir.BufferLoad):
         return mbar
     elif isinstance(mbar, tir.Buffer):
         assert len(mbar.shape) == 1, f"mbarrier must be a single element buffer, but got {mbar.shape}"
         return tir.BufferLoad(mbar, [0])
-    elif isinstance(mbar, tir.Call):
-        # Some passes and hand-written IR may still use tl.get_mbarrier(i).
-        if mbar.op.same_as(tir.op.Op.get("tl.get_mbarrier")):
-            return mbar
-        raise TypeError(f"Unsupported barrier call op: {mbar.op}")
     else:
-        raise TypeError(f"mbarrier must be a tir.BufferLoad, tir.Buffer, or tl.get_mbarrier(...) call, but got {type(mbar)}")
+        raise TypeError(f"mbarrier must be a tir.BufferLoad or tir.Buffer, but got {type(mbar)}")
 
 
 def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = None) -> PrimExpr:

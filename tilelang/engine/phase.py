@@ -56,43 +56,6 @@ def allow_fence_proxy(target: Target | None = None) -> bool:
     return False
 
 
-def has_explicit_cp_async(mod: IRModule) -> bool:
-    cp_async_ops = (
-        tir.op.Op.get("tir.ptx_cp_async"),
-        tir.op.Op.get("tl.ptx_cp_async"),
-        tir.op.Op.get("tir.ptx_commit_group"),
-        tir.op.Op.get("tir.ptx_wait_group"),
-        tir.op.Op.get("tir.ptx_cp_async_barrier"),
-        tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"),
-    )
-    found = False
-
-    def _visit(node):
-        nonlocal found
-        if found:
-            return
-        if isinstance(node, tir.Call):
-            for op in cp_async_ops:
-                if node.op.same_as(op):
-                    found = True
-                    return
-            op_name = getattr(node.op, "name", "")
-            if any(token in op_name for token in ("cp_async", "commit_group", "wait_group")):
-                found = True
-                return
-            node_text = str(node)
-            if any(token in node_text for token in ("cp_async", "commit_group", "wait_group")):
-                found = True
-                return
-
-    for _, func in mod.functions.items():
-        if isinstance(func, tir.PrimFunc):
-            tir.stmt_functor.post_order_visit(func.body, _visit)
-            if found:
-                return True
-    return False
-
-
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -276,33 +239,28 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
     # which may be introduced by the LegalizeSafeMemoryAccess
-    # Note: TMA lowering is decoupled from warp specialization. In no-WS mode,
-    # the planner/software-pipeline path still handles TMA + mbarrier lowering.
     if allow_tma_lower(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
         # MultiVersionBuffer before LowerSharedBarrier so barrier buffers
         # (shared.barrier scope) can be expanded for pipelining.
         mod = tilelang.transform.MultiVersionBuffer()(mod)
-        mod = tilelang.transform.LowerSharedBarrier()(mod)
-        if mcc.is_ph1(target):
-            mod = tilelang.transform.LowerReduceBarrier()(mod)
-        ws_enabled = allow_warp_specialized(pass_ctx=pass_ctx, target=target)
-        if has_explicit_cp_async(mod):
-            # Keep explicit cp.async kernels on the legacy MUSA WS chain.
-            # Direct PipelinePlanning on this pattern can report overlapping
-            # writes (fill + cp.async into the same shared buffer regions).
-            mod = tilelang.transform.WarpSpecialized()(mod)
-            mod = tilelang.transform.InjectTmaBarrier()(mod)
-            mod = tilelang.transform.PipelinePlanning()(mod)
-            mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-        elif ws_enabled:
+        if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
             # Producer-Consumer Warp Specialization:
             # Splits TMA pipeline loops into producer (TMA loads) and consumer
             # (compute) warps with mbarrier-based synchronization.
             # When WS succeeds, it handles the pipeline overlap directly,
             # so PipelinePlanning + InjectSoftwarePipeline are skipped.
+            # NOTE: LowerSharedBarrier runs ONLY after WS, not before.
+            # Running it before would generate barrier init calls that
+            # WS cannot clean up when it replaces the barriers.
             mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+            mod = tilelang.transform.LowerSharedBarrier()(mod)
+            if mcc.is_ph1(target):
+                mod = tilelang.transform.LowerReduceBarrier()(mod)
         else:
+            mod = tilelang.transform.LowerSharedBarrier()(mod)
+            if mcc.is_ph1(target):
+                mod = tilelang.transform.LowerReduceBarrier()(mod)
             mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
             mod = tilelang.transform.PipelinePlanning()(mod)
             mod = tilelang.transform.InjectSoftwarePipeline()(mod)
@@ -311,9 +269,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
     else:
         mod = tilelang.transform.LowerSharedBarrier()(mod)
-        mod = tilelang.transform.IfStmtBinding()(mod)
         if mcc.is_ph1(target):
             mod = tilelang.transform.LowerReduceBarrier()(mod)
+        mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
@@ -375,7 +333,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     if mcc.is_ph1(target):
         mod = tilelang.transform.UnifiedBarrier()(mod)
-        mod = tilelang.transform.OffsetMbarrierId()(mod)
     # Run before MergeIfStmt so async scope markers are still available.
     mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
     mod = tilelang.transform.MergeAsyncCopy()(mod)

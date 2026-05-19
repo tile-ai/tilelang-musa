@@ -60,7 +60,7 @@ def test_tma_lower_no_warp_specialized_injects_mbarrier():
     assert "tl::tma_load" in src
     assert "__musa_async_bar_record(1)" in src
     assert "__musa_async_init_arrival(1" in src
-    assert "__musa_async_add_trans(1" in src
+    assert "tl::mbarrier_arrive_expect_tx(1" in src
 
 
 def test_tma_lower_no_warp_specialized_2d_descriptor_uses_args1_barrier():
@@ -297,11 +297,14 @@ def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
     assert "cp_async_gs<16>" in src
-    assert "__launch_bounds__(128, 1)" in src
+    assert "__launch_bounds__(256, 1)" in src
     assert "__launch_bounds__(160, 1)" not in src
-    assert "if (128 <= ((int)threadIdx.x))" not in src
-    assert src.count("tl::tma_load") == 2
-    assert src.count("cp_async_gs<16>") == 2
+    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
+    consumer_idx = src.index("} else {", producer_idx)
+    cp_async_idx = src.index("cp_async_gs<16>")
+    tma_idx = src.index("tl::tma_load")
+    assert producer_idx < cp_async_idx < consumer_idx
+    assert producer_idx < tma_idx < consumer_idx
 
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)

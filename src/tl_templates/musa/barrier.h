@@ -25,11 +25,14 @@ TL_DEVICE uint32_t mbarrier_arrive(uint32_t barrier_id) {
   // #endif
 }
 
-TL_DEVICE void mbarrier_arrive_expect_tx(uint32_t barrier_id,
-                                         uint32_t transaction_bytes) {
-  // #if __MUSA_ARCH__ >= 310
+TL_DEVICE uint32_t mbarrier_arrive_expect_tx(uint32_t barrier_id,
+                                             uint32_t transaction_bytes) {
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 420)
+  return __musa_async_arrive_add_trans(barrier_id, transaction_bytes);
+#else
   __musa_async_add_trans(barrier_id, transaction_bytes);
-  // #endif
+  return __musa_async_arrive(barrier_id);
+#endif
 }
 
 TL_DEVICE void tma_store_arrive() { __musa_tme_store_commit(); }

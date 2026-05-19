@@ -14,7 +14,6 @@
 
 #include "../op/builtin.h"
 #include "../runtime/runtime.h"
-#include "./common/mbarrier.h"
 
 namespace tvm {
 namespace tl {
@@ -117,98 +116,64 @@ public:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    // Insert the prefetch TMA descriptor statement TO the beginning of the
-    // kernel
-    if (op->attr_key == tir::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        auto body = StmtExprMutator::VisitStmt(op->body);
-        if (prefetch_calls_.empty() && init_mbarrier_calls_.empty()) {
-          return AttrStmt(op->node, op->attr_key, op->value, body);
-        } else {
-          Array<Stmt> stmt_seq;
-          if (!init_mbarrier_calls_.empty()) {
-            auto alloc_mbarrier =
-                Evaluate(Call(DataType::Handle(), builtin::create_barriers(),
-                              {static_cast<int>(init_mbarrier_calls_.size())}));
-            stmt_seq.push_back(alloc_mbarrier);
-          }
-
-          auto stmts = prefetch_calls_;
-          stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
-                       init_mbarrier_calls_.end());
-          PrimExpr condition;
-          if (!disable_shuffle_elect_) {
-            condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
-          } else {
-            condition = EQ(iv->var, 0);
-          }
-          auto stmt_ = IfThenElse(condition,
-                                  stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
-          stmt_seq.push_back(stmt_);
-          if (!init_mbarrier_calls_.empty()) {
-            // Note from FlashAttention:
-            // Helps with visibility of barrier init operations across warps /
-            // cta / cluster Available as a separate function so as to batch
-            // inits across barriers and fence once Note : It must be composed
-            // with an appropriate sync instruction with the right scope to
-            // ensure visibility eg. __syncthreads() or a cluster_arrive() +
-            // cluster_wait()
-            Stmt mem_sync =
-                Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
-                              {StringImm("shared")}));
-            stmt_seq.push_back(mem_sync);
-          }
-          stmt_seq.push_back(body);
-
-          prefetch_calls_.clear();
-          init_mbarrier_calls_.clear();
-          return AttrStmt(op->node, op->attr_key, op->value, SeqStmt(stmt_seq));
-        }
-      }
+    if (op->attr_key != tir::attr::thread_extent) {
+      return StmtExprMutator::VisitStmt_(op);
     }
-    return StmtExprMutator::VisitStmt_(op);
+
+    IterVar iv = Downcast<IterVar>(op->node);
+    if (iv->thread_tag != "threadIdx.x") {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    Stmt body = StmtExprMutator::VisitStmt(op->body);
+    if (prefetch_calls_.empty()) {
+      return AttrStmt(op->node, op->attr_key, op->value, body);
+    }
+
+    Array<Stmt> prefetch_calls = prefetch_calls_;
+    PrimExpr condition;
+    if (disable_shuffle_elect_) {
+      condition = EQ(iv->var, 0);
+    } else {
+      condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
+    }
+    Stmt prefetch_stmt = IfThenElse(condition, prefetch_calls.size() > 1
+                                                   ? SeqStmt(prefetch_calls)
+                                                   : prefetch_calls[0]);
+    prefetch_calls_.clear();
+    return AttrStmt(op->node, op->attr_key, op->value,
+                    SeqStmt({prefetch_stmt, body}));
   }
 
   PrimExpr VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(create_tma_descriptor()) ||
-        call->op.same_as(create_tma_im2col_descriptor())) {
-      Var var;
-      auto iter = desc_map_.find(tvm::ffi::GetRef<Call>(call));
-      if (iter != desc_map_.end()) {
-        var = iter->second;
-      } else {
-        String name = call->args[2].as<Var>().value()->name_hint;
-        int desc_index = static_cast<int>(desc_map_.size());
-        var = Var(name + "_desc_" + std::to_string(desc_index),
-                  PointerType(PrimType(cuTensorMapType()), "grid_constant"));
-        desc_map_[tvm::ffi::GetRef<Call>(call)] = var;
-        if (enable_tma_desc_prefetch_ &&
-            call->op.same_as(create_tma_descriptor())) {
-          prefetch_calls_.push_back(
-              Evaluate(Call(DataType::Handle(), builtin::call_extern(),
-                            {StringImm("tl::prefetch_tma_descriptor"), var})));
-        }
-      }
-      return var;
-    } else if (call->op.same_as(create_list_of_mbarrier())) {
-      ICHECK(init_mbarrier_calls_.empty());
-      int num_barriers = static_cast<int>(call->args.size());
-      for (int i = 0; i < num_barriers; i++) {
-        PrimExpr mbarrier = Call(DataType::Handle(), get_mbarrier(), {i});
-        init_mbarrier_calls_.push_back(Evaluate(
-            Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
-                 {mbarrier, call->args[i]})));
-      }
-      return 0;
-    } else {
+    bool is_tma_descriptor = call->op.same_as(create_tma_descriptor());
+    bool is_tma_im2col_descriptor =
+        call->op.same_as(create_tma_im2col_descriptor());
+    if (!is_tma_descriptor && !is_tma_im2col_descriptor) {
       return StmtExprMutator::VisitExpr_(call);
     }
+
+    Call call_ref = tvm::ffi::GetRef<Call>(call);
+    auto iter = desc_map_.find(call_ref);
+    if (iter != desc_map_.end()) {
+      return iter->second;
+    }
+
+    String name = call->args[2].as<Var>().value()->name_hint;
+    int desc_index = static_cast<int>(desc_map_.size());
+    Var var = Var(name + "_desc_" + std::to_string(desc_index),
+                  PointerType(PrimType(cuTensorMapType()), "grid_constant"));
+    desc_map_[call_ref] = var;
+    if (enable_tma_desc_prefetch_ && is_tma_descriptor) {
+      prefetch_calls_.push_back(
+          Evaluate(Call(DataType::Handle(), builtin::call_extern(),
+                        {StringImm("tl::prefetch_tma_descriptor"), var})));
+    }
+    return var;
   }
 
 private:
   Array<Stmt> prefetch_calls_;
-  Array<Stmt> init_mbarrier_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
   LowerPHIntrin(bool disable_shuffle_elect, bool enable_tma_desc_prefetch)
       : disable_shuffle_elect_(disable_shuffle_elect),
