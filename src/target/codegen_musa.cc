@@ -69,87 +69,6 @@ std::string CastFromMusaNative16BitVectorElem(DataType t,
          value + "})))";
 }
 
-// Match Cast(float32xN, float16xN), the half input shape produced before a
-// mixed half-float multiply.
-const CastNode *AsFloat16ToFloat32VectorCast(const PrimExpr &expr) {
-  const auto *cast = expr.as<CastNode>();
-  if (!cast) {
-    return nullptr;
-  }
-
-  DataType from_ty = cast->value.dtype();
-  DataType to_ty = cast->dtype;
-  if (!from_ty.is_float16() || !to_ty.is_float() || to_ty.bits() != 32) {
-    return nullptr;
-  }
-  if (from_ty.lanes() != to_ty.lanes()) {
-    return nullptr;
-  }
-  return cast;
-}
-
-// Match Broadcast(float32 scalar, lanes), used when a vectorized multiply
-// comes from half_vec * scalar_float.
-const BroadcastNode *AsFloat32ScalarBroadcast(const PrimExpr &expr) {
-  const auto *broadcast = expr.as<BroadcastNode>();
-  if (!broadcast) {
-    return nullptr;
-  }
-
-  DataType broadcast_ty = broadcast->dtype;
-  DataType value_ty = broadcast->value.dtype();
-  if (!broadcast_ty.is_float() || broadcast_ty.bits() != 32 ||
-      !value_ty.is_float() || value_ty.bits() != 32 || !value_ty.is_scalar()) {
-    return nullptr;
-  }
-  return broadcast;
-}
-
-// Recognize Cast(bfloat16xN, Cast(float32xN, half_vec) * float_vec) forms that
-// can be lowered to the MUSA x4 BHF multiply intrinsic.
-bool MatchHalfFloatMulToBFloat16(int lanes, const PrimExpr &expr,
-                                 PrimExpr *half_src, PrimExpr *float_src) {
-  // The MUSA BHF intrinsic is x4, so wider vectors are emitted as x4 chunks.
-  if (lanes < 4 || lanes > 16 || lanes % 4 != 0) {
-    return false;
-  }
-
-  const auto *mul = expr.as<MulNode>();
-  if (!mul) {
-    return false;
-  }
-
-  auto match_side = [&](const PrimExpr &half_cast_expr,
-                        const PrimExpr &float_expr) {
-    // Match either operand order:
-    //   Cast(float32xN, half_vec) * float32xN
-    //   float32xN * Cast(float32xN, half_vec)
-    const auto *half_cast = AsFloat16ToFloat32VectorCast(half_cast_expr);
-    if (!half_cast) {
-      return false;
-    }
-
-    if (half_cast->dtype.lanes() != lanes) {
-      return false;
-    }
-    DataType float_ty = float_expr.dtype();
-    if (!float_ty.is_float() || float_ty.bits() != 32 ||
-        float_ty.lanes() != lanes) {
-      return false;
-    }
-    // Only broadcasted scalar multiplies are currently chunked above 8 lanes,
-    // because arbitrary wide float vectors would require extra chunk handling.
-    if (lanes > 8 && !AsFloat32ScalarBroadcast(float_expr)) {
-      return false;
-    }
-
-    *half_src = half_cast->value;
-    *float_src = float_expr;
-    return true;
-  };
-
-  return match_side(mul->a, mul->b) || match_side(mul->b, mul->a);
-}
 } // namespace
 
 struct MUSAMath {
@@ -488,6 +407,7 @@ std::string CodeGenTileLangMUSA::Finish() {
 
   decl_stream << "#include <tl_templates/musa/common.h>\n";
   decl_stream << "#include <tl_templates/musa/cvt.h>\n";
+  decl_stream << "#include <tl_templates/musa/accelerated_ops.h>\n";
   decl_stream << "#include <tl_templates/musa/intrin.h>\n";
 
   // if (need_mma_h_) {
@@ -1234,40 +1154,6 @@ void CodeGenTileLangMUSA::VisitExpr_(const CastNode *op, std::ostream &os) {
     os << sret;
   };
 
-  auto PrintVectorizedHalfFloatMulToBFloat16 = [&](PrimExpr half_src_expr,
-                                                   PrimExpr float_src_expr) {
-    // Emit one tl::mul_half_float_to_bfloat16_x4 call per four lanes.
-    ICHECK_EQ(lanes % 4, 0);
-    std::string half_src =
-        SSAGetID(PrintExpr(half_src_expr), half_src_expr.dtype());
-    const auto *float_broadcast = AsFloat32ScalarBroadcast(float_src_expr);
-    std::string float_src;
-    std::string float_scalar;
-    if (float_broadcast) {
-      float_scalar = SSAGetID(PrintExpr(float_broadcast->value),
-                              float_broadcast->value.dtype());
-    } else {
-      float_src = SSAGetID(PrintExpr(float_src_expr), float_src_expr.dtype());
-    }
-    auto GetFloat4Chunk = [&](int chunk_idx) -> std::string {
-      if (float_broadcast) {
-        return "make_float4(" + float_scalar + ", " + float_scalar + ", " +
-               float_scalar + ", " + float_scalar + ")";
-      }
-      return "((float4*)(&" + float_src + "))[" + std::to_string(chunk_idx) +
-             "]";
-    };
-    int num_chunks = lanes / 4;
-
-    for (int i = 0; i < num_chunks; ++i) {
-      PrintIndent();
-      stream << "(reinterpret_cast<tl::bfloat164_t*>(&" << sret << "))[" << i
-             << "] = tl::mul_half_float_to_bfloat16_x4(((tl::half4_t*)(&"
-             << half_src << "))[" << i << "], " << GetFloat4Chunk(i) << ");\n";
-    }
-    os << sret;
-  };
-
   // Handle conversion between float16 and float32
   if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32) {
     if (lanes == 2) {
@@ -1305,12 +1191,6 @@ void CodeGenTileLangMUSA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_bfloat16()) {
-    PrimExpr half_src;
-    PrimExpr float_src;
-    if (MatchHalfFloatMulToBFloat16(lanes, op->value, &half_src, &float_src)) {
-      PrintVectorizedHalfFloatMulToBFloat16(half_src, float_src);
-      return;
-    }
     if (lanes == 2) {
       PrintVectorizedCast("tl::cvt_float_to_bfloat16_x2", "float2",
                           "__mt_bfloat162", 2, "", false, true);
@@ -1703,7 +1583,41 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_mbarrier_id = [&](PrimExpr barrier_id) {
     return this->PrintExpr(barrier_id);
   };
-  if (op->op.same_as(tl::musa_cp_async_robust())) {
+  if (op->op.same_as(tl::mul_half_float_to_bfloat16_x4())) {
+    ICHECK_EQ(op->args.size(), 2);
+
+    DataType target_ty = op->dtype;
+    int lanes = target_ty.lanes();
+    DataType half_ty = op->args[0].dtype();
+    DataType rhs_ty = op->args[1].dtype();
+    bool rhs_is_scalar = rhs_ty.is_scalar();
+
+    std::string sret = name_supply_->FreshName("_");
+    this->PrintIndent();
+    this->PrintType(target_ty, stream);
+    stream << ' ' << sret << ";\n";
+
+    std::string half_src = SSAGetID(PrintExpr(op->args[0]), half_ty);
+    std::string rhs_src = SSAGetID(PrintExpr(op->args[1]), rhs_ty);
+
+    auto get_float4_chunk = [&](int chunk_idx) -> std::string {
+      if (rhs_is_scalar) {
+        return "make_float4(" + rhs_src + ", " + rhs_src + ", " + rhs_src +
+               ", " + rhs_src + ")";
+      }
+      return "((float4*)(&" + rhs_src + "))[" + std::to_string(chunk_idx) + "]";
+    };
+
+    for (int i = 0; i < lanes / 4; ++i) {
+      this->PrintIndent();
+      stream << "(reinterpret_cast<tl::bfloat164_t*>(&" << sret << "))[" << i
+             << "] = tl::mul_half_float_to_bfloat16_x4(((tl::half4_t*)(&"
+             << half_src << "))[" << i << "], " << get_float4_chunk(i)
+             << ");\n";
+    }
+    os << sret;
+    return;
+  } else if (op->op.same_as(tl::musa_cp_async_robust())) {
     ICHECK(op->args.size() == 5U || op->args.size() == 6U)
         << "musa_cp_async_robust expects 5 or 6 arguments (dst_ptr, src_ptr, "
            "bytes, robust_base, robust_size, [predicate])";

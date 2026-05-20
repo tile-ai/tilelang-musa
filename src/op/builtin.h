@@ -237,6 +237,10 @@ TVM_DLL const Op &fmul2();
 // fma2(x, y, z) - packed FP32x2 fused multiply-add
 TVM_DLL const Op &fma2();
 
+// MUSA accelerated compute ops.
+// mul_half_float_to_bfloat16_x4(half_vec, float_vec_or_scalar)
+TVM_DLL const Op &mul_half_float_to_bfloat16_x4();
+
 // random op
 TVM_DLL const Op &rng_init();
 TVM_DLL const Op &rng_rand();

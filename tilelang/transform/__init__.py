@@ -149,6 +149,13 @@ def LowerPHIntrin():
     return _ffi_api.LowerPHIntrin() if hasattr(_ffi_api, "LowerPHIntrin") else lambda f: f  # type: ignore
 
 
+def LowerMUSAAcceleratedOps():
+    """LowerMUSAAcceleratedOps"""
+    if hasattr(_ffi_api, "LowerMUSAAcceleratedOps"):
+        return _ffi_api.LowerMUSAAcceleratedOps()  # type: ignore
+    return lambda f: f
+
+
 def LowerReduceBarrier():
     """LowerReduceBarrier
 

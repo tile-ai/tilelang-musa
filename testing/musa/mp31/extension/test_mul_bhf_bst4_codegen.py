@@ -57,6 +57,39 @@ def mul_bhf_bst4_kernel():
     return main
 
 
+@tilelang.jit(target="musa", out_idx=[2], pass_configs=PASS_CONFIGS)
+def explicit_mul_bhf_bst4_slice_kernel():
+    """Explicit frontend call to the accelerated x4 op with slice syntax."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4,), "float16"),
+        B: T.Tensor((4,), "float32"),
+        C: T.Tensor((4,), "bfloat16"),
+    ):
+        with T.Kernel(1, threads=1):
+            C[0:4] = T.mul_half_float_to_bfloat16_x4(A[0:4], B[0:4])
+
+    return main
+
+
+@tilelang.jit(target="musa", out_idx=[2], pass_configs=PASS_CONFIGS)
+def explicit_mul_bhf_bst4_ramp_kernel():
+    """Explicit frontend call to the accelerated x4 op with T.Ramp syntax."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4,), "float16"),
+        B: T.Tensor((4,), "float32"),
+        C: T.Tensor((4,), "bfloat16"),
+    ):
+        with T.Kernel(1, threads=1):
+            lanes = T.Ramp(0, 1, 4)
+            C[lanes] = T.mul_half_float_to_bfloat16_x4(A[lanes], B[lanes])
+
+    return main
+
+
 def collect_codegen_markers(source: str) -> dict[str, bool]:
     return {
         "__musa_mul_bhf_bst4_vv": "__musa_mul_bhf_bst4_vv" in source,
@@ -90,10 +123,62 @@ def test_mul_bhf_bst4_numerical():
     torch.testing.assert_close(out.float(), expected.float(), rtol=0.0, atol=0.0)
 
 
+def test_explicit_mul_bhf_bst4_numerical():
+    require_musa()
+
+    kernel = explicit_mul_bhf_bst4_slice_kernel()
+
+    a = torch.randn(4, dtype=torch.float16, device="musa")
+    b = torch.randn(4, dtype=torch.float32, device="musa")
+    out = kernel(a, b)
+    expected = (a.float() * b).to(torch.bfloat16)
+
+    torch.testing.assert_close(out.float(), expected.float(), rtol=0.0, atol=0.0)
+
+
+def test_explicit_mul_bhf_bst4_ramp_numerical():
+    require_musa()
+
+    kernel = explicit_mul_bhf_bst4_ramp_kernel()
+
+    a = torch.randn(4, dtype=torch.float16, device="musa")
+    b = torch.randn(4, dtype=torch.float32, device="musa")
+    out = kernel(a, b)
+    expected = (a.float() * b).to(torch.bfloat16)
+
+    torch.testing.assert_close(out.float(), expected.float(), rtol=0.0, atol=0.0)
+
+
 def test_mul_bhf_bst4_codegen_report():
     require_musa()
 
     source = mul_bhf_bst4_kernel().get_kernel_source()
+    markers = collect_codegen_markers(source)
+
+    print(markers)
+    for line in relevant_codegen_lines(source):
+        print(line)
+
+    assert markers["tl::mul_half_float_to_bfloat16_x4"]
+
+
+def test_explicit_mul_bhf_bst4_codegen_report():
+    require_musa()
+
+    source = explicit_mul_bhf_bst4_slice_kernel().get_kernel_source()
+    markers = collect_codegen_markers(source)
+
+    print(markers)
+    for line in relevant_codegen_lines(source):
+        print(line)
+
+    assert markers["tl::mul_half_float_to_bfloat16_x4"]
+
+
+def test_explicit_mul_bhf_bst4_ramp_codegen_report():
+    require_musa()
+
+    source = explicit_mul_bhf_bst4_ramp_kernel().get_kernel_source()
     markers = collect_codegen_markers(source)
 
     print(markers)
