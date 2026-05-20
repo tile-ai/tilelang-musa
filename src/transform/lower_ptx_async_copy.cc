@@ -521,6 +521,16 @@ private:
       PrimExpr b = ExtractLaneInvariantScalar(mul->b);
       return a.defined() && b.defined() ? tir::Mul(a, b) : PrimExpr();
     }
+    if (const auto *div = expr.as<FloorDivNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(div->a);
+      PrimExpr b = ExtractLaneInvariantScalar(div->b);
+      return a.defined() && b.defined() ? tir::FloorDiv(a, b) : PrimExpr();
+    }
+    if (const auto *mod = expr.as<FloorModNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(mod->a);
+      PrimExpr b = ExtractLaneInvariantScalar(mod->b);
+      return a.defined() && b.defined() ? tir::FloorMod(a, b) : PrimExpr();
+    }
     if (const auto *call = expr.as<CallNode>()) {
       if (!IsLaneWiseScalarizableCall(call)) {
         return PrimExpr();

@@ -387,5 +387,40 @@ def test_lower_ptx_async_copy_from_nested_swizzled_vector_index():
     assert calls.get("tl.musa_cp_async_robust", 0) > 0
 
 
+def test_lower_ptx_async_copy_from_divmod_swizzled_vector_index():
+    """Lower swizzled vector stores with lane-invariant div/mod terms."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((36864,), T.bfloat16),
+        B: T.Tensor((1,), T.bfloat16),
+    ):
+        S = T.alloc_buffer((90112,), dtype=T.bfloat16, scope="shared")
+        for tid in T.serial(512):
+            T.attr(0, "tl.force_async_copy", 1)
+            T.attr(
+                A.data,
+                "tl.source_robust_desc",
+                T.make_robust_desc(T.address_of(A[0]), 73728),
+            )
+            tx: T.int32 = T.bitwise_xor(tid % 16, tid % 256 // 16)
+            S[
+                T.Broadcast(tid // 16 * 128, 8)
+                + (T.Broadcast(tx, 8) * T.Broadcast(1, 8) + T.Broadcast(0, 8)) // T.Broadcast(8, 8) * T.Broadcast(64, 8)
+                + T.Broadcast(tx, 8) % T.Broadcast(8, 8) * T.Broadcast(8, 8)
+                + T.Ramp(0, 1, 8)
+                + T.Broadcast(86016, 8)
+            ] = A[tid // 8 * 576 + tid % 8 * 8 + 512 : tid // 8 * 576 + tid % 8 * 8 + 520]
+        B[0] = S[0]
+
+    target = tvm.target.Target("musa -arch=mp_80")
+    func = before.with_attr("global_symbol", "main").with_attr("target", target)
+    mod = tvm.IRModule.from_expr(func)
+
+    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    calls = _count_calls(mod["main"])
+    assert calls.get("tl.musa_cp_async_robust", 0) > 0
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
