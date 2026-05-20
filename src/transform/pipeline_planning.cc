@@ -1,4 +1,4 @@
-#include "support/check.h"
+﻿#include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -16,7 +16,6 @@
 #include "../op/utils.h"
 #include "common/pipeline_utils.h"
 #include <algorithm>
-#include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -1209,7 +1208,7 @@ private:
     }
 
     Optional<SeqStmt> VisitStmt_(const SeqStmtNode *op) final {
-      return GetRef<SeqStmt>(op);
+      return tvm::ffi::GetRef<SeqStmt>(op);
     }
 
     Optional<SeqStmt> VisitStmt_(const IfThenElseNode *op) final {
@@ -1222,7 +1221,7 @@ private:
     Optional<SeqStmt> VisitStmtDefault_(const Object *op) final {
       LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
                  << "because it is not a SeqStmt, IfThenElse without else, "
-                 << "but got " << op->GetTypeKey();
+                 << "or supported tirx wrapper, but got " << op->GetTypeKey();
       return Optional<SeqStmt>();
     }
   };
@@ -1260,6 +1259,48 @@ private:
     Array<Stmt> VisitStmtDefault_(const Object *) final {
       return Array<Stmt>();
     }
+  };
+
+  class BodyWrapperRebuilder
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    using Base = StmtFunctor<Optional<Stmt>(const Stmt &)>;
+
+    static Stmt ReplaceOrFatal(const Stmt &stmt, SeqStmt old_seq,
+                               Stmt new_seq) {
+      BodyWrapperRebuilder rebuilder(std::move(old_seq), std::move(new_seq));
+      Optional<Stmt> rebuilt = rebuilder(stmt);
+      ICHECK(rebuilt.defined());
+      return rebuilt.value();
+    }
+
+    BodyWrapperRebuilder(SeqStmt old_seq, Stmt new_seq)
+        : old_seq_(std::move(old_seq)), new_seq_(std::move(new_seq)) {}
+
+    Optional<Stmt> VisitStmt(const Stmt &stmt) final {
+      if (stmt.same_as(old_seq_)) {
+        return new_seq_;
+      }
+      return Base::VisitStmt(stmt);
+    }
+
+    Optional<Stmt> VisitStmt_(const IfThenElseNode *op) final {
+      Optional<Stmt> then_case = VisitStmt(op->then_case);
+      if (!then_case.defined()) {
+        return Optional<Stmt>();
+      }
+      return IfThenElse(op->condition, then_case.value(), op->else_case);
+    }
+
+    Optional<Stmt> VisitStmtDefault_(const Object *op) final {
+      LOG(FATAL) << "BodyWrapperRebuilder: unexpected node type "
+                 << op->GetTypeKey();
+      return Optional<Stmt>();
+    }
+
+  private:
+    SeqStmt old_seq_;
+    Stmt new_seq_;
   };
 
   Stmt VisitStmt_(const ForNode *loop) final {
@@ -1317,41 +1358,10 @@ private:
       }
       SeqStmt pipeline_body_seq =
           PipelineBodySeqFinder::FindOrFatal(pipeline_body_root);
-      Array<Stmt> pipeline_stmts =
-          SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
-      AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
-      chain_builder(pipeline_body_root);
-      ScheduledStmtAnalysis analysis =
-          AnalyzeScheduledStmts(pipeline_stmts, chain_builder);
-      ICHECK(!analysis.scheduled_stmts.empty())
-          << "PipelinePlanning: explicit pipeline annotations have no "
-             "schedulable statements after removing replayable scalar Bind "
-             "statements";
-      Array<Integer> filtered_order_array =
-          FilterAnnotationsForScheduledStmts(order_array, analysis);
-      Array<Integer> filtered_stage_array =
-          FilterAnnotationsForScheduledStmts(stage_array, analysis);
-      annotations.Set(s_tir::attr::software_pipeline_order,
-                      filtered_order_array);
-      annotations.Set(s_tir::attr::software_pipeline_stage,
-                      filtered_stage_array);
-      if (pipeline_stmts.size() == pipeline_body_seq->seq.size()) {
-        bool flatten_preserved_original_order = true;
-        for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
-          if (!pipeline_stmts[i].same_as(pipeline_body_seq->seq[i])) {
-            flatten_preserved_original_order = false;
-            break;
-          }
-        }
-        if (flatten_preserved_original_order) {
-          annotations.Set(kPipelineReplayableScalarBinds,
-                          analysis.replayable_bind_mask);
-        }
-      }
-      MaybeAnnotateLegacyAsyncPipelineLoop(
-          pipeline_body_root, analysis.scheduled_stmts, filtered_order_array,
-          filtered_stage_array, &annotations);
-      auto for_node = GetRef<For>(loop);
+      MaybeAnnotateLegacyAsyncPipelineLoop(pipeline_body_root,
+                                           pipeline_body_seq->seq, order_array,
+                                           stage_array, &annotations);
+      auto for_node = tvm::ffi::GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
     }
@@ -1404,6 +1414,7 @@ private:
     // inside the loop body. Flatten them so pipeline planning can assign
     // individual stages to the produce and wait statements.
     Array<Stmt> flat_stmts = SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
+
     AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
     chain_builder(pipeline_body_root);
     ScheduledStmtAnalysis analysis =
@@ -2344,17 +2355,17 @@ private:
       const auto &block = realize->block;
       // Rebuild: body_root → ... → new_body_seq
       // We need to reconstruct the chain from block->body to the SeqStmt.
-      Stmt rebuilt_inner =
-          RebuildBodyWrapper(block->body, pipeline_body_seq, new_body_seq);
+      Stmt rebuilt_inner = BodyWrapperRebuilder::ReplaceOrFatal(
+          block->body, pipeline_body_seq, new_body_seq);
       SBlock new_block(block->iter_vars, block->reads, block->writes,
-                       block->name_hint, rebuilt_inner, block->init,
-                       block->alloc_buffers, block->match_buffers,
-                       block->annotations);
+                      block->name_hint, rebuilt_inner, block->init,
+                      block->alloc_buffers, block->match_buffers,
+                      block->annotations);
       new_loop_body =
           SBlockRealize(realize->iter_values, realize->predicate, new_block);
     } else {
-      new_loop_body =
-          RebuildBodyWrapper(loop->body, pipeline_body_seq, new_body_seq);
+      new_loop_body = BodyWrapperRebuilder::ReplaceOrFatal(
+          loop->body, pipeline_body_seq, new_body_seq);
     }
 
     return For(loop->loop_var, loop->min, loop->extent, loop->kind,
@@ -2370,27 +2381,6 @@ private:
       buffer_data_to_buffer_.erase(buffer->data);
     }
     return std::move(block);
-  }
-
-  /*!
-   * \brief Rebuild the chain of wrapper statements (IfThenElse)
-   *        between the loop body root and the inner SeqStmt, replacing
-   *        the old SeqStmt with the new (flattened) one.
-   */
-  Stmt RebuildBodyWrapper(const Stmt &current, const SeqStmt &old_seq,
-                          const Stmt &new_seq) {
-    if (current.same_as(old_seq)) {
-      return new_seq;
-    }
-    if (const auto *if_node = current.as<IfThenElseNode>()) {
-      return IfThenElse(
-          if_node->condition,
-          RebuildBodyWrapper(if_node->then_case, old_seq, new_seq),
-          if_node->else_case);
-    }
-    LOG(FATAL) << "RebuildBodyWrapper: unexpected node type "
-               << current->GetTypeKey();
-    return current;
   }
 
   Map<Var, Buffer> buffer_data_to_buffer_;
