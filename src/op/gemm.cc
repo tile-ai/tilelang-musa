@@ -957,12 +957,11 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (IsFragmentBuffer(a_)) {
     if (IsFragmentBuffer(b_)) {
-      ICHECK(TargetIsPH1(T.target) && gemm_inst == GemmInst::kPH1WMMA)
-          << "gemm_rr is currently only implemented for PH1 WMMA.";
+      ICHECK(TargetIsPH1(T.target) && gemm_inst == GemmInst::kPH1WMMA ||
+             TargetIsQY2(T.target))
+          << "gemm_rr is currently only implemented for PH1 WMMA and QY2.";
       op_name = "tl::gemm_rr";
     } else {
-      ICHECK(!transA_)
-          << "gemm_rs requires the A operand to be in non-transposed layout.";
       op_name = "tl::gemm_rs";
     }
   } else if (IsFragmentBuffer(b_)) {
@@ -1300,8 +1299,16 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      results.Set(a_, makeLinearLayout(Array<PrimExpr>{
-                          Integer(mat_stride), Integer(mat_continuous)}));
+      auto layout = makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                     a_->dtype.bits(), !transA_);
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
+    } else if (a_.scope() == "local.fragment") {
+      auto fragment =
+          transA_ ? makeGemmQY2FragmentACol(m_, n_, k_, m_ / warp_m,
+                                            n_ / warp_n, a_->dtype.bits())
+                  : makeGemmQY2FragmentARow(m_, n_, k_, m_ / warp_m,
+                                            n_ / warp_n, a_->dtype.bits());
+      results.Set(a_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
@@ -1309,8 +1316,16 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      results.Set(b_, makeLinearLayout(Array<PrimExpr>{
-                          Integer(mat_stride), Integer(mat_continuous)}));
+      auto layout = makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                     b_->dtype.bits(), transB_);
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
+    } else if (b_.scope() == "local.fragment") {
+      auto fragment =
+          transB_ ? makeGemmQY2FragmentBRow(m_, n_, k_, m_ / warp_m,
+                                            n_ / warp_n, b_->dtype.bits())
+                  : makeGemmQY2FragmentBCol(m_, n_, k_, m_ / warp_m,
+                                            n_ / warp_n, b_->dtype.bits());
+      results.Set(b_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }

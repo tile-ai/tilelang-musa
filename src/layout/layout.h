@@ -218,15 +218,21 @@ Var ReplicationPlaceholder();
 IterVar make_itervar(std::string name, PrimExpr dom);
 
 Fragment makeGemmFragment8x8();
+Fragment makeGemmFragment2x16();
+Fragment makeGemmFragment4x16();
 Fragment makeGemmFragment8x8Transposed();
-Fragment makeGemmQY2FragmentA(const int block_m, const int block_n,
-                              const int block_k, const int warp_m,
-                              const int warp_n, const int element_size,
-                              bool transposed);
-Fragment makeGemmQY2FragmentB(const int block_m, const int block_n,
-                              const int block_k, const int warp_m,
-                              const int warp_n, const int element_size,
-                              bool transposed);
+Fragment makeGemmQY2FragmentARow(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size);
+Fragment makeGemmQY2FragmentACol(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size);
+Fragment makeGemmQY2FragmentBRow(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size);
+Fragment makeGemmQY2FragmentBCol(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size);
 Fragment makeGemmQY2FragmentC(const int block_m, const int block_n,
                               const int warp_m, const int warp_n,
                               const int element_size);

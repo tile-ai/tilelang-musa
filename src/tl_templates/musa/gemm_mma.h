@@ -11,18 +11,18 @@
 namespace mute::tl_mma {
 
 template <typename A_type, typename B_type, typename C_type, int num_warp_m,
-          int num_warp_n, int N>
+          int num_warp_n, int N, bool trans_A, bool trans_B>
 struct DispatchInstruction;
 
 using _X = Underscore;
 
 } // namespace mute::tl_mma
 
-#define TL_DISPATCH_MMA(A_type, B_type, C_type, MMA_instr)                     \
+#define TL_DISPATCH_MMA(A_type, B_type, C_type, trans_A, trans_B, MMA_instr)   \
   namespace mute::tl_mma {                                                     \
   template <int num_warp_m, int num_warp_n, int N>                             \
   struct DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n,   \
-                             N> {                                              \
+                             N, trans_A, trans_B> {                            \
     using MMA = MMA_Atom<MMA_instr>;                                           \
     using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 32, N)>, _X>;         \
   };                                                                           \
@@ -31,11 +31,45 @@ using _X = Underscore;
 #ifdef __MUSA_ARCH_LIST__
 #if __MUSA_ARCH_LIST__ == 220
 #include <mute/arch/mma_mp22.hpp>
-TL_DISPATCH_MMA(half_t, half_t, float, MP22_32x32x16_F32F16F16F32_TN)
-TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, MP22_32x32x16_F32BF16BF16F32_TN)
-TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, MP22_32x32x8_F32TF32TF32F32_TN)
-TL_DISPATCH_MMA(float, float, float, MP22_32x32x8_F32TF32TF32F32_TN)
-TL_DISPATCH_MMA(int8_t, int8_t, int, MP22_32x32x32_S32S8S8S32_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, false, false,
+                MP22_32x32x16_F32F16F16F32_TT)
+TL_DISPATCH_MMA(half_t, half_t, float, false, true,
+                MP22_32x32x16_F32F16F16F32_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, true, false,
+                MP22_32x32x16_F32F16F16F32_NT)
+TL_DISPATCH_MMA(half_t, half_t, float, true, true,
+                MP22_32x32x16_F32F16F16F32_NN)
+
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, false, false,
+                MP22_32x32x16_F32BF16BF16F32_TT)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, false, true,
+                MP22_32x32x16_F32BF16BF16F32_TN)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, true, false,
+                MP22_32x32x16_F32BF16BF16F32_NT)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, true, true,
+                MP22_32x32x16_F32BF16BF16F32_NN)
+
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, false, false,
+                MP22_32x32x8_F32TF32TF32F32_TT)
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, false, true,
+                MP22_32x32x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, true, false,
+                MP22_32x32x8_F32TF32TF32F32_NT)
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, true, true,
+                MP22_32x32x8_F32TF32TF32F32_NN)
+
+TL_DISPATCH_MMA(float, float, float, false, false,
+                MP22_32x32x8_F32TF32TF32F32_TT)
+TL_DISPATCH_MMA(float, float, float, false, true,
+                MP22_32x32x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(float, float, float, true, false,
+                MP22_32x32x8_F32TF32TF32F32_NT)
+TL_DISPATCH_MMA(float, float, float, true, true, MP22_32x32x8_F32TF32TF32F32_NN)
+
+TL_DISPATCH_MMA(int8_t, int8_t, int, false, false, MP22_32x32x32_S32S8S8S32_TT)
+TL_DISPATCH_MMA(int8_t, int8_t, int, false, true, MP22_32x32x32_S32S8S8S32_TN)
+TL_DISPATCH_MMA(int8_t, int8_t, int, true, false, MP22_32x32x32_S32S8S8S32_NT)
+TL_DISPATCH_MMA(int8_t, int8_t, int, true, true, MP22_32x32x32_S32S8S8S32_NN)
 #endif
 #endif // __MUSA_ARCH_LIST__
 #undef TL_DISPATCH_MMA
@@ -195,8 +229,18 @@ public:
                                 tfloat32_t, B_type_mute>::type;
   using C_type = C_type_raw;
 
-  using Instruction = DispatchInstruction<A_type_raw, B_type_raw, C_type_raw,
-                                          num_warp_m, num_warp_n, N>;
+  using InstructionSS =
+      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, num_warp_m,
+                          num_warp_n, N, trans_A, trans_B>;
+  using InstructionRS =
+      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, num_warp_m,
+                          num_warp_n, N, trans_A, trans_B>;
+  using InstructionSR =
+      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, num_warp_m,
+                          num_warp_n, N, trans_A, trans_B>;
+  using InstructionRR =
+      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, num_warp_m,
+                          num_warp_n, N, trans_A, trans_B>;
 
   using OperandATraits = OperandTraits<sizeof_bits<A_type>::value, M, K,
                                        !trans_A, num_warp_m, lda>;
@@ -209,9 +253,15 @@ public:
   using SmemCopyA = Copy_Atom<typename OperandATraits::Copy, A_type>;
   using SmemCopyB = Copy_Atom<typename OperandBTraits::Copy, B_type>;
 
-  using TileMma = TiledMMA<typename Instruction::MMA,
-                           Layout<Shape<Int<num_warp_m>, Int<num_warp_n>, _1>>,
-                           typename Instruction::MMA_Group>;
+  template <typename Instruction>
+  using TileMmaT = TiledMMA<typename Instruction::MMA,
+                            Layout<Shape<Int<num_warp_m>, Int<num_warp_n>, _1>>,
+                            typename Instruction::MMA_Group>;
+
+  using TileMma = TileMmaT<InstructionSS>;
+  using TileMmaRS = TileMmaT<InstructionRS>;
+  using TileMmaSR = TileMmaT<InstructionSR>;
+  using TileMmaRR = TileMmaT<InstructionRR>;
 
   template <class... Args>
   static MUTE_DEVICE auto remove_swizzle(Layout<Args...> const &layout) {
@@ -301,7 +351,7 @@ public:
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                                 SmemLayoutB{});
     Tensor sB = get_region_tensor<offset_b, N, K, trans_B, ldb>(sB_all);
-    TileMma tiled_mma;
+    TileMmaRS tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
     auto tiled_copy_B = make_tiled_copy_B(SmemCopyB{}, tiled_mma);
     auto thr_copy_B = tiled_copy_B.get_thread_slice(tid);
@@ -337,7 +387,7 @@ public:
     Tensor sA_all = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
                                 SmemLayoutA{});
     Tensor sA = get_region_tensor<offset_a, M, K, !trans_A, lda>(sA_all);
-    TileMma tiled_mma;
+    TileMmaSR tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
     auto tiled_copy_A = make_tiled_copy_A(SmemCopyA{}, tiled_mma);
     auto thr_copy_A = tiled_copy_A.get_thread_slice(tid);
@@ -364,6 +414,29 @@ public:
         copy(tiled_copy_A, tCsA(_, _, k + 1), tCrA_copy_view(_, _, k + 1));
       }
       gemm(tiled_mma, tCrA_view(_, _, k), tCrB(_, _, k), acc);
+    }
+  }
+
+  static MUTE_DEVICE void body_rr(A_type_raw *pA, B_type_raw *pB,
+                                  C_type_raw *pC) {
+    TileMmaRR tiled_mma;
+
+    Tensor acc =
+        make_tensor(make_rmem_ptr(reinterpret_cast<C_type *>(pC)),
+                    partition_shape_C(tiled_mma, Shape<Int<M>, Int<N>>{}));
+    Tensor tCrA =
+        make_tensor(make_rmem_ptr(reinterpret_cast<A_type *>(pA)),
+                    partition_shape_A(tiled_mma, Shape<Int<M>, Int<K>>{}));
+    Tensor tCrB =
+        make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
+                    partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
+
+    if constexpr (clear_accum) {
+      clear(acc);
+    }
+    MUTE_UNROLL
+    for (int k = 0; k < size<2>(tCrA); ++k) {
+      gemm(tiled_mma, tCrA(_, _, k), tCrB(_, _, k), acc);
     }
   }
 };
@@ -403,6 +476,17 @@ MUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
                                  trans_B, clear_accum, lda, ldb, offset_a,
                                  offset_b, A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
+}
+
+template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type, typename B_type, typename C_type>
+MUTLASS_DEVICE void gemm_rr(A_type *pA, B_type *pB, C_type *accum) {
+  using MMA =
+      mute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                 trans_B, clear_accum, lda, ldb, offset_a,
+                                 offset_b, A_type, B_type, C_type>;
+  MMA::body_rr(pA, pB, accum);
 }
 
 } // namespace tl::tl_mma
