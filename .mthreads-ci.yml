@@ -64,5 +64,6 @@ smoke-ci-test:
     - "export LD_LIBRARY_PATH=${REPO_DIR}/build/lib:$LD_LIBRARY_PATH"
     - "python3 -m pip install --force-reinstall -i https://pypi.tuna.tsinghua.edu.cn/simple dist/*.whl"
     - "python3 -c \"import tilelang; print('tilelang', tilelang.__version__, tilelang.__file__)\""
+    - "python3 -m pip install -r requirements-test.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
     - "python3 -m pip install pytest-timeout -i https://pypi.tuna.tsinghua.edu.cn/simple"
     - "bash testing/run_test.sh ci_smoke -vv -s --tb=short --durations=20 --timeout=60 --timeout-method=thread"
