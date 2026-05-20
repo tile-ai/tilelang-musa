@@ -2536,20 +2536,24 @@ private:
     }
     if (auto *seq = stmt.as<SeqStmtNode>()) {
       Array<Stmt> new_seq;
-      bool found = false;
       // First pass: find which child contains the pipeline loop.
       int loop_idx = -1;
+      ReplaceResult rewritten_loop{stmt, false};
       for (int i = 0; i < static_cast<int>(seq->seq.size()); ++i) {
         ReplaceResult probe = ReplacePipelineLoopInStmt(
             seq->seq[i], pipeline_loop, ws_body, consumer_extent);
         if (probe.found) {
           loop_idx = i;
+          rewritten_loop = probe;
           break;
         }
       }
       if (loop_idx < 0) {
         return {stmt, false};
       }
+      // The child containing the pipeline loop has already been rewritten
+      // above.  That recursive rewrite propagates liveness from nested
+      // post-loop consumers before this level classifies its prelude.
       // Propagate liveness backwards through prelude statements so that
       // transitive dependencies are captured.  For example, if consumer
       // needs `m_start` and `m_start` is defined by a prelude statement
@@ -2601,10 +2605,7 @@ private:
           break;
         }
       }
-      // Replace the pipeline loop itself.
-      ReplaceResult result = ReplacePipelineLoopInStmt(
-          seq->seq[loop_idx], pipeline_loop, ws_body, consumer_extent);
-      new_seq.push_back(result.stmt);
+      new_seq.push_back(rewritten_loop.stmt);
       // Guard post-loop siblings.
       for (int i = loop_idx + 1; i < static_cast<int>(seq->seq.size()); ++i) {
         new_seq.push_back(GuardConsumerOnly(seq->seq[i], consumer_extent));
