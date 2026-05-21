@@ -21,7 +21,12 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+option(TILELANG_UPDATE_SUBMODULES "Initialize missing git submodules during CMake configure" OFF)
+
+if(TILELANG_UPDATE_SUBMODULES
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+
   find_package(Git QUIET)
   if(Git_FOUND)
     execute_process(
@@ -43,6 +48,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_
         "Please install git or fetch the submodules manually."
     )
   endif()
+else()
+  message(STATUS "Skipping automatic submodule update")
 endif()
 
 find_program(CCACHE_PROGRAM ccache)
