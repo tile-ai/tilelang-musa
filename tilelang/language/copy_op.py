@@ -9,6 +9,7 @@ from tilelang.utils.language import (
     legalize_pairwise_extents,
 )
 from tilelang.language.utils import get_extent, buffer_region_to_tile_region
+from tilelang.utils.deprecated import deprecated
 import tvm
 from tvm import ir, tirx
 
@@ -574,7 +575,7 @@ def transpose(
     )
 
 
-def c2d_im2col(
+def im2col(
     img: BufferLikeType,
     col: BufferLikeType,
     nhw_step: tirx.PrimExpr,
@@ -612,9 +613,40 @@ def c2d_im2col(
     col_region = buffer_region_to_tile_region(col_region, "w", col_extents)
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.c2d_im2col"),
+        tirx.op.Op.get("tl.tileop.im2col"),
         img_region,
         col_region,
+        nhw_step,
+        c_step,
+        kernel,
+        stride,
+        dilation,
+        pad,
+        eviction_policy,
+    )
+
+
+@deprecated("T.c2d_im2col", "T.im2col", "0.14.0")
+def c2d_im2col(
+    img: BufferLikeType,
+    col: BufferLikeType,
+    nhw_step: tirx.PrimExpr,
+    c_step: tirx.PrimExpr,
+    kernel: int,
+    stride: int,
+    dilation: int,
+    pad: int,
+    eviction_policy: EvictionPolicy | None = None,
+) -> tirx.PrimExpr:
+    """Deprecated alias for :func:`im2col`.
+
+    Deprecated:
+        Use :func:`im2col` instead. This alias is scheduled for removal in
+        TileLang 0.14.0.
+    """
+    return im2col(
+        img,
+        col,
         nhw_step,
         c_step,
         kernel,
