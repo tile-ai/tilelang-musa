@@ -6,10 +6,11 @@ from pathlib import Path
 
 def main() -> int:
     benchmark_root = Path(__file__).resolve().parent
-    if str(benchmark_root) not in sys.path:
-        sys.path.insert(0, str(benchmark_root))
+    mp31_root = benchmark_root.parent
+    if str(mp31_root) not in sys.path:
+        sys.path.insert(0, str(mp31_root))
 
-    from ops.benchmark_cases import run_cases_main
+    from tilekernels.benchmark_cases import run_cases_main
 
     return run_cases_main(
         title="TileLang MUSA Representative Benchmark",

@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 
-BASELINE_FILENAME = "tilekernels_baselines.jsonl"
+BASELINE_FILENAME = "baselines/tilekernels.jsonl"
 DEFAULT_THRESHOLD = 0.05
 
 
@@ -36,6 +36,21 @@ def repo_root() -> Path:
         if (candidate / ".git").exists():
             return candidate
     raise RuntimeError(f"unable to determine repository root from {current}")
+
+
+def ensure_repo_root_on_path() -> Path:
+    root = repo_root()
+    root_text = str(root)
+    if sys.path[0] != root_text:
+        try:
+            sys.path.remove(root_text)
+        except ValueError:
+            pass
+        sys.path.insert(0, root_text)
+    return root
+
+
+ensure_repo_root_on_path()
 
 
 def use_color() -> bool:
@@ -126,7 +141,7 @@ def import_ops():
     root = benchmark_root()
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    import ops
+    import tilekernels as ops
 
     return ops
 

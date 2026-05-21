@@ -7,7 +7,7 @@ benchmark_root = Path(__file__).resolve().parents[1]
 if str(benchmark_root) not in sys.path:
     sys.path.insert(0, str(benchmark_root))
 
-from ops.benchmark_cases import run_cases_main
+from tilekernels.benchmark_cases import run_cases_main
 
 
 def main() -> int:

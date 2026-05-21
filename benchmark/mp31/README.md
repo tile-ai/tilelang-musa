@@ -6,13 +6,14 @@ This directory carries the 15 TileKernels representative baseline records into
 `tilelang-musa` for MP31/S5000-side tracking.
 
 The benchmark runners use only local implementations under
-`benchmark/mp31/ops`. They are migrated from tilekernels repository (`git@sh-code.mthreads.com:tianyi.xu/tilekernels.git`
+`benchmark/mp31/tilekernels`. They are migrated from tilekernels repository (`git@sh-code.mthreads.com:tianyi.xu/tilekernels.git`
 ) but do not depend on it.
 
 Baseline source:
 
-- The current `tilekernels_baselines.jsonl` values are **release** benchmark
-  measurements from `release_v0.1.8_musa.3`.
+- The current `baselines/tilekernels.jsonl` and `baselines/mate.jsonl` values
+  are **release** benchmark measurements from `release_v0.1.8_musa.3`,
+  `c3ed1bd5272c916a042df7877cdc4b587fb1006a`.
 - Baseline records keep the compact JSONL schema:
   `kernel`, `operation`, `params`, `time_us`, `bandwidth_gbs`, and
   `extras.bytes_rw`.
@@ -26,17 +27,49 @@ Historical source snapshots of tilekernels repository:
 - `fee56c1aeb1ee7c283b95e939fe8ff753fecd40d` (`2026-05-12`): later optimization
   snapshot used before the release baseline refresh.
 
+MATE-origin TileLang benchmarks are also kept in this bundle under
+`benchmark/mp31/mate`. These cases are migrated from the MATE repository's
+TileLang-backed benchmark paths, but the runners use local kernel copies and
+host-side helpers only; they must not import the MATE repository at runtime.
+
 ## Tool Layout
 
-- `tilekernels_baselines.jsonl`: merged 15-record
-  baseline file.
-- `tilekernels_benchmark.py`: aggregate benchmark entrypoint for the whole
+- `baselines/tilekernels.jsonl`: merged 15-record TileKernels baseline file.
+- `baselines/mate.jsonl`: MATE-origin benchmark baseline file.
+- `tilekernels/tilekernels_benchmark.py`: aggregate benchmark entrypoint for the whole
   15-case suite.
-- `ops/benchmark_common.py`, `ops/benchmark_cases.py`: shared benchmark
+- `tilekernels/benchmark_common.py`, `tilekernels/benchmark_cases.py`: shared benchmark
   framework, case registry, output formatting, and regression checking.
-- `ops/*_benchmark.py`: standalone per-operator benchmark entrypoints.
-- `ops/quant/`, `ops/moe/`, `ops/mhc/`: local operator implementations used by
+- `tilekernels/*_benchmark.py`: standalone per-operator benchmark entrypoints.
+- `tilekernels/quant/`, `tilekernels/moe/`, `tilekernels/mhc/`: local operator implementations used by
   both the aggregate runner and standalone runners.
+- `mate/mate_benchmark.py`: aggregate entrypoint for MATE-origin TileLang
+  benchmarks.
+- `mate/ops/*_benchmark.py`: standalone MATE-origin per-operator entrypoints.
+- `mate/kernels/`: local TileLang kernels and minimal host-side helpers
+  migrated from MATE. These files intentionally avoid MATE package imports.
+- `runner.py`: source-level runner that can execute TileKernels, MATE-origin,
+  or both benchmark groups.
+
+## AI Coding Guide
+
+When using an AI coding agent to modify benchmark code, ask it to read
+`benchmark/AGENTS.md` before making changes. That file is the benchmark-local
+agent guide: it summarizes the MP31 source layout, important migration history,
+baseline rules, common commands, and constraints that are easy to miss when an
+agent only inspects one file at a time.
+
+Recommended prompt pattern:
+
+```text
+Please read benchmark/AGENTS.md first, then update the MP31 benchmark case ...
+```
+
+Use this README as the human-facing command reference and migration note. Use
+`benchmark/AGENTS.md` as the AI-facing working contract for coding tasks under
+`benchmark/`. If benchmark commands, default cases, baseline provenance, source
+layout, or migration constraints change, update both files when the change
+affects both humans and agents.
 
 ## Benchmark Guardrails
 
@@ -58,22 +91,22 @@ Aggregate example:
 
 ```bash
 cd tilelang_musa
-python benchmark/mp31/tilekernels_benchmark.py
+python benchmark/mp31/tilekernels/tilekernels_benchmark.py
 ```
 
 Bypass the release-build check explicitly:
 
 ```bash
-python benchmark/mp31/tilekernels_benchmark.py \
+python benchmark/mp31/tilekernels/tilekernels_benchmark.py \
   --allow-non-release-build
 ```
 
 Median-sampled baseline refresh:
 
 ```bash
-python /root/tilelang_musa/benchmark/mp31/tilekernels_benchmark.py \
+python /root/tilelang_musa/benchmark/mp31/tilekernels/tilekernels_benchmark.py \
   --samples 5 \
-  --output /tmp/tilekernels_baselines.jsonl
+  --output /tmp/tilekernels.jsonl
 ```
 
 `--samples N` runs each case N independent times and uses the median `time_us`
@@ -86,13 +119,48 @@ baseline.
 Standalone examples:
 
 ```bash
-python /root/tilelang_musa/benchmark/mp31/ops/per_token_cast_benchmark.py
+python /root/tilelang_musa/benchmark/mp31/tilekernels/per_token_cast_benchmark.py
 
-python /root/tilelang_musa/benchmark/mp31/ops/topk_sum_and_topk_group_idx_benchmark.py \
+python /root/tilelang_musa/benchmark/mp31/tilekernels/topk_sum_and_topk_group_idx_benchmark.py \
   --check-regression
 
-python /root/tilelang_musa/benchmark/mp31/ops/pre_big_fuse_benchmark.py \
+python /root/tilelang_musa/benchmark/mp31/tilekernels/pre_big_fuse_benchmark.py \
   --cases mhc_pre_big_fuse_2048_4096 representative_mhc_pre_big_fuse_2048_4096
+```
+
+Run all MP31 benchmark sources:
+
+```bash
+python /root/tilelang_musa/benchmark/mp31/runner.py \
+  --source all \
+  --allow-non-release-build
+```
+
+Run only MATE-origin benchmarks:
+
+```bash
+python /root/tilelang_musa/benchmark/mp31/runner.py \
+  --source mate \
+  --allow-non-release-build
+```
+
+Run MATE-origin standalone benchmarks:
+
+```bash
+python /root/tilelang_musa/benchmark/mp31/mate/ops/gdn_decode_benchmark.py \
+  --allow-non-release-build
+
+python /root/tilelang_musa/benchmark/mp31/mate/ops/gdn_mtp_benchmark.py \
+  --allow-non-release-build
+
+python /root/tilelang_musa/benchmark/mp31/mate/ops/gdn_prefill_benchmark.py \
+  --allow-non-release-build
+
+python /root/tilelang_musa/benchmark/mp31/mate/ops/sparse_mla_prefill_benchmark.py \
+  --allow-non-release-build
+
+python /root/tilelang_musa/benchmark/mp31/mate/ops/sparse_mla_decode_benchmark.py \
+  --allow-non-release-build
 ```
 
 CLI Notes:
@@ -101,9 +169,63 @@ CLI Notes:
   `--threshold`, `--samples`, `--cases`, and `--allow-non-release-build`.
 - For single-op entrypoints, `--cases` can be used to narrow to a subset of the
   cases owned by that operator family.
-- Prefer `--samples 5` or higher when refreshing `tilekernels_baselines.jsonl`.
+- Prefer `--samples 5` or higher when refreshing baseline JSONL files.
   Median is used instead of mean so an occasional slow run does not shift the
   baseline.
+
+## MATE Benchmark Migration Notes
+
+The MATE-origin benchmarks are direct TileLang microbenchmarks. They do not run
+MATE's public Python APIs, logging decorators, FlashMLA wrappers, or testing
+utilities. Inputs, outputs, metadata, and optional buffers are constructed by
+the local benchmark harness in `mate/benchmark_cases.py`.
+
+Migrated GDN cases:
+
+- `gdn_decode`: direct `gated_deltanet_decode_fp32_vk` TileLang backend.
+- `gdn_mtp`: direct `gated_deltanet_mtp_fp32_vk_smem` TileLang backend.
+- `gdn_prefill`: local three-kernel pipeline:
+  `chunk_local_cumsum`, `kkt_solve`, and `fused_chunk_gdn_prefill`.
+
+Migrated Sparse MLA cases:
+
+- `sparse_mla_prefill_v32`: direct V3.2 prefill TileLang interface.
+- `sparse_mla_prefill_model1`: direct Model1 prefill TileLang interface with
+  extra-KV inputs.
+- `sparse_mla_decode_v32`: direct V3.2 scheduled decode TileLang interface.
+
+The default MATE aggregate runner skips compile-sensitive cases:
+`sparse_mla_prefill_model1_extra_bf16`, which mirrors MATE's large
+`--include-large` Model1 prefill perf case, and
+`sparse_mla_decode_v32_temp_aligned_bf16`, whose scheduled decode path may need
+backend/compiler alignment work on MP31. A smaller direct Model1 extra-KV case
+is included by default instead. Run skipped cases explicitly with `--cases`
+when profiling or debugging those shapes:
+
+```bash
+python /root/tilelang_musa/benchmark/mp31/mate/mate_benchmark.py \
+  --cases sparse_mla_prefill_model1_extra_bf16 \
+  --allow-non-release-build
+```
+
+The Sparse MLA decode migration currently uses a local single-part scheduled
+metadata generator for the direct V3.2 decode case. This covers the migrated
+direct benchmark path without depending on MATE's temp metadata utilities or
+FlashMLA. If future performance tracking needs the exact multi-MP-part metadata
+policy from MATE, extend the local metadata generator rather than importing MATE.
+
+When adding more MATE-origin cases, keep these rules:
+
+- Do not import `mate`, `flash_mla`, `sparse_mla_test_utils`, or files from a
+  checked-out MATE repository.
+- Keep source-specific code under `benchmark/mp31/mate`; keep TileKernels-origin
+  code under `benchmark/mp31/tilekernels`.
+- Prefer direct TileLang kernel factories or TileLang interfaces. Wrapper-level
+  behavior should only be reimplemented when it is required to construct the
+  kernel ABI.
+- Avoid `from __future__ import annotations` in files that define TileLang
+  `T.prim_func` signatures, because TileLang evaluates annotations when
+  building TIR.
 
 ## Workflow
 
