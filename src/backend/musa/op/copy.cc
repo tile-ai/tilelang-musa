@@ -162,6 +162,9 @@ int to_MUtensorDescriptorDataType(DataType dtype) {
     }
   } else if (dtype.is_bfloat16()) {
     tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_BFLOAT16;
+  } else if (dtype.is_tfloat32()) {
+    // tfloat32 uses the same memory layout as float32.
+    tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_FLOAT32;
   } else if (dtype.is_float8()) {
     tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
   } else if (dtype.is_int()) {

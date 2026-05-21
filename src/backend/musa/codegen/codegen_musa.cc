@@ -706,6 +706,20 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     }
     if (!fail)
       return;
+  } else if (t.is_tfloat32()) {
+    if (t.is_scalar()) {
+      os << "tfloat32_t";
+    } else if (lanes <= 4) {
+      os << "float" << lanes;
+    } else if (lanes <= 8) {
+      ICHECK_EQ(lanes % 2, 0)
+          << "only support even lane for tfloat32 type with lanes > 4";
+      os << "ulonglong" << lanes / 2;
+    } else {
+      fail = true;
+    }
+    if (!fail)
+      return;
   } else if (t.is_float8()) {
     enable_fp8_ = true;
     os << GetTileLangFP8Type(t);
@@ -4253,6 +4267,28 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << "std::numeric_limits<";
       p->PrintType(op->dtype, temp);
       temp << ">::quiet_NaN()";
+    } else {
+      p->PrintType(op->dtype, temp);
+      temp << '(' << std::hexfloat << op->value << 'f';
+      temp << "/*" << std::scientific << op->value << "*/";
+      temp << ')';
+    }
+    p->MarkConst(temp.str());
+    os << temp.str();
+    return;
+  }
+  // Type code is kTensorFloat32.
+  if (op->dtype.is_tfloat32()) {
+    std::ostringstream temp;
+    if (std::isinf(op->value)) {
+      if (op->value < 0) {
+        temp << "-";
+      }
+      temp << "tfloat32_t(MUSART_INF_F)";
+      p->need_math_constants_h_ = true;
+    } else if (std::isnan(op->value)) {
+      temp << "tfloat32_t(MUSART_NAN_F)";
+      p->need_math_constants_h_ = true;
     } else {
       p->PrintType(op->dtype, temp);
       temp << '(' << std::hexfloat << op->value << 'f';
