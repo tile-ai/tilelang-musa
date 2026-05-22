@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import statistics
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,7 @@ from .benchmark_common import (
     style,
 )
 
+# sweep parameters
 SPARSE_MLA_DV = 512
 GDN_DECODE_DEFAULT_BATCH_SIZES = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512)
 GDN_DECODE_DEFAULT_HEAD_CONFIGS = ((8, 16), (16, 32), (16, 64))
@@ -65,6 +68,13 @@ class CaseSpec:
     name: str
     runner: str
     args: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class BenchmarkRunResult:
+    records: list[dict[str, Any]]
+    regression_stats: dict[str, Any] | None
+    exit_code: int
 
 
 def build_gdn_decode_cases() -> list[CaseSpec]:
@@ -326,23 +336,73 @@ def _make_sparse_temp_decode_indices(
     return indices
 
 
-def _make_single_part_decode_metadata(
+def _make_sparse_decode_metadata(
     *,
-    batch_size: int,
+    seqlens_k: torch.Tensor,
+    num_q_tokens_per_head_k: int,
+    num_heads_k: int,
     topk: int,
-    block_i: int,
-    device: str,
+    mp_count: int = 56,
+    block_size_n: int = 64,
+    fixed_overhead_num_blocks: int = 5,
+    tile_m: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    blocks = (topk + block_i - 1) // block_i
-    metadata = torch.empty((batch_size, 8), dtype=torch.int32, device=device)
+    """Local equivalent of MATE's temp get_mla_metadata_pytorch helper."""
+    device = seqlens_k.device
+    batch_size = int(seqlens_k.shape[0])
+    q_tiles = (num_q_tokens_per_head_k + tile_m - 1) // tile_m
+    num_mp_parts = max(mp_count // num_heads_k // q_tiles, 1)
+    effective_seqlens = torch.full((batch_size,), topk, dtype=torch.int32, device=device)
+
+    num_blocks_list: list[int] = []
+    first_block_idx_list: list[int] = []
+    last_block_idx_list: list[int] = []
     for batch in range(batch_size):
-        metadata[batch, 0] = batch
-        metadata[batch, 1] = 0
-        metadata[batch, 2] = batch
-        metadata[batch, 3] = blocks
-        metadata[batch, 4] = 0
-        metadata[batch, 5:] = 0
-    num_splits = torch.arange(batch_size + 1, dtype=torch.int32, device=device)
+        cur_s_k = int(effective_seqlens[batch].item())
+        first_block_idx = 0
+        last_block_idx = max(cur_s_k - 1, 0) // block_size_n
+        num_blocks_list.append(last_block_idx - first_block_idx + 1)
+        first_block_idx_list.append(first_block_idx)
+        last_block_idx_list.append(last_block_idx)
+
+    total_num_blocks = sum(n + fixed_overhead_num_blocks for n in num_blocks_list)
+    payload = math.ceil(total_num_blocks / num_mp_parts) + fixed_overhead_num_blocks
+    metadata = torch.zeros((num_mp_parts, 8), dtype=torch.int32, device=device)
+    num_splits = torch.zeros((batch_size + 1,), dtype=torch.int32, device=device)
+
+    now_idx = 0
+    now_block = 0
+    now_n_split_idx = 0
+    cum_num_splits = 0
+    for part in range(num_mp_parts):
+        metadata[part, 0] = now_idx
+        metadata[part, 1] = now_block + first_block_idx_list[now_idx] if now_idx < batch_size else 0
+        metadata[part, 4] = now_n_split_idx
+
+        remain_payload = payload
+        while now_idx < batch_size:
+            num_blocks = num_blocks_list[now_idx]
+            now_remain_blocks = num_blocks - now_block
+            if remain_payload >= now_remain_blocks + fixed_overhead_num_blocks:
+                cum_num_splits += now_n_split_idx + 1
+                num_splits[now_idx + 1] = cum_num_splits
+                remain_payload -= now_remain_blocks + fixed_overhead_num_blocks
+                now_idx += 1
+                now_block = 0
+                now_n_split_idx = 0
+            else:
+                if remain_payload - fixed_overhead_num_blocks > 0:
+                    now_block += remain_payload - fixed_overhead_num_blocks
+                    now_n_split_idx += 1
+                break
+
+        if now_block > 0:
+            metadata[part, 2] = now_idx
+            metadata[part, 3] = now_block + first_block_idx_list[now_idx]
+        else:
+            metadata[part, 2] = now_idx - 1
+            metadata[part, 3] = last_block_idx_list[now_idx - 1] + 1 if now_idx > 0 else 0
+
     return metadata, num_splits
 
 
@@ -452,11 +512,13 @@ def benchmark_sparse_mla_decode_v32_case(
         ],
         dim=-1,
     ).contiguous()
-    sched_meta, num_splits = _make_single_part_decode_metadata(
-        batch_size=batch_size,
+    sched_meta, num_splits = _make_sparse_decode_metadata(
+        seqlens_k=cache_seqlens,
+        num_q_tokens_per_head_k=seq_len_q * num_heads,
+        num_heads_k=1,
         topk=topk,
-        block_i=64,
-        device=device,
+        mp_count=56,
+        tile_m=64,
     )
     topk_length = torch.full((batch_size,), topk, dtype=torch.int32, device=device)
 
@@ -887,15 +949,18 @@ SLOW_CASE_NAMES = {
     # useful for explicit profiling, but its topk + extra_topk shape can spend
     # a long time in TileLang compilation and should not block default sweeps.
     "sparse_mla_prefill_model1_extra_bf16",
-    # The migrated scheduled decode path uses local metadata construction and is
-    # compile-sensitive. Keep it explicit until its MP scheduling metadata is
-    # validated on the target environment.
-    "sparse_mla_decode_v32_temp_aligned_bf16",
 }
+
+
+REGRESSION_SUPPORTED_RUNNERS = frozenset({"gdn_decode", "gdn_mtp", "gdn_prefill"})
 
 
 def default_case_names() -> list[str]:
     return [case.name for case in build_cases() if case.name not in SLOW_CASE_NAMES]
+
+
+def regression_supported_case_names() -> list[str]:
+    return [case.name for case in build_cases() if case.runner in REGRESSION_SUPPORTED_RUNNERS]
 
 
 def build_case_map() -> dict[str, CaseSpec]:
@@ -1006,7 +1071,11 @@ def print_sample_stats(sample_records: list[dict[str, Any]], median_time_us: flo
     )
 
 
-def parse_args(default_case_names: list[str] | None, description: str) -> argparse.Namespace:
+def parse_args(
+    default_case_names: list[str] | None,
+    description: str,
+    argv: list[str] | None = None,
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--baseline",
@@ -1041,16 +1110,19 @@ def parse_args(default_case_names: list[str] | None, description: str) -> argpar
         default=DEFAULT_THRESHOLD,
         help="Allowed slowdown ratio margin. 0.05 means current/baseline <= 1.05.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def run_cases_main(
+def run_cases(
     *,
     title: str,
     default_case_names: list[str] | None = None,
     description: str,
-) -> int:
-    args = parse_args(default_case_names, description)
+    argv: list[str] | None = None,
+    print_final_summary: bool = True,
+) -> BenchmarkRunResult:
+    start_time = time.perf_counter()
+    args = parse_args(default_case_names, description, argv)
     if args.samples < 1:
         raise ValueError("--samples must be >= 1")
 
@@ -1069,6 +1141,23 @@ def run_cases_main(
     missing = [name for name in selected_names if name not in case_map]
     if missing:
         raise ValueError(f"unknown benchmark case(s): {', '.join(missing)}")
+
+    if args.check_regression:
+        unsupported_names = [name for name in selected_names if case_map[name].runner not in REGRESSION_SUPPORTED_RUNNERS]
+        if unsupported_names:
+            if args.cases:
+                raise ValueError(
+                    "--check-regression currently supports only MATE GDN "
+                    "case families: gdn_decode, gdn_mtp, gdn_prefill. "
+                    "Unsupported requested case(s): "
+                    f"{', '.join(unsupported_names)}"
+                )
+            selected_names = [name for name in selected_names if case_map[name].runner in REGRESSION_SUPPORTED_RUNNERS]
+            print(
+                f"{style('[WARN]', TermStyle.bold, TermStyle.yellow)} "
+                "--check-regression is currently limited to MATE GDN cases; "
+                f"skipping unsupported case(s): {', '.join(unsupported_names)}"
+            )
 
     cases = [case_map[name] for name in selected_names]
     if not cases:
@@ -1105,9 +1194,26 @@ def run_cases_main(
         print_banner("Regression Check", f"baseline={args.baseline}")
         regression_stats = check_regression(records, load_baselines(Path(args.baseline)), args.threshold)
 
-    print_summary(len(records), regression_stats)
+    exit_code = 0
     if regression_stats is not None:
-        return 1 if regression_stats["failures"] else 0
+        exit_code = 1 if regression_stats["failures"] or regression_stats["missing"] else 0
 
-    print(f"{style('[DONE]', TermStyle.bold, TermStyle.green)} completed {len(records)} benchmark case(s)")
-    return 0
+    if print_final_summary:
+        print_summary(len(records), regression_stats, time.perf_counter() - start_time)
+        if regression_stats is None:
+            print(f"{style('[DONE]', TermStyle.bold, TermStyle.green)} completed {len(records)} benchmark case(s)")
+
+    return BenchmarkRunResult(records=records, regression_stats=regression_stats, exit_code=exit_code)
+
+
+def run_cases_main(
+    *,
+    title: str,
+    default_case_names: list[str] | None = None,
+    description: str,
+) -> int:
+    return run_cases(
+        title=title,
+        default_case_names=default_case_names,
+        description=description,
+    ).exit_code

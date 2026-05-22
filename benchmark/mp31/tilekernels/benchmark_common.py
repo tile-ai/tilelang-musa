@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,21 @@ def style(text: str, *styles: str) -> str:
 
 def format_params(params: dict[str, Any]) -> str:
     return ", ".join(f"{key}={value}" for key, value in sorted(params.items()))
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 60.0:
+        return f"{seconds:.2f}s"
+    minutes, remaining_seconds = divmod(seconds, 60.0)
+    if minutes < 60.0:
+        return f"{int(minutes)}m {remaining_seconds:.2f}s"
+    hours, remaining_minutes = divmod(minutes, 60.0)
+    return f"{int(hours)}h {int(remaining_minutes)}m {remaining_seconds:.2f}s"
+
+
+def format_record_label(record: dict[str, Any]) -> str:
+    op_text = f"({record['operation']})"
+    return f"{record['kernel']} {op_text} [{format_params(record['params'])}]"
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -138,12 +154,7 @@ def load_baselines(path: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
 
 
 def import_ops():
-    root = benchmark_root()
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    import tilekernels as ops
-
-    return ops
+    return import_module("benchmark.mp31.tilekernels")
 
 
 def _parse_cmake_build_type(cache_path: Path) -> str | None:
@@ -253,9 +264,13 @@ def print_sample_stats(sample_records: list[dict[str, Any]], median_time_us: flo
 def print_summary(
     total_cases: int,
     regression_stats: dict[str, Any] | None = None,
+    elapsed_seconds: float | None = None,
 ) -> None:
     print_banner("Summary")
     print(f"  {style('cases', TermStyle.cyan):<14} {style(str(total_cases), TermStyle.bold)}")
+    if elapsed_seconds is not None:
+        elapsed_text = f"{format_duration(elapsed_seconds)} ({elapsed_seconds:.2f}s)"
+        print(f"  {style('total_time', TermStyle.cyan):<14} {style(elapsed_text, TermStyle.bold)}")
     if regression_stats is None:
         return
 
@@ -289,19 +304,18 @@ def check_regression(
             missing += 1
             print(
                 f"{style('[WARN]', TermStyle.bold, TermStyle.yellow)} "
-                f"missing baseline for {record['kernel']} {format_params(record['params'])}"
+                f"missing baseline for {format_record_label(record)}"
             )
             continue
         ratio = record["time_us"] / baseline["time_us"]
         max_ratio = max(max_ratio, ratio)
         ratio_text = style(f"{ratio:.4f}", ratio_style(ratio, threshold), TermStyle.bold)
-        op_text = f"({record['operation']})"
         case_failed = ratio > 1.0 + threshold
         status = "[FAIL]" if case_failed else "[PASS]"
         status_style = TermStyle.red if case_failed else TermStyle.green
         print(
             f"{style(status, TermStyle.bold, status_style)} "
-            f"{record['kernel']} {style(op_text, TermStyle.dim)}: "
+            f"{format_record_label(record)}: "
             f"current={record['time_us']:.2f} us, "
             f"baseline={baseline['time_us']:.2f} us, "
             f"ratio={ratio_text}"

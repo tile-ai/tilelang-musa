@@ -4,6 +4,7 @@ import argparse
 import copy
 import json
 import statistics
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,13 @@ class CaseSpec:
     name: str
     runner: str
     args: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class BenchmarkRunResult:
+    records: list[dict[str, Any]]
+    regression_stats: dict[str, Any] | None
+    exit_code: int
 
 
 def benchmark_mhc_pre_big_fuse_case(
@@ -462,7 +470,11 @@ def run_case_samples(case: CaseSpec, ops, device: str, samples: int) -> tuple[di
     return aggregate_sample_records(sample_records), sample_records
 
 
-def parse_args(default_case_names: list[str] | None, description: str) -> argparse.Namespace:
+def parse_args(
+    default_case_names: list[str] | None,
+    description: str,
+    argv: list[str] | None = None,
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--baseline",
@@ -498,16 +510,19 @@ def parse_args(default_case_names: list[str] | None, description: str) -> argpar
         action="store_true",
         help="Allow benchmarks to run even when tilelang-musa is not built with CMAKE_BUILD_TYPE=Release.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def run_cases_main(
+def run_cases(
     *,
     title: str,
     default_case_names: list[str] | None = None,
     description: str,
-) -> int:
-    args = parse_args(default_case_names, description)
+    argv: list[str] | None = None,
+    print_final_summary: bool = True,
+) -> BenchmarkRunResult:
+    start_time = time.perf_counter()
+    args = parse_args(default_case_names, description, argv)
     if args.samples < 1:
         raise ValueError("--samples must be >= 1")
 
@@ -564,9 +579,26 @@ def run_cases_main(
         print_banner("Regression Check", f"baseline={args.baseline}")
         regression_stats = check_regression(records, load_baselines(Path(args.baseline)), args.threshold)
 
-    print_summary(len(records), regression_stats)
+    exit_code = 0
     if regression_stats is not None:
-        return 1 if regression_stats["failures"] else 0
+        exit_code = 1 if regression_stats["failures"] else 0
 
-    print(f"{style('[DONE]', TermStyle.bold, TermStyle.green)} completed {len(records)} benchmark case(s)")
-    return 0
+    if print_final_summary:
+        print_summary(len(records), regression_stats, time.perf_counter() - start_time)
+        if regression_stats is None:
+            print(f"{style('[DONE]', TermStyle.bold, TermStyle.green)} completed {len(records)} benchmark case(s)")
+
+    return BenchmarkRunResult(records=records, regression_stats=regression_stats, exit_code=exit_code)
+
+
+def run_cases_main(
+    *,
+    title: str,
+    default_case_names: list[str] | None = None,
+    description: str,
+) -> int:
+    return run_cases(
+        title=title,
+        default_case_names=default_case_names,
+        description=description,
+    ).exit_code

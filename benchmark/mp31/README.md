@@ -36,20 +36,16 @@ host-side helpers only; they must not import the MATE repository at runtime.
 
 - `baselines/tilekernels.jsonl`: merged 15-record TileKernels baseline file.
 - `baselines/mate.jsonl`: MATE-origin benchmark baseline file.
-- `tilekernels/tilekernels_benchmark.py`: aggregate benchmark entrypoint for the whole
-  15-case suite.
 - `tilekernels/benchmark_common.py`, `tilekernels/benchmark_cases.py`: shared benchmark
   framework, case registry, output formatting, and regression checking.
 - `tilekernels/*_benchmark.py`: standalone per-operator benchmark entrypoints.
 - `tilekernels/quant/`, `tilekernels/moe/`, `tilekernels/mhc/`: local operator implementations used by
   both the aggregate runner and standalone runners.
-- `mate/mate_benchmark.py`: aggregate entrypoint for MATE-origin TileLang
-  benchmarks.
 - `mate/ops/*_benchmark.py`: standalone MATE-origin per-operator entrypoints.
 - `mate/kernels/`: local TileLang kernels and minimal host-side helpers
   migrated from MATE. These files intentionally avoid MATE package imports.
-- `runner.py`: source-level runner that can execute TileKernels, MATE-origin,
-  or both benchmark groups.
+- `runner.py`: aggregate entrypoint that can execute TileKernels, MATE-origin,
+  or both benchmark groups and print one combined summary.
 
 ## AI Coding Guide
 
@@ -87,24 +83,25 @@ the runner enforces the same assumption by default:
 
 ## Usage
 
-Aggregate example:
+Aggregate examples:
 
 ```bash
 cd tilelang_musa
-python benchmark/mp31/tilekernels/tilekernels_benchmark.py
+python benchmark/mp31/runner.py --source tilekernels
 ```
 
 Bypass the release-build check explicitly:
 
 ```bash
-python benchmark/mp31/tilekernels/tilekernels_benchmark.py \
+python benchmark/mp31/runner.py --source tilekernels \
   --allow-non-release-build
 ```
 
 Median-sampled baseline refresh:
 
 ```bash
-python /root/tilelang_musa/benchmark/mp31/tilekernels/tilekernels_benchmark.py \
+python /root/tilelang_musa/benchmark/mp31/runner.py \
+  --source tilekernels \
   --samples 5 \
   --output /tmp/tilekernels.jsonl
 ```
@@ -136,6 +133,10 @@ python /root/tilelang_musa/benchmark/mp31/runner.py \
   --allow-non-release-build
 ```
 
+The aggregate runner emits one final `MP31 Benchmark Summary` section with the
+combined status, case count, and total wall-clock time for all selected
+benchmark sources.
+
 Run only MATE-origin benchmarks:
 
 ```bash
@@ -165,10 +166,17 @@ python /root/tilelang_musa/benchmark/mp31/mate/ops/sparse_mla_decode_benchmark.p
 
 CLI Notes:
 
-- All entrypoints support `--output`, `--check-regression`, `--baseline`,
+- The aggregate runner and standalone entrypoints support `--output`,
+  `--check-regression`, `--baseline`,
   `--threshold`, `--samples`, `--cases`, and `--allow-non-release-build`.
 - For single-op entrypoints, `--cases` can be used to narrow to a subset of the
   cases owned by that operator family.
+- MATE-origin `--check-regression` is currently covered only for GDN decode,
+  GDN MTP, and GDN prefill cases. The aggregate runner automatically skips
+  unsupported Sparse MLA cases when `--check-regression` is used without an
+  explicit `--cases` list. If unsupported cases are explicitly requested with
+  `--check-regression`, the runner exits with a clear error instead of treating
+  missing baselines as a pass.
 - Prefer `--samples 5` or higher when refreshing baseline JSONL files.
   Median is used instead of mean so an occasional slow run does not shift the
   baseline.
@@ -194,25 +202,14 @@ Migrated Sparse MLA cases:
   extra-KV inputs.
 - `sparse_mla_decode_v32`: direct V3.2 scheduled decode TileLang interface.
 
-The default MATE aggregate runner skips compile-sensitive cases:
-`sparse_mla_prefill_model1_extra_bf16`, which mirrors MATE's large
-`--include-large` Model1 prefill perf case, and
-`sparse_mla_decode_v32_temp_aligned_bf16`, whose scheduled decode path may need
-backend/compiler alignment work on MP31. A smaller direct Model1 extra-KV case
-is included by default instead. Run skipped cases explicitly with `--cases`
-when profiling or debugging those shapes:
+The default MATE aggregate runner includes all migrated Sparse MLA cases,
+including the large Model1 extra-KV case
+`sparse_mla_prefill_model1_extra_bf16`.
 
-```bash
-python /root/tilelang_musa/benchmark/mp31/mate/mate_benchmark.py \
-  --cases sparse_mla_prefill_model1_extra_bf16 \
-  --allow-non-release-build
-```
-
-The Sparse MLA decode migration currently uses a local single-part scheduled
-metadata generator for the direct V3.2 decode case. This covers the migrated
-direct benchmark path without depending on MATE's temp metadata utilities or
-FlashMLA. If future performance tracking needs the exact multi-MP-part metadata
-policy from MATE, extend the local metadata generator rather than importing MATE.
+The Sparse MLA decode migration uses a local scheduled metadata generator
+equivalent to MATE's temp `get_mla_metadata_pytorch` helper for the direct V3.2
+decode case. This covers the migrated direct benchmark path without depending
+on MATE's temp metadata utilities or FlashMLA.
 
 When adding more MATE-origin cases, keep these rules:
 

@@ -3,15 +3,23 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-benchmark_root = Path(__file__).resolve().parents[1]
-mp31_root = benchmark_root.parent
-if str(mp31_root) not in sys.path:
-    sys.path.insert(0, str(mp31_root))
 
-from mate.benchmark_cases import build_gdn_decode_cases, run_cases_main
+def _ensure_repo_root_on_path() -> None:
+    current = Path(__file__).resolve()
+    for candidate in current.parents:
+        if (candidate / ".git").exists():
+            root_text = str(candidate)
+            if root_text not in sys.path:
+                sys.path.insert(0, root_text)
+            return
+    raise RuntimeError(f"unable to determine repository root from {current}")
 
 
 def main() -> int:
+    _ensure_repo_root_on_path()
+
+    from benchmark.mp31.mate.benchmark_cases import build_gdn_decode_cases, run_cases_main
+
     return run_cases_main(
         title="MATE GDN Decode Benchmark",
         default_case_names=[case.name for case in build_gdn_decode_cases()],

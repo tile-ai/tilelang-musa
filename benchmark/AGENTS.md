@@ -31,7 +31,6 @@ guardrails here.
   input/metadata construction.
 - `mp31/mate/benchmark_common.py` mirrors the benchmark harness helpers for
   the MATE-origin source group.
-- `mp31/mate/mate_benchmark.py` is the aggregate MATE-origin entrypoint.
 - `mp31/mate/ops/*_benchmark.py` files are standalone MATE-origin entrypoints.
 - `mp31/mate/kernels` contains local TileLang kernels and minimal host helpers
   migrated from MATE.
@@ -56,6 +55,10 @@ python benchmark/mp31/runner.py --source tilekernels
 python benchmark/mp31/runner.py --source mate
 ```
 
+The top-level runner prints one final combined `MP31 Benchmark Summary` with the
+status, case count, regression totals when enabled, and total wall-clock time
+across all selected benchmark sources.
+
 Useful shared options:
 
 - `--allow-non-release-build`: bypass the default `CMAKE_BUILD_TYPE=Release`
@@ -67,6 +70,12 @@ Useful shared options:
 - `--samples N`: run each case N times and use median `time_us`.
 - `--cases NAME ...`: run a selected subset of case names.
 - `--output PATH`: write current records as compact JSONL.
+
+MATE-origin regression checks currently have baseline coverage only for GDN
+decode, GDN MTP, and GDN prefill. The aggregate runner filters MATE to those
+GDN cases when `--check-regression` is used without explicit `--cases`;
+explicit unsupported cases should fail with a clear error instead of silently
+passing with missing baselines.
 
 Prefer `--samples 5` or higher when refreshing baseline files. The harness uses
 median time for output and regression checks, then recomputes bandwidth from the
