@@ -180,6 +180,9 @@ private:
   std::string GetMUSATMALoadCallee(const PrimExpr &desc,
                                    const std::string &inner_hint,
                                    const std::string &outer_hint) const;
+  std::string GetMUSATMAStoreCallee(const PrimExpr &desc,
+                                    const std::string &inner_hint,
+                                    const std::string &outer_hint) const;
   void CheckMUSATMACachePolicySupported(const std::string &op_name,
                                         const std::string &inner_hint,
                                         const std::string &outer_hint) const;

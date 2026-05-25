@@ -140,7 +140,9 @@ tma_load(const MUtensorDescriptor &descriptor, uint32_t const &bar_id,
 
 template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
           SmemSwizzleStride ss = SmemSwizzleStride::B256,
-          SmemSwizzleLine sl = SmemSwizzleLine::B256>
+          SmemSwizzleLine sl = SmemSwizzleLine::B256,
+          CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL>
 TL_DEVICE void tma_store(const MUtensorDescriptor &descriptor,
                          void const *smem_ptr, int32_t const &crd0,
                          int32_t const &dim0) {
@@ -149,12 +151,15 @@ TL_DEVICE void tma_store(const MUtensorDescriptor &descriptor,
   __musa_tme_st_1d(
       make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
       gmem_int_desc, dim0, crd0, static_cast<int32_t>(sg),
-      static_cast<int32_t>(ss), static_cast<int32_t>(sl));
+      static_cast<int32_t>(ss), static_cast<int32_t>(sl),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint), 1);
 }
 
 template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
           SmemSwizzleStride ss = SmemSwizzleStride::B256,
-          SmemSwizzleLine sl = SmemSwizzleLine::B256>
+          SmemSwizzleLine sl = SmemSwizzleLine::B256,
+          CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL>
 TL_DEVICE void tma_store(const MUtensorDescriptor &descriptor,
                          void const *smem_ptr, int32_t const &crd0,
                          int32_t const &crd1, int32_t const &dim0,
@@ -166,12 +171,15 @@ TL_DEVICE void tma_store(const MUtensorDescriptor &descriptor,
   __musa_tme_st_2d(
       make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
       gmem_int_desc, dim, crd, static_cast<int32_t>(sg),
-      static_cast<int32_t>(ss), static_cast<int32_t>(sl));
+      static_cast<int32_t>(ss), static_cast<int32_t>(sl),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint), 1);
 }
 
 template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
           SmemSwizzleStride ss = SmemSwizzleStride::B256,
-          SmemSwizzleLine sl = SmemSwizzleLine::B256>
+          SmemSwizzleLine sl = SmemSwizzleLine::B256,
+          CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL>
 TL_DEVICE void
 tma_store(const MUtensorDescriptor &descriptor, void const *smem_ptr,
           int32_t const &crd0, int32_t const &crd1, int32_t const &crd2,
@@ -183,12 +191,15 @@ tma_store(const MUtensorDescriptor &descriptor, void const *smem_ptr,
   __musa_tme_st_3d(
       make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
       gmem_int_desc, dim, crd, static_cast<int32_t>(sg),
-      static_cast<int32_t>(ss), static_cast<int32_t>(sl));
+      static_cast<int32_t>(ss), static_cast<int32_t>(sl),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint), 1);
 }
 
 template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
           SmemSwizzleStride ss = SmemSwizzleStride::B256,
-          SmemSwizzleLine sl = SmemSwizzleLine::B256>
+          SmemSwizzleLine sl = SmemSwizzleLine::B256,
+          CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL>
 TL_DEVICE void
 tma_store(const MUtensorDescriptor &descriptor, void const *smem_ptr,
           int32_t const &crd0, int32_t const &crd1, int32_t const &crd2,
@@ -201,12 +212,15 @@ tma_store(const MUtensorDescriptor &descriptor, void const *smem_ptr,
   __musa_tme_st_4d(
       make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
       gmem_int_desc, dim, crd, static_cast<int32_t>(sg),
-      static_cast<int32_t>(ss), static_cast<int32_t>(sl));
+      static_cast<int32_t>(ss), static_cast<int32_t>(sl),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint), 1);
 }
 
 template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
           SmemSwizzleStride ss = SmemSwizzleStride::B256,
-          SmemSwizzleLine sl = SmemSwizzleLine::B256>
+          SmemSwizzleLine sl = SmemSwizzleLine::B256,
+          CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL>
 TL_DEVICE void
 tma_store(const MUtensorDescriptor &descriptor, void const *smem_ptr,
           int32_t const &crd0, int32_t const &crd1, int32_t const &crd2,
@@ -220,7 +234,8 @@ tma_store(const MUtensorDescriptor &descriptor, void const *smem_ptr,
   __musa_tme_st_5d(
       make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
       gmem_int_desc, dim, crd, static_cast<int32_t>(sg),
-      static_cast<int32_t>(ss), static_cast<int32_t>(sl));
+      static_cast<int32_t>(ss), static_cast<int32_t>(sl),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint), 1);
 }
 
 } // namespace tl

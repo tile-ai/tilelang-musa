@@ -390,6 +390,18 @@ CodeGenTileLangMUSA::GetMUSATMALoadCallee(const PrimExpr &desc,
   return ss.str();
 }
 
+std::string
+CodeGenTileLangMUSA::GetMUSATMAStoreCallee(const PrimExpr &desc,
+                                           const std::string &inner_hint,
+                                           const std::string &outer_hint) const {
+  std::ostringstream ss;
+  auto sg = GetTMASwizzleGranularity(desc);
+  ss << "tl::tma_store<" << ToString(sg)
+     << ", SmemSwizzleStride::B256, SmemSwizzleLine::B256, " << inner_hint
+     << ", " << outer_hint << ">";
+  return ss.str();
+}
+
 void CodeGenTileLangMUSA::CheckMUSATMACachePolicySupported(
     const std::string &op_name, const std::string &inner_hint,
     const std::string &outer_hint) const {
@@ -1816,13 +1828,15 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tma_store())) {
     std::stringstream ss;
     ICHECK_GE(op->args.size(), 7U);
+    auto inner_hint = GetTMACachePolicy(op->args[op->args.size() - 2], "inner");
+    auto outer_hint = GetTMACachePolicy(op->args[op->args.size() - 1], "outer");
     auto need_reduce = op->args[op->args.size() - 4].as<IntImmNode>()->value;
     if (need_reduce) {
+      CheckMUSATMACachePolicySupported("tma_store_add", inner_hint,
+                                       outer_hint);
       print_extern_call_stmt("tl::tma_store_add", 0, 4);
       return;
     }
-    auto inner_hint = GetTMACachePolicy(op->args[op->args.size() - 2], "inner");
-    auto outer_hint = GetTMACachePolicy(op->args[op->args.size() - 1], "outer");
     // 1D TMA store: args[0] is address_of(gmem), no descriptor variable
     // Layout: {gmem_ptr, smem_ptr, size_bytes, need_reduce, eviction_policy,
     // inner_cache_policy, outer_cache_policy}
@@ -1844,9 +1858,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     auto desc = op->args[0];
     auto smem = op->args[1];
-    auto sg = GetTMASwizzleGranularity(desc);
-    CheckMUSATMACachePolicySupported("tma_store", inner_hint, outer_hint);
-    ss << "tl::tma_store<" << ToString(sg) << ">(";
+    ss << GetMUSATMAStoreCallee(desc, inner_hint, outer_hint) << "(";
     auto tile_shape = GetTMASmemBox(desc);
     size_t coord_start = 2;
     size_t coord_end = op->args.size() - 4;

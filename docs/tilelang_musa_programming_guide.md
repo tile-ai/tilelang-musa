@@ -72,7 +72,15 @@ T.copy(
     eviction_policy="evict_first",
 )
 
-## 示例 3：T.tma_copy 显式指定 cache policy
+## 示例 3：给 descriptor TME store 指定 cache policy
+T.copy(
+    A_shared,
+    A_global[0:block_m, 0:block_n],
+    inner_cache_policy="cache_once",
+    outer_cache_policy="cache_normal",
+)
+
+## 示例 4：T.tma_copy 显式指定 cache policy
 barrier = T.alloc_barrier(128)
 T.tma_copy(
     A_global[0:block_m, 0:block_n],
@@ -82,12 +90,12 @@ T.tma_copy(
     outer_cache_policy="cache_normal",
 )
 ```
-- 功能：`T.copy(...)` 和 `T.tma_copy(...)` 支持给 MUSA `TME load` 指定 cache policy hint。可以通过 `inner_cache_policy` / `outer_cache_policy` 分别指定 MUSA inner/outer cache 行为，也可以通过 `eviction_policy` 使用 NV-compatible 的成对 hint。
+- 功能：`T.copy(...)` 和 `T.tma_copy(...)` 支持给 MUSA descriptor 形式的 `TME load` 指定 cache policy hint；`T.copy(...)` 也支持给 descriptor 形式的 `TME store` 指定 cache policy hint。可以通过 `inner_cache_policy` / `outer_cache_policy` 分别指定 MUSA inner/outer cache 行为，也可以通过 `eviction_policy` 使用 NV-compatible 的成对 hint。
   - `inner_cache_policy` 和 `outer_cache_policy` 可选值为 `"cache_none"`、`"cache_once"`、`"cache_normal"`、`"cache_persist"`，省略时默认使用 `"cache_normal"`。
   - `eviction_policy` 可选值为 `"evict_normal"`、`"evict_first"`、`"evict_last"`，分别映射为 `"cache_normal"`、`"cache_once"`、`"cache_persist"` 的 inner/outer 成对设置。
 - 注意：
   - `eviction_policy` 不能和 `inner_cache_policy` 或 `outer_cache_policy` 同时设置；如果需要 MUSA inner/outer 分别控制，应直接使用 `inner_cache_policy` / `outer_cache_policy`。
-  - 当前 MUSA 后端显式 cache policy hint 只支持 descriptor 形式的 `TME load`；`1D TME load`、`TME store` 和 `tma_load_im2col` 目前只支持默认 `"cache_normal"`。
+  - 当前 MUSA 后端显式 cache policy hint 只支持 descriptor 形式的 `TME load/store`；`1D TME load/store`、`tma_store_add` 和 `tma_load_im2col` 目前只支持默认 `"cache_normal"`。
 
 ## T.gemm gemm_ss
 ```python
