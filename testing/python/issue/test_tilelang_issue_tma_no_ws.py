@@ -416,9 +416,15 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     src = kernel.get_kernel_source()
     producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
     consumer_idx = src.index("} else {", producer_idx)
-    metadata_tma_idx = src.index("tl::tma_load<SmemSwizzleGranularity::B16>(E_desc_0")
-    compute_tma_idx = src.index("tl::tma_load<SmemSwizzleGranularity::B16>(A_desc_1")
-    metadata_store_idx = src.index("tl::tma_store<SmemSwizzleGranularity::B16>(MetaOut_desc_2")
+
+    def find_tma_call(op, desc):
+        match = re.search(rf"tl::{op}(?:<[^\n]*>)?\({desc}", src)
+        assert match, f"Expected tl::{op} call for {desc}"
+        return match.start()
+
+    metadata_tma_idx = find_tma_call("tma_load", "E_desc_0")
+    compute_tma_idx = find_tma_call("tma_load", "A_desc_1")
+    metadata_store_idx = find_tma_call("tma_store", "MetaOut_desc_2")
 
     assert producer_idx < metadata_tma_idx < consumer_idx
     assert producer_idx < compute_tma_idx < consumer_idx

@@ -248,22 +248,15 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # Producer-Consumer Warp Specialization:
             # Splits TMA pipeline loops into producer (TMA loads) and consumer
             # (compute) warps with mbarrier-based synchronization.
-            # When WS succeeds, it handles the pipeline overlap directly,
-            # so PipelinePlanning + InjectSoftwarePipeline are skipped.
             # NOTE: LowerSharedBarrier runs ONLY after WS, not before.
             # Running it before would generate barrier init calls that
             # WS cannot clean up when it replaces the barriers.
             mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
-            mod = tilelang.transform.LowerSharedBarrier()(mod)
-            if mcc.is_ph1(target):
-                mod = tilelang.transform.LowerReduceBarrier()(mod)
-        else:
-            mod = tilelang.transform.LowerSharedBarrier()(mod)
-            if mcc.is_ph1(target):
-                mod = tilelang.transform.LowerReduceBarrier()(mod)
-            mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-            mod = tilelang.transform.PipelinePlanning()(mod)
-            mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        mod = tilelang.transform.LowerSharedBarrier()(mod)
+        if mcc.is_ph1(target):
+            mod = tilelang.transform.LowerReduceBarrier()(mod)
+        mod = tilelang.transform.PipelinePlanning()(mod)
+        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.LowerManualTmaBarrier()(mod)
         mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
         mod = tilelang.transform.LowerOpaqueBlock()(mod)

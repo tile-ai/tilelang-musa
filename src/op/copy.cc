@@ -2232,6 +2232,10 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     } else {
       total_bytes = total_elements * shared_tensor->dtype.bytes();
     }
+    if (TargetIsMusa(T.target) && split_count > 1) {
+      total_bytes *= split_count;
+    }
+    total_bytes = analyzer->Simplify(total_bytes);
 
     Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
