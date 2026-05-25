@@ -290,6 +290,7 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier=None,
+    leader_scope_threads: int | None = None,
     eviction_policy: EvictionPolicy | None = None,
     inner_cache_policy: CachePolicy | None = None,
     outer_cache_policy: CachePolicy | None = None,
@@ -315,6 +316,8 @@ def tma_copy(
             Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
+        leader_scope_threads: Number of threads in each TMA leader-election scope
+            (e.g., 32 for per-warp). Defaults to the full block size if not specified.
         eviction_policy: Cache eviction policy. Defaults to None.
         inner_cache_policy: MUSA inner-cache policy. Defaults to backend normal-cache policy.
         outer_cache_policy: MUSA outer-cache policy. Defaults to backend normal-cache policy.
@@ -346,6 +349,14 @@ def tma_copy(
         from .builtin import _mbar_to_buffer_load
 
         ann["barrier"] = _mbar_to_buffer_load(barrier)
+
+    if leader_scope_threads is not None:
+        if not isinstance(leader_scope_threads, int) or leader_scope_threads <= 0:
+            raise ValueError(f"leader_scope_threads must be a positive int, got {leader_scope_threads}")
+        if leader_scope_threads % 32 != 0:
+            raise ValueError(f"leader_scope_threads must be a multiple of warp size (32), got {leader_scope_threads}")
+        if "leader_scope_threads" not in ann:
+            ann["leader_scope_threads"] = leader_scope_threads
 
     if "eviction_policy" not in ann and eviction_policy is not None:
         ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
