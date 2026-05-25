@@ -570,6 +570,7 @@ std::string CodeGenTileLangMUSA::Finish() {
   decl_stream << "#include <tl_templates/musa/copy.h>\n";
   decl_stream << "#include <tl_templates/musa/barrier.h>\n";
   decl_stream << "#include <tl_templates/musa/reduce.h>\n";
+  decl_stream << "#include <tl_templates/musa/scan.h>\n";
   if (need_ldsm_h_) {
     decl_stream << "#include <tl_templates/musa/ldsm.h>\n";
   }
