@@ -276,22 +276,30 @@ def tma_copy(
     src: BufferLikeType,
     dst: BufferLikeType,
     *,
-    barrier,
+    barrier=None,
     eviction_policy: EvictionPolicy | None = None,
     inner_cache_policy: CachePolicy | None = None,
     outer_cache_policy: CachePolicy | None = None,
     annotations: dict | None = None,
 ) -> tir.PrimExpr | tir.Stmt:
-    """TMA copy — issues arrive_and_expect_tx + tma_load, no wait.
+    """TMA copy with user-managed synchronization.
 
+    For loads (global -> shared): issues expect_tx + tma_load (no wait).
     Unlike T.copy() which emits a full synchronous TMA sequence (arrive + load + wait),
-    T.tma_copy() emits only the producer part (arrive_and_expect_tx + tma_load).
-    The user manages synchronization explicitly via T.mbarrier_wait_parity().
+    T.tma_copy() emits only the producer part (expect_tx + tma_load).
+    The user manages synchronization explicitly via T.barrier_arrive() and
+    T.mbarrier_wait_parity(). ``barrier`` is required for loads.
+
+    For stores (shared -> global): issues tma_store + tma_store_arrive (no wait).
+    Unlike T.copy() which emits tma_store + tma_store_arrive + tma_store_wait,
+    T.tma_copy() omits the wait so the user can batch multiple stores before
+    calling T.tma_store_wait() explicitly. ``barrier`` is not needed for stores.
 
     Args:
         src: Source memory region (global or shared)
         dst: Destination memory region (shared or global)
-        barrier: Mbarrier (from T.alloc_barrier()) for TMA synchronization.
+        barrier: Mbarrier (from T.alloc_barrier()) for TMA load synchronization.
+            Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
         eviction_policy: NV-compatible cache eviction policy. Defaults to None.
@@ -323,9 +331,9 @@ def tma_copy(
 
     ann = annotations.copy() if annotations else {}
 
-    from .builtin import _mbar_to_buffer_load
+    if barrier is not None and "barrier" not in ann:
+        from .builtin import _mbar_to_buffer_load
 
-    if "barrier" not in ann:
         ann["barrier"] = _mbar_to_buffer_load(barrier)
 
     if "eviction_policy" not in ann and eviction_policy is not None:

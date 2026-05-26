@@ -2202,13 +2202,18 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     }
   }
 
-  // Bulk TMA stores must be committed and waited before consumers read them.
+  // Bulk TMA stores participate in the async store group mechanism, so they
+  // must be committed. T.copy() keeps synchronous semantics by waiting here;
+  // T.tma_copy() leaves the wait to the user for explicit batching.
   if (!is_load) {
     Array<Stmt> seq;
     seq.reserve(3);
     seq.push_back(tma_copy);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    if (!GetIsTmaCopy()) {
+      seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
+                                  {IntImm(DataType::Int(32), 0)})));
+    }
     tma_copy = SeqStmt(std::move(seq));
   }
 
@@ -2391,7 +2396,10 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
     seq.reserve(3);
     seq.push_back(tma_copy);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    if (!GetIsTmaCopy()) {
+      seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
+                                  {IntImm(DataType::Int(32), 0)})));
+    }
     tma_copy = SeqStmt(std::move(seq));
   }
 

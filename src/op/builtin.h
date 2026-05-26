@@ -465,7 +465,7 @@ TVM_DLL const Op &tma_store_arrive();
 /*!
  * \brief Wait for TMA_STORE to finish
  *
- * tma_store_wait()
+ * tma_store_wait(count)
  *
  */
 TVM_DLL const Op &tma_store_wait();
