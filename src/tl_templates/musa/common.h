@@ -29,6 +29,7 @@ using tl_h8 = tl_h_elem_t __attribute__((ext_vector_type(8)));
 using tl_bf2 = tl_bf_elem_t __attribute__((ext_vector_type(2)));
 using tl_bf4 = tl_bf_elem_t __attribute__((ext_vector_type(4)));
 using tl_bf8 = tl_bf_elem_t __attribute__((ext_vector_type(8)));
+using tl_f2 = float __attribute__((ext_vector_type(2)));
 
 using v2i32_t = int32_t __attribute__((vector_size(8)));
 using v3i32_t = int32_t __attribute__((vector_size(12)));
@@ -57,10 +58,20 @@ using v32i32_t = int32_t __attribute__((vector_size(128)));
 #define _AS1 __attribute__((address_space(1)))
 #define _AS3 __attribute__((address_space(3)))
 
-TL_DEVICE tl_h_elem_t make_tl_h_elem(half_t x) { return *((tl_h_elem_t *)&x); }
+TL_DEVICE tl_h_elem_t make_tl_h_elem(half_t x) {
+  return static_cast<__half_raw>(x.to_half()).data;
+}
 
 TL_DEVICE tl_bf_elem_t make_tl_bf_elem(bfloat16_t x) {
   return *((tl_bf_elem_t *)&x);
+}
+
+TL_DEVICE half_t tl_h_elem_to_half(tl_h_elem_t x) {
+  return half_t(__half(__half_raw{x}));
+}
+
+TL_DEVICE bfloat16_t tl_bf_elem_to_bfloat16(tl_bf_elem_t x) {
+  return bfloat16_t(static_cast<float>(__mt_bfloat16(__mt_bfloat16_raw{x})));
 }
 
 TL_DEVICE tl_h2 make_tl_h2(tl_h_elem_t x0, tl_h_elem_t x1) {
@@ -127,6 +138,123 @@ TL_DEVICE tl_bf8 make_tl_bf8(bfloat16_t x0, bfloat16_t x1, bfloat16_t x2,
                      make_tl_bf_elem(x4), make_tl_bf_elem(x5),
                      make_tl_bf_elem(x6), make_tl_bf_elem(x7));
 }
+
+TL_DEVICE tl_f2 make_tl_f2(float x0, float x1) { return tl_f2{x0, x1}; }
+
+namespace tl {
+
+TL_DEVICE tl_f2 add2(tl_f2 a, tl_f2 b) {
+  return tl_f2{a[0] + b[0], a[1] + b[1]};
+}
+
+TL_DEVICE tl_f2 sub2(tl_f2 a, tl_f2 b) {
+  return tl_f2{a[0] - b[0], a[1] - b[1]};
+}
+
+TL_DEVICE tl_f2 mul2(tl_f2 a, tl_f2 b) {
+  return tl_f2{a[0] * b[0], a[1] * b[1]};
+}
+
+TL_DEVICE tl_f2 fma2(tl_f2 a, tl_f2 b, tl_f2 c) {
+  return tl_f2{fmaf(a[0], b[0], c[0]), fmaf(a[1], b[1], c[1])};
+}
+
+TL_DEVICE tl_f2 max2(tl_f2 a, tl_f2 b) {
+  return tl_f2{max(a[0], b[0]), max(a[1], b[1])};
+}
+
+TL_DEVICE tl_f2 min2(tl_f2 a, tl_f2 b) {
+  return tl_f2{min(a[0], b[0]), min(a[1], b[1])};
+}
+
+TL_DEVICE tl_f2 abs2(tl_f2 a) { return tl_f2{fabsf(a[0]), fabsf(a[1])}; }
+
+TL_DEVICE tl_h2 add2(tl_h2 a, tl_h2 b) {
+  return make_tl_h2(tl_h_elem_to_half(a[0]) + tl_h_elem_to_half(b[0]),
+                    tl_h_elem_to_half(a[1]) + tl_h_elem_to_half(b[1]));
+}
+
+TL_DEVICE tl_h2 sub2(tl_h2 a, tl_h2 b) {
+  return make_tl_h2(tl_h_elem_to_half(a[0]) - tl_h_elem_to_half(b[0]),
+                    tl_h_elem_to_half(a[1]) - tl_h_elem_to_half(b[1]));
+}
+
+TL_DEVICE tl_h2 mul2(tl_h2 a, tl_h2 b) {
+  return make_tl_h2(tl_h_elem_to_half(a[0]) * tl_h_elem_to_half(b[0]),
+                    tl_h_elem_to_half(a[1]) * tl_h_elem_to_half(b[1]));
+}
+
+TL_DEVICE tl_h2 fma2(tl_h2 a, tl_h2 b, tl_h2 c) {
+  return make_tl_h2(tl_h_elem_to_half(a[0]) * tl_h_elem_to_half(b[0]) +
+                        tl_h_elem_to_half(c[0]),
+                    tl_h_elem_to_half(a[1]) * tl_h_elem_to_half(b[1]) +
+                        tl_h_elem_to_half(c[1]));
+}
+
+TL_DEVICE tl_h2 max2(tl_h2 a, tl_h2 b) {
+  return make_tl_h2(max(tl_h_elem_to_half(a[0]), tl_h_elem_to_half(b[0])),
+                    max(tl_h_elem_to_half(a[1]), tl_h_elem_to_half(b[1])));
+}
+
+TL_DEVICE tl_h2 min2(tl_h2 a, tl_h2 b) {
+  return make_tl_h2(min(tl_h_elem_to_half(a[0]), tl_h_elem_to_half(b[0])),
+                    min(tl_h_elem_to_half(a[1]), tl_h_elem_to_half(b[1])));
+}
+
+TL_DEVICE tl_h2 abs2(tl_h2 a) {
+  return make_tl_h2(abs(tl_h_elem_to_half(a[0])), abs(tl_h_elem_to_half(a[1])));
+}
+
+TL_DEVICE tl_bf2 add2(tl_bf2 a, tl_bf2 b) {
+  return make_tl_bf2(bfloat16_t(float(tl_bf_elem_to_bfloat16(a[0])) +
+                                float(tl_bf_elem_to_bfloat16(b[0]))),
+                     bfloat16_t(float(tl_bf_elem_to_bfloat16(a[1])) +
+                                float(tl_bf_elem_to_bfloat16(b[1]))));
+}
+
+TL_DEVICE tl_bf2 sub2(tl_bf2 a, tl_bf2 b) {
+  return make_tl_bf2(bfloat16_t(float(tl_bf_elem_to_bfloat16(a[0])) -
+                                float(tl_bf_elem_to_bfloat16(b[0]))),
+                     bfloat16_t(float(tl_bf_elem_to_bfloat16(a[1])) -
+                                float(tl_bf_elem_to_bfloat16(b[1]))));
+}
+
+TL_DEVICE tl_bf2 mul2(tl_bf2 a, tl_bf2 b) {
+  return make_tl_bf2(bfloat16_t(float(tl_bf_elem_to_bfloat16(a[0])) *
+                                float(tl_bf_elem_to_bfloat16(b[0]))),
+                     bfloat16_t(float(tl_bf_elem_to_bfloat16(a[1])) *
+                                float(tl_bf_elem_to_bfloat16(b[1]))));
+}
+
+TL_DEVICE tl_bf2 fma2(tl_bf2 a, tl_bf2 b, tl_bf2 c) {
+  return make_tl_bf2(bfloat16_t(fmaf(float(tl_bf_elem_to_bfloat16(a[0])),
+                                     float(tl_bf_elem_to_bfloat16(b[0])),
+                                     float(tl_bf_elem_to_bfloat16(c[0])))),
+                     bfloat16_t(fmaf(float(tl_bf_elem_to_bfloat16(a[1])),
+                                     float(tl_bf_elem_to_bfloat16(b[1])),
+                                     float(tl_bf_elem_to_bfloat16(c[1])))));
+}
+
+TL_DEVICE tl_bf2 max2(tl_bf2 a, tl_bf2 b) {
+  return make_tl_bf2(bfloat16_t(max(float(tl_bf_elem_to_bfloat16(a[0])),
+                                    float(tl_bf_elem_to_bfloat16(b[0])))),
+                     bfloat16_t(max(float(tl_bf_elem_to_bfloat16(a[1])),
+                                    float(tl_bf_elem_to_bfloat16(b[1])))));
+}
+
+TL_DEVICE tl_bf2 min2(tl_bf2 a, tl_bf2 b) {
+  return make_tl_bf2(bfloat16_t(min(float(tl_bf_elem_to_bfloat16(a[0])),
+                                    float(tl_bf_elem_to_bfloat16(b[0])))),
+                     bfloat16_t(min(float(tl_bf_elem_to_bfloat16(a[1])),
+                                    float(tl_bf_elem_to_bfloat16(b[1])))));
+}
+
+TL_DEVICE tl_bf2 abs2(tl_bf2 a) {
+  return make_tl_bf2(bfloat16_t(fabsf(float(tl_bf_elem_to_bfloat16(a[0])))),
+                     bfloat16_t(fabsf(float(tl_bf_elem_to_bfloat16(a[1])))));
+}
+
+} // namespace tl
 
 #define TILELANG_CHECK(stmt)                                                   \
   do {                                                                         \
@@ -450,9 +578,7 @@ struct float_e5m2_t : public mutlass::float_e5m2_t {
   }
 };
 
-template <typename T> struct to_mute_type {
-  using type = T;
-};
+template <typename T> struct to_mute_type { using type = T; };
 
 template <> struct to_mute_type<tl::float_e4m3_t> {
   using type = mutlass::float_e4m3_t;

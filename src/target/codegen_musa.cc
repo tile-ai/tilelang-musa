@@ -40,33 +40,42 @@ bool UseMusaNative16BitVector(DataType t) {
          (t.lanes() == 2 || t.lanes() == 4 || t.lanes() == 8);
 }
 
-std::string GetMusaNative16BitVectorType(DataType t) {
-  ICHECK(UseMusaNative16BitVector(t));
+bool UseMusaNativeVector(DataType t) {
+  return UseMusaNative16BitVector(t) ||
+         (t.is_float() && t.bits() == 32 && t.lanes() == 2);
+}
+
+std::string GetMusaNativeVectorType(DataType t) {
+  ICHECK(UseMusaNativeVector(t));
+  if (t.is_float() && t.bits() == 32) {
+    return "tl_f2";
+  }
   if (t.is_float16()) {
     return "tl_h" + std::to_string(t.lanes());
   }
   return "tl_bf" + std::to_string(t.lanes());
 }
 
-std::string CastToMusaNative16BitVectorElem(DataType t,
-                                            const std::string &value) {
-  ICHECK(UseMusaNative16BitVector(t));
-  if (t.is_float16()) {
-    return "static_cast<tl_h_elem_t>(static_cast<float>(" + value + "))";
+std::string CastToMusaNativeVectorElem(DataType t, const std::string &value) {
+  ICHECK(UseMusaNativeVector(t));
+  if (t.is_float() && t.bits() == 32) {
+    return "static_cast<float>(" + value + ")";
   }
-  return "static_cast<tl_bf_elem_t>(static_cast<__mt_bfloat16_raw>("
-         "__float2bfloat16_rn(static_cast<float>(" +
-         value + "))).data)";
+  if (t.is_float16()) {
+    return "make_tl_h_elem(half_t(static_cast<float>(" + value + ")))";
+  }
+  return "make_tl_bf_elem(bfloat16_t(static_cast<float>(" + value + ")))";
 }
 
-std::string CastFromMusaNative16BitVectorElem(DataType t,
-                                              const std::string &value) {
-  ICHECK(UseMusaNative16BitVector(t));
-  if (t.is_float16()) {
-    return "half_t(static_cast<float>(" + value + "))";
+std::string CastFromMusaNativeVectorElem(DataType t, const std::string &value) {
+  ICHECK(UseMusaNativeVector(t));
+  if (t.is_float() && t.bits() == 32) {
+    return value;
   }
-  return "bfloat16_t(static_cast<float>(__mt_bfloat16(__mt_bfloat16_raw{" +
-         value + "})))";
+  if (t.is_float16()) {
+    return "tl_h_elem_to_half(" + value + ")";
+  }
+  return "tl_bf_elem_to_bfloat16(" + value + ")";
 }
 
 } // namespace
@@ -390,10 +399,9 @@ CodeGenTileLangMUSA::GetMUSATMALoadCallee(const PrimExpr &desc,
   return ss.str();
 }
 
-std::string
-CodeGenTileLangMUSA::GetMUSATMAStoreCallee(const PrimExpr &desc,
-                                           const std::string &inner_hint,
-                                           const std::string &outer_hint) const {
+std::string CodeGenTileLangMUSA::GetMUSATMAStoreCallee(
+    const PrimExpr &desc, const std::string &inner_hint,
+    const std::string &outer_hint) const {
   std::ostringstream ss;
   auto sg = GetTMASwizzleGranularity(desc);
   ss << "tl::tma_store<" << ToString(sg)
@@ -534,8 +542,8 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       enable_fp16_ = true;
       if (t.is_scalar()) {
         os << "half_t";
-      } else if (UseMusaNative16BitVector(t)) {
-        os << GetMusaNative16BitVectorType(t);
+      } else if (UseMusaNativeVector(t)) {
+        os << GetMusaNativeVectorType(t);
       } else if (lanes <= 8) {
         // Emit MUSA code to access fp16 vector elements.
         //
@@ -557,7 +565,9 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       }
       break;
     case 32:
-      if (lanes <= 4) {
+      if (UseMusaNativeVector(t)) {
+        os << GetMusaNativeVectorType(t);
+      } else if (lanes <= 4) {
         os << "float";
       } else if (lanes <= 8) {
         // Emit MUSA code to access fp32 vector elements for 4 < lanes <= 8.
@@ -581,6 +591,8 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       fail = true;
       break;
     }
+    if (!fail && UseMusaNativeVector(t))
+      return;
     if (!fail && (t.is_scalar() || t.bits() == 16))
       return;
     if (!fail && (lanes > 4 && lanes <= 8 && t.bits() == 32))
@@ -593,8 +605,8 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     enable_bf16_ = true;
     if (t.is_scalar()) {
       os << "bfloat16_t";
-    } else if (UseMusaNative16BitVector(t)) {
-      os << GetMusaNative16BitVectorType(t);
+    } else if (UseMusaNativeVector(t)) {
+      os << GetMusaNativeVectorType(t);
     } else if (lanes <= 8) {
       ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
       os << "uint" << lanes / 2;
@@ -795,7 +807,7 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 
 void CodeGenTileLangMUSA::PrintVecConstructor(DataType t,
                                               std::ostream &os) { // NOLINT(*)
-  if (UseMusaNative16BitVector(t)) {
+  if (UseMusaNativeVector(t)) {
     os << "make_";
     PrintType(t, os);
     return;
@@ -820,6 +832,27 @@ void CodeGenTileLangMUSA::PrintVecConstructor(DataType t,
 void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
+  if (UseMusaNativeVector(t) && t.lanes() == 2) {
+    std::string tl_func;
+    if (op == "+") {
+      tl_func = "add2";
+    } else if (op == "-") {
+      tl_func = "sub2";
+    } else if (op == "*") {
+      tl_func = "mul2";
+    } else if (op == "min") {
+      tl_func = "min2";
+    } else if (op == "max") {
+      tl_func = "max2";
+    }
+
+    if (!tl_func.empty()) {
+      os << "tl::" << tl_func << "(" << PrintExpr(lhs) << ", "
+         << PrintExpr(rhs) << ")";
+      return;
+    }
+  }
+
   // Declare the result.
   std::string sret = name_supply_->FreshName("_");
   this->PrintIndent();
@@ -881,9 +914,8 @@ void CodeGenTileLangMUSA::PrintVecElemLoad(const std::string &vec, DataType t,
       std::string ac = vec + "." + access[i / 8];
       os << "((" << type_name << ")(" << ac << " >> " << i % 8 * 8 << "))";
     }
-  } else if (UseMusaNative16BitVector(t)) {
-    os << CastFromMusaNative16BitVectorElem(t, vec + "[" + std::to_string(i) +
-                                                   "]");
+  } else if (UseMusaNativeVector(t)) {
+    os << CastFromMusaNativeVectorElem(t, vec + "[" + std::to_string(i) + "]");
   } else if (t.is_float16()) {
     if (t.lanes() <= 8) {
       os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
@@ -965,9 +997,9 @@ void CodeGenTileLangMUSA::PrintVecElemStore(const std::string &vec, DataType t,
       }
       stream << "(" << value << " << " << i % 8 * 8 << ");\n";
     }
-  } else if (UseMusaNative16BitVector(t)) {
-    stream << vec << "[" << i
-           << "] = " << CastToMusaNative16BitVectorElem(t, value) << ";\n";
+  } else if (UseMusaNativeVector(t)) {
+    stream << vec << "[" << i << "] = " << CastToMusaNativeVectorElem(t, value)
+           << ";\n";
   } else if (t.is_float16()) {
     if (t.lanes() <= 8) {
       stream << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
@@ -1629,6 +1661,35 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << sret;
     return;
+  } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
+             op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
+             op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
+             op->op.same_as(tl::abs2())) {
+    ICHECK(UseMusaNativeVector(op->dtype))
+        << "MUSA packed x2 intrinsics require native x2 dtype, but got "
+        << op->dtype;
+
+    std::string op_name;
+    if (op->op.same_as(tl::add2()))
+      op_name = "add2";
+    else if (op->op.same_as(tl::sub2()))
+      op_name = "sub2";
+    else if (op->op.same_as(tl::mul2()))
+      op_name = "mul2";
+    else if (op->op.same_as(tl::fma2()))
+      op_name = "fma2";
+    else if (op->op.same_as(tl::max2()))
+      op_name = "max2";
+    else if (op->op.same_as(tl::min2()))
+      op_name = "min2";
+    else
+      op_name = "abs2";
+
+    os << "tl::" << op_name << "(" << PrintExpr(op->args[0]);
+    for (size_t i = 1; i < op->args.size(); ++i) {
+      os << ", " << PrintExpr(op->args[i]);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::musa_cp_async_robust())) {
     ICHECK(op->args.size() == 5U || op->args.size() == 6U)
         << "musa_cp_async_robust expects 5 or 6 arguments (dst_ptr, src_ptr, "
@@ -1832,8 +1893,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto outer_hint = GetTMACachePolicy(op->args[op->args.size() - 1], "outer");
     auto need_reduce = op->args[op->args.size() - 4].as<IntImmNode>()->value;
     if (need_reduce) {
-      CheckMUSATMACachePolicySupported("tma_store_add", inner_hint,
-                                       outer_hint);
+      CheckMUSATMACachePolicySupported("tma_store_add", inner_hint, outer_hint);
       print_extern_call_stmt("tl::tma_store_add", 0, 4);
       return;
     }
@@ -2550,8 +2610,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "}\n";
     } else {
       os << "for (int local_id = 0; local_id < 8; ++local_id) {\n";
-      os << dst << "[" + this->PrintExpr(dst_ind) + "]" << " = " << src << "["
-         << src_offset << " + local_id];\n";
+      os << dst << "[" + this->PrintExpr(dst_ind) + "]"
+         << " = " << src << "[" << src_offset << " + local_id];\n";
       os << "}\n";
     }
 
@@ -3344,14 +3404,14 @@ void CodeGenTileLangMUSA::VisitExpr_(const RampNode *op, std::ostream &os) {
   // TODO(lei): Keep this aligned with CUDA codegen. LegalizeVectorizedLoop
   // should lower oversized vectorization before reaching codegen.
   // A stricter safety check can be added back once lane limits are unified.
-  if (UseMusaNative16BitVector(op->dtype)) {
+  if (UseMusaNativeVector(op->dtype)) {
     os << "(";
     PrintType(op->dtype, os);
     os << "{";
     for (int i = 0; i < lanes; i++) {
       std::string value = "(" + PrintExpr(op->base) + ")+(" +
                           PrintExpr(op->stride) + "*" + std::to_string(i) + ")";
-      os << CastToMusaNative16BitVectorElem(op->dtype, value);
+      os << CastToMusaNativeVectorElem(op->dtype, value);
       if (i != lanes - 1) {
         os << ", ";
       }
@@ -3585,7 +3645,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const BroadcastNode *op,
     }
   }
 
-  if (UseMusaNative16BitVector(op->dtype)) {
+  if (UseMusaNativeVector(op->dtype)) {
     std::string v = PrintExpr(op->value);
     os << "(";
     PrintType(op->dtype, os);
@@ -3594,7 +3654,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const BroadcastNode *op,
       if (i != 0) {
         os << ", ";
       }
-      os << CastToMusaNative16BitVectorElem(op->dtype, v);
+      os << CastToMusaNativeVectorElem(op->dtype, v);
     }
     os << "})";
     return;
@@ -3872,13 +3932,13 @@ void CodeGenTileLangMUSA::PrintVecElemLoadExpr(DataType t, int i,
     }
   }
 
-  if (UseMusaNative16BitVector(t)) {
+  if (UseMusaNativeVector(t)) {
     if (i == 0) {
       os << "(";
       PrintType(t, os);
       os << "{";
     }
-    os << CastToMusaNative16BitVectorElem(t, value);
+    os << CastToMusaNativeVectorElem(t, value);
     if (i != t.lanes() - 1) {
       os << ",";
     } else {
