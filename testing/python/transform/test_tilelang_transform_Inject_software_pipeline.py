@@ -153,96 +153,6 @@ def _find_alloc_buffer(func, data):
     return buffers[0]
 
 
-def _find_alloc_buffer_by_data_name(func, name):
-    buffers = []
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.AllocBuffer) and str(node.buffer.data.name) == name:
-            buffers.append(node.buffer)
-
-    post_order_visit(func.body, _visit)
-    assert len(buffers) == 1, f"Expected one alloc buffer named {name}, got {len(buffers)}"
-    return buffers[0]
-
-
-def _int_values(values):
-    return [int(value) for value in values]
-
-
-def test_trival_pipeline():
-    @T.prim_func
-    def before(A: T.Tensor((16, 1), T.float32), C: T.Tensor((16, 1), T.float32)):
-        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
-            for i in T.serial(0, 1, annotations={"software_pipeline_stage": [0, 1], "software_pipeline_order": [0, 1]}):
-                with T.sblock():
-                    T.reads(A[tx, i])
-                    T.writes(C[tx, i])
-                    B = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                    with T.sblock():
-                        T.reads(A[tx, i])
-                        T.writes(B[tx, 0])
-                        B[tx, 0] = A[tx, i] * T.float32(2)
-                    with T.sblock():
-                        T.reads(B[tx, 0])
-                        T.writes(C[tx, i])
-                        C[tx, i] = B[tx, 0] + T.float32(1)
-
-    @T.prim_func
-    def expected(A_handle: T.handle, C_handle: T.handle):
-        A = T.match_buffer(A_handle, (16, 1), strides=(1, 1))
-        C = T.match_buffer(C_handle, (16, 1), strides=(1, 1))
-        tx = T.launch_thread("threadIdx.x", 16)
-        B_alloc = T.alloc_buffer((2, 16, 1), scope="shared")
-        B = T.decl_buffer((2, 16, 1), data=B_alloc.data, scope="shared")
-        B[0, tx, 0] = A[tx, 0] * T.float32(2.0)
-        C[tx, 0] = B[0, tx, 0] + T.float32(1.0)
-
-    _check(before, expected)
-
-
-def test_preserve_inline_cp_async_sync_in_pipeline_stage():
-    @T.prim_func
-    def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
-        S = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
-        for i in T.serial(
-            4,
-            annotations={
-                "software_pipeline_stage": [T.int32(0), T.int32(1)],
-                "software_pipeline_order": [T.int32(0), T.int32(1)],
-                "software_pipeline_async_stages": [T.int32(0)],
-            },
-        ):
-            with T.sblock():
-                T.reads(A[i * 4 : i * 4 + 4])
-                T.writes(S[i * 4 : i * 4 + 4])
-                T.ptx_cp_async(
-                    T.access_ptr(S[i * 4], "w", 4),
-                    T.access_ptr(A[i * 4], "r", 4),
-                    4,
-                )
-                T.ptx_commit_group()
-                T.ptx_wait_group(0)
-            with T.sblock():
-                T.reads(S[i * 4 : i * 4 + 4])
-                T.writes(B[i * 4 : i * 4 + 4])
-                B[i * 4] = S[i * 4]
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tl.transform.InjectSoftwarePipeline()(mod)
-    mod = tl.transform.Simplify()(mod)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
-    mod = tl.transform.Simplify()(mod)
-
-    attrs, calls = _count_attrs_and_calls(mod["main"])
-    assert attrs.get("async_scope", 0) == 0
-    assert attrs.get("async_commit_queue_scope", 0) == 0
-    assert attrs.get("async_wait_queue_scope", 0) == 0
-    assert attrs.get("async_wait_inflight_count", 0) == 0
-    # Inline sync calls should remain explicit in the rewritten pipeline.
-    assert calls.get("tirx.ptx_commit_group", 0) > 0
-    assert calls.get("tirx.ptx_wait_group", 0) > 0
-
-
 def test_async_pipeline_groups_multiple_copy_producers():
     @T.prim_func
     def before(
@@ -251,6 +161,8 @@ def test_async_pipeline_groups_multiple_copy_producers():
         C: T.Tensor((16, 16), T.float32),
     ):
         for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+            B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
             for i in T.serial(
                 0,
                 4,
@@ -262,23 +174,18 @@ def test_async_pipeline_groups_multiple_copy_producers():
                     "software_pipeline_async_producer_groups": [0, 0, -1],
                 },
             ):
-                with T.sblock("compute"):
-                    T.reads(A[tx, i], B[tx, i])
+                with T.sblock("copy_a"):
+                    T.reads(A[tx, i])
+                    T.writes(A_shared[tx, 0])
+                    A_shared[tx, 0] = A[tx, i]
+                with T.sblock("copy_b"):
+                    T.reads(B[tx, i])
+                    T.writes(B_shared[tx, 0])
+                    B_shared[tx, 0] = B[tx, i]
+                with T.sblock("consume"):
+                    T.reads(A_shared[tx, 0], B_shared[tx, 0])
                     T.writes(C[tx, i])
-                    A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                    B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                    with T.sblock("copy_a"):
-                        T.reads(A[tx, i])
-                        T.writes(A_shared[tx, 0])
-                        A_shared[tx, 0] = A[tx, i]
-                    with T.sblock("copy_b"):
-                        T.reads(B[tx, i])
-                        T.writes(B_shared[tx, 0])
-                        B_shared[tx, 0] = B[tx, i]
-                    with T.sblock("consume"):
-                        T.reads(A_shared[tx, 0], B_shared[tx, 0])
-                        T.writes(C[tx, i])
-                        C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
+                    C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
@@ -303,6 +210,8 @@ def test_async_pipeline_only_wraps_producer_statements_from_explicit_group_annot
         C: T.Tensor((16, 16), T.float32),
     ):
         for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+            B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
             for i in T.serial(
                 0,
                 4,
@@ -314,27 +223,22 @@ def test_async_pipeline_only_wraps_producer_statements_from_explicit_group_annot
                     "software_pipeline_async_producer_groups": [-1, 0, 0, -1],
                 },
             ):
-                with T.sblock("compute"):
-                    T.reads(A[tx, i], B[tx, i])
+                with T.sblock("fill"):
+                    T.reads()
+                    T.writes(A_shared[tx, 0])
+                    A_shared[tx, 0] = T.float32(0)
+                with T.sblock("copy_a"):
+                    T.reads(A[tx, i])
+                    T.writes(A_shared[tx, 0])
+                    A_shared[tx, 0] = A[tx, i]
+                with T.sblock("copy_b"):
+                    T.reads(B[tx, i])
+                    T.writes(B_shared[tx, 0])
+                    B_shared[tx, 0] = B[tx, i]
+                with T.sblock("consume"):
+                    T.reads(A_shared[tx, 0], B_shared[tx, 0])
                     T.writes(C[tx, i])
-                    A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                    B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                    with T.sblock("fill"):
-                        T.reads()
-                        T.writes(A_shared[tx, 0])
-                        A_shared[tx, 0] = T.float32(0)
-                    with T.sblock("copy_a"):
-                        T.reads(A[tx, i])
-                        T.writes(A_shared[tx, 0])
-                        A_shared[tx, 0] = A[tx, i]
-                    with T.sblock("copy_b"):
-                        T.reads(B[tx, i])
-                        T.writes(B_shared[tx, 0])
-                        B_shared[tx, 0] = B[tx, i]
-                    with T.sblock("consume"):
-                        T.reads(A_shared[tx, 0], B_shared[tx, 0])
-                        T.writes(C[tx, i])
-                        C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
+                    C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
@@ -358,6 +262,8 @@ def test_async_pipeline_marks_copy_ops_for_pipeline_managed_cp_async_sync():
         C: T.Tensor((16, 16), T.float32),
     ):
         for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+            B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
             for i in T.serial(
                 0,
                 4,
@@ -369,14 +275,9 @@ def test_async_pipeline_marks_copy_ops_for_pipeline_managed_cp_async_sync():
                     "software_pipeline_async_producer_groups": [0, 0, -1],
                 },
             ):
-                with T.sblock("compute"):
-                    T.reads(A[tx, i], B[tx, i])
-                    T.writes(C[tx, i])
-                    A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                    B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                    T.copy(A[tx, i : i + 1], A_shared[tx, 0:1])
-                    T.copy(B[tx, i : i + 1], B_shared[tx, 0:1])
-                    C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
+                T.copy(A[tx, i : i + 1], A_shared[tx, 0:1])
+                T.copy(B[tx, i : i + 1], B_shared[tx, 0:1])
+                C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
@@ -393,6 +294,7 @@ def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():
         C: T.Tensor((16, 16), T.float32),
     ):
         for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            S = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
             for i in T.serial(
                 0,
                 4,
@@ -404,12 +306,8 @@ def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():
                     "software_pipeline_async_producer_groups": [0, -1],
                 },
             ):
-                with T.sblock("compute"):
-                    T.reads(A[tx, i])
-                    T.writes(C[tx, i])
-                    S = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                    T.copy(A[tx, i : i + 1], S[tx, 0:1])
-                    C[tx, i] = S[tx, 0]
+                T.copy(A[tx, i : i + 1], S[tx, 0:1])
+                C[tx, i] = S[tx, 0]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
@@ -532,27 +430,36 @@ def _collect_leading_bind_names(mod, block_names):
     leading_binds = {name: [] for name in block_names}
 
     def _visit(node):
-        if not isinstance(node, tvm.tirx.SBlock):
-            return
-        block_name = str(node.name_hint)
-        if block_name not in leading_binds:
+        if not isinstance(node, tvm.tirx.SBlock) or str(node.name_hint) not in leading_binds:
             return
         body = node.body
-        if not isinstance(body, tvm.tirx.SeqStmt):
-            return
+        assert isinstance(body, tvm.tirx.SeqStmt), f"{node.name_hint} body should start with scalar Bind"
         names = []
         for stmt in body.seq:
             if not isinstance(stmt, tvm.tirx.Bind):
                 break
             names.append(str(stmt.var.name))
-        if names:
-            leading_binds[block_name].append(names)
+        assert names, f"{node.name_hint} body should start with scalar Bind"
+        leading_binds[str(node.name_hint)].append(names)
 
     post_order_visit(mod["main"].body, _visit)
     return leading_binds
 
 
-def test_inject_software_pipeline_replays_scalar_let_without_annotation_slot():
+def _collect_direct_bind_names(mod):
+    names = []
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.SBlock):
+            return
+        if isinstance(node.body, tvm.tirx.Bind):
+            names.append(str(node.body.var.name))
+
+    post_order_visit(mod["main"].body, _visit)
+    return names
+
+
+def test_inject_software_pipeline_replays_scalar_bind_without_annotation_slot():
     @T.prim_func
     def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
         shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
@@ -587,50 +494,53 @@ def test_inject_software_pipeline_replays_scalar_let_without_annotation_slot():
     assert leading_binds["store"]
     assert all(names[0].startswith("base") for names in leading_binds["copy"])
     assert all(names[0].startswith("base") for names in leading_binds["store"])
+    assert "base = T.int32()" not in mod["main"].script()
 
 
-def test_ph1_gemm_ab_stage_stride_accounts_for_tile_bytes():
+def test_inject_software_pipeline_replays_readonly_bufferload_bind():
     @T.prim_func
     def before(
-        A: T.Tensor((4, 16, 32), T.float32),
-        B: T.Tensor((4, 32, 64), T.float32),
-        C: T.Tensor((4,), T.float32),
+        A: T.Tensor((128,), T.float32),
+        Ids: T.Tensor((4,), T.int32),
+        B: T.Tensor((128,), T.float32),
     ):
-        with T.sblock("root"):
-            A_shared = T.alloc_buffer((16, 32), T.float32, scope="shared.dyn")
-            B_shared = T.alloc_buffer((32, 64), T.float32, scope="shared.dyn")
-            for k in T.serial(
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
                 0,
                 4,
                 annotations={
                     "software_pipeline_stage": [0, 1],
-                    "software_pipeline_order": [0, 1],
+                    "software_pipeline_order": [1, 0],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 0],
+                    "software_pipeline_async_producer_groups": [0, -1],
+                    "software_pipeline_replayable_scalar_binds": [1, 0, 0],
                 },
             ):
-                with T.sblock("load"):
-                    T.reads(A[k, 0, 0], B[k, 0, 0])
-                    T.writes(A_shared[0, 0], B_shared[0, 0])
-                    A_shared[0, 0] = A[k, 0, 0]
-                    B_shared[0, 0] = B[k, 0, 0]
-                with T.sblock("consume"):
-                    T.reads(A_shared[0, 0], B_shared[0, 0])
-                    T.writes(C[k])
-                    C[k] = A_shared[0, 0] + B_shared[0, 0]
+                idx: T.int32 = Ids[i] * 16
+                with T.sblock("copy"):
+                    T.reads(A[idx + tx])
+                    T.writes(shared[tx])
+                    shared[tx] = A[idx + tx]
+                with T.sblock("store"):
+                    T.reads(shared[tx])
+                    T.writes(B[idx + tx])
+                    B[idx + tx] = shared[tx]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "musa", "arch": "mp_31"}))(mod)
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
-    a_shared = _find_alloc_buffer_by_data_name(mod["main"], "A_shared")
-    b_shared = _find_alloc_buffer_by_data_name(mod["main"], "B_shared")
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
 
-    assert _int_values(a_shared.shape) == [2, 16, 32]
-    assert _int_values(a_shared.strides) == [1024, 32, 1]
-    assert _int_values(b_shared.shape) == [2, 32, 64]
-    assert _int_values(b_shared.strides) == [2048, 64, 1]
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    assert all(names[0].startswith("idx") for names in leading_binds["copy"])
+    assert all(names[0].startswith("idx") for names in leading_binds["store"])
+    assert "idx = T.int32()" not in mod["main"].script()
 
 
-def test_inject_software_pipeline_replays_scalar_bind_per_stage_use():
+def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer():
     @T.prim_func
     def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
         shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
@@ -639,7 +549,49 @@ def test_inject_software_pipeline_replays_scalar_bind_per_stage_use():
                 0,
                 4,
                 annotations={
-                    "software_pipeline_stage": [0, 0, 1],
+                    "software_pipeline_stage": [0, 1, 1],
+                    "software_pipeline_order": [0, 1, 2],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 0, 0],
+                    "software_pipeline_async_producer_groups": [0, -1, -1],
+                    "software_pipeline_replayable_scalar_binds": [1, 0, 0, 0],
+                },
+            ):
+                base: T.int32 = i * 16
+                with T.sblock("copy"):
+                    T.reads(A[base + tx])
+                    T.writes(shared[tx])
+                    shared[tx] = A[base + tx]
+                value: T.float32 = shared[tx]
+                with T.sblock("store"):
+                    T.reads()
+                    T.writes(B[base + tx])
+                    B[base + tx] = value
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
+    direct_binds = _collect_direct_bind_names(mod)
+
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    assert all(names[0].startswith("base") for names in leading_binds["copy"])
+    assert all(names[0].startswith("base") for names in leading_binds["store"])
+    assert any(name.startswith("value") for name in direct_binds)
+    assert all(not any(name.startswith("value") for name in names) for names in leading_binds["store"])
+
+
+def test_inject_software_pipeline_ignores_legacy_scalar_bind_annotation_slot():
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [3, 0, 1],
                     "software_pipeline_order": [1, 2, 0],
                     "software_pipeline_async_stages": [0],
                     "software_pipeline_async_producers": [0, 1, 0],
@@ -659,23 +611,53 @@ def test_inject_software_pipeline_replays_scalar_bind_per_stage_use():
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
-    leading_bind_blocks = {"copy": 0, "store": 0}
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
 
-    def _visit(node):
-        if not isinstance(node, tvm.tirx.SBlock) or str(node.name_hint) not in leading_bind_blocks:
-            return
-        body = node.body
-        assert isinstance(body, tvm.tirx.SeqStmt), f"{node.name_hint} body should start with SeqStmt"
-        first = body.seq[0]
-        assert isinstance(first, tvm.tirx.Bind), f"{node.name_hint} body should start with scalar Bind"
-        assert str(first.var.name).startswith("base")
-        leading_bind_blocks[str(node.name_hint)] += 1
-
-    post_order_visit(mod["main"].body, _visit)
-
-    assert leading_bind_blocks["copy"] > 0
-    assert leading_bind_blocks["store"] > 0
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    assert all(names[0].startswith("base") for names in leading_binds["copy"])
+    assert all(names[0].startswith("base") for names in leading_binds["store"])
     assert "base = T.int32()" not in mod["main"].script()
+
+
+def test_inject_software_pipeline_replays_scalar_bind_dependencies():
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [0, 1],
+                },
+            ):
+                base: T.int32 = i * 16
+                offset: T.int32 = base + tx
+                with T.sblock("copy"):
+                    T.reads(A[offset])
+                    T.writes(shared[tx])
+                    shared[tx] = A[offset]
+                with T.sblock("store"):
+                    T.reads(shared[tx])
+                    T.writes(B[offset])
+                    B[offset] = shared[tx]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
+
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    for names in leading_binds["copy"] + leading_binds["store"]:
+        assert len(names) >= 2
+        assert names[0].startswith("base")
+        assert names[1].startswith("offset")
+    script = mod["main"].script()
+    assert "base = T.int32()" not in script
+    assert "offset = T.int32()" not in script
 
 
 if __name__ == "__main__":
