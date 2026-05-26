@@ -2369,6 +2369,11 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << this->PrintExpr(op->args[0]);
     }
     this->stream << ");\n";
+  } else if (op->op.same_as(tl::named_barrier_arrive())) {
+    LOG(FATAL) << "T.named_barrier_arrive is not supported on MUSA: "
+                  "CUDA named barriers use bar.arrive/bar.sync semantics, "
+                  "while MUSA currently only supports full CTA sync or "
+                  "allocated async barriers via T.alloc_barrier/T.mbarrier_*.";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
