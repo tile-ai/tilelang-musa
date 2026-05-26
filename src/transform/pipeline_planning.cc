@@ -1136,7 +1136,12 @@ private:
   bool IsReplayableScalarBindStmt(
       const Stmt &stmt, const BufferSet &pipeline_write_buffers,
       const AsyncDependencyChainBuilder &chain_builder) const {
-    if (stmt.as<BindNode>() == nullptr) {
+    const auto *bind = stmt.as<BindNode>();
+    if (bind == nullptr) {
+      return false;
+    }
+    if (bind->var->type_annotation.as<PointerTypeNode>() ||
+        bind->value.dtype().is_handle()) {
       return false;
     }
     auto [reads, _] = CollectStmtAccessRegions(stmt, chain_builder);
@@ -1358,9 +1363,24 @@ private:
       }
       SeqStmt pipeline_body_seq =
           PipelineBodySeqFinder::FindOrFatal(pipeline_body_root);
+      AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
+      chain_builder(pipeline_body_root);
+      ScheduledStmtAnalysis analysis =
+          AnalyzeScheduledStmts(pipeline_body_seq->seq, chain_builder);
+      Array<Integer> scheduled_order_array =
+          FilterAnnotationsForScheduledStmts(order_array, analysis);
+      Array<Integer> scheduled_stage_array =
+          FilterAnnotationsForScheduledStmts(stage_array, analysis);
       MaybeAnnotateLegacyAsyncPipelineLoop(pipeline_body_root,
-                                           pipeline_body_seq->seq, order_array,
-                                           stage_array, &annotations);
+                                           analysis.scheduled_stmts,
+                                           scheduled_order_array,
+                                           scheduled_stage_array, &annotations);
+      annotations.Set(s_tir::attr::software_pipeline_stage,
+                      scheduled_stage_array);
+      annotations.Set(s_tir::attr::software_pipeline_order,
+                      scheduled_order_array);
+      annotations.Set(kPipelineReplayableScalarBinds,
+                      analysis.replayable_bind_mask);
       auto for_node = tvm::ffi::GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;

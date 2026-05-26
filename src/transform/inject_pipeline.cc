@@ -67,7 +67,12 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
 
 bool IsReplayableScalarBindBlock(const SBlock &block,
                                  const BufferSet &pipeline_write_buffers) {
-  if (block->body.as<BindNode>() == nullptr) {
+  const auto *bind = block->body.as<BindNode>();
+  if (bind == nullptr) {
+    return false;
+  }
+  if (bind->var->type_annotation.as<PointerTypeNode>() ||
+      bind->value.dtype().is_handle()) {
     return false;
   }
   for (const BufferRegion &read : block->reads) {

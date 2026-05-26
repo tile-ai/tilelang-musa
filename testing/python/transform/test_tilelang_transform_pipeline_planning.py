@@ -267,6 +267,28 @@ def test_pipeline_planning_accepts_explicit_let_free_annotations():
     assert replayable_binds == [1, 0, 0]
 
 
+def test_pipeline_planning_keeps_pointer_bind_out_of_replayable_mask():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        C: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            A_shared = T.alloc_shared((16,), T.float16)
+            for i in T.Pipelined(4, num_stages=2):
+                ptr = T.bind(A.data, type_annotation=A.data)
+                B = T.Buffer((64,), T.float16, data=ptr)
+                T.copy(B[i * 16], A_shared)
+                T.copy(A_shared, C[i * 16])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    replayable_binds = [int(v) for v in annos[0]["software_pipeline_replayable_scalar_binds"]]
+
+    assert replayable_binds[0] == 0
+
+
 def test_pipeline_planning_stages_bind_with_dependent_copy():
     @T.prim_func
     def before(
