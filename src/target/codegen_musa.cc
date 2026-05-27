@@ -42,13 +42,14 @@ bool UseMusaNative16BitVector(DataType t) {
 
 bool UseMusaNativeVector(DataType t) {
   return UseMusaNative16BitVector(t) ||
-         (t.is_float() && t.bits() == 32 && t.lanes() == 2);
+         (t.is_float() && t.bits() == 32 &&
+          (t.lanes() == 2 || t.lanes() == 4));
 }
 
 std::string GetMusaNativeVectorType(DataType t) {
   ICHECK(UseMusaNativeVector(t));
   if (t.is_float() && t.bits() == 32) {
-    return "tl_f2";
+    return "tl_f" + std::to_string(t.lanes());
   }
   if (t.is_float16()) {
     return "tl_h" + std::to_string(t.lanes());
@@ -427,6 +428,7 @@ std::string CodeGenTileLangMUSA::Finish() {
 
   decl_stream << "#include <tl_templates/musa/common.h>\n";
   decl_stream << "#include <tl_templates/musa/cvt.h>\n";
+  decl_stream << "#include <tl_templates/musa/fop.h>\n";
   decl_stream << "#include <tl_templates/musa/accelerated_ops.h>\n";
   decl_stream << "#include <tl_templates/musa/intrin.h>\n";
 
@@ -832,22 +834,23 @@ void CodeGenTileLangMUSA::PrintVecConstructor(DataType t,
 void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
-  if (UseMusaNativeVector(t) && t.lanes() == 2) {
+  int lanes = t.lanes();
+  if (UseMusaNativeVector(t) && (lanes == 2 || lanes == 4)) {
     std::string tl_func;
     if (op == "+") {
-      tl_func = "add2";
+      tl_func = "add";
     } else if (op == "-") {
-      tl_func = "sub2";
+      tl_func = "sub";
     } else if (op == "*") {
-      tl_func = "mul2";
+      tl_func = "mul";
     } else if (op == "min") {
-      tl_func = "min2";
+      tl_func = "min";
     } else if (op == "max") {
-      tl_func = "max2";
+      tl_func = "max";
     }
 
     if (!tl_func.empty()) {
-      os << "tl::" << tl_func << "(" << PrintExpr(lhs) << ", "
+      os << "tl::" << tl_func << lanes << "(" << PrintExpr(lhs) << ", "
          << PrintExpr(rhs) << ")";
       return;
     }
@@ -1665,7 +1668,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
              op->op.same_as(tl::abs2())) {
-    ICHECK(UseMusaNativeVector(op->dtype))
+    ICHECK(op->dtype.lanes() == 2 && UseMusaNativeVector(op->dtype))
         << "MUSA packed x2 intrinsics require native x2 dtype, but got "
         << op->dtype;
 
