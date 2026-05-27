@@ -257,12 +257,11 @@ TL_DEVICE tl_bf2 mul2(tl_bf2 a, tl_bf2 b) {
 }
 
 TL_DEVICE tl_bf2 fma2(tl_bf2 a, tl_bf2 b, tl_bf2 c) {
-  return make_tl_bf2(bfloat16_t(fmaf(float(tl_bf_elem_to_bfloat16(a[0])),
-                                     float(tl_bf_elem_to_bfloat16(b[0])),
-                                     float(tl_bf_elem_to_bfloat16(c[0])))),
-                     bfloat16_t(fmaf(float(tl_bf_elem_to_bfloat16(a[1])),
-                                     float(tl_bf_elem_to_bfloat16(b[1])),
-                                     float(tl_bf_elem_to_bfloat16(c[1])))));
+  __mt_bfloat162 out =
+      __hfma2(*reinterpret_cast<const __mt_bfloat162 *>(&a),
+              *reinterpret_cast<const __mt_bfloat162 *>(&b),
+              *reinterpret_cast<const __mt_bfloat162 *>(&c));
+  return *reinterpret_cast<const tl_bf2 *>(&out);
 }
 
 TL_DEVICE tl_bf2 max2(tl_bf2 a, tl_bf2 b) {
@@ -327,19 +326,17 @@ TL_DEVICE tl_bf4 mul4(tl_bf4 a, tl_bf4 b) {
 }
 
 TL_DEVICE tl_bf4 fma4(tl_bf4 a, tl_bf4 b, tl_bf4 c) {
-  return make_tl_bf4(
-      bfloat16_t(fmaf(float(tl_bf_elem_to_bfloat16(a[0])),
-                      float(tl_bf_elem_to_bfloat16(b[0])),
-                      float(tl_bf_elem_to_bfloat16(c[0])))),
-      bfloat16_t(fmaf(float(tl_bf_elem_to_bfloat16(a[1])),
-                      float(tl_bf_elem_to_bfloat16(b[1])),
-                      float(tl_bf_elem_to_bfloat16(c[1])))),
-      bfloat16_t(fmaf(float(tl_bf_elem_to_bfloat16(a[2])),
-                      float(tl_bf_elem_to_bfloat16(b[2])),
-                      float(tl_bf_elem_to_bfloat16(c[2])))),
-      bfloat16_t(fmaf(float(tl_bf_elem_to_bfloat16(a[3])),
-                      float(tl_bf_elem_to_bfloat16(b[3])),
-                      float(tl_bf_elem_to_bfloat16(c[3])))));
+  __mt_bfloat162 lo =
+      __hfma2(*reinterpret_cast<const __mt_bfloat162 *>(&a),
+              *reinterpret_cast<const __mt_bfloat162 *>(&b),
+              *reinterpret_cast<const __mt_bfloat162 *>(&c));
+  __mt_bfloat162 hi =
+      __hfma2(*(reinterpret_cast<const __mt_bfloat162 *>(&a) + 1),
+              *(reinterpret_cast<const __mt_bfloat162 *>(&b) + 1),
+              *(reinterpret_cast<const __mt_bfloat162 *>(&c) + 1));
+  tl_bf2 lo_out = *reinterpret_cast<const tl_bf2 *>(&lo);
+  tl_bf2 hi_out = *reinterpret_cast<const tl_bf2 *>(&hi);
+  return make_tl_bf4(lo_out[0], lo_out[1], hi_out[0], hi_out[1]);
 }
 
 TL_DEVICE tl_bf4 max4(tl_bf4 a, tl_bf4 b) {

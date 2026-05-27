@@ -835,8 +835,32 @@ void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
   int lanes = t.lanes();
+  bool use_fma = false;
+  PrimExpr fma_a, fma_b, fma_c;
+
+  if (op == "+") {
+    auto try_fuse_mul_add = [&](const PrimExpr &maybe_mul,
+                                const PrimExpr &addend) -> bool {
+      const MulNode *mul = maybe_mul.as<MulNode>();
+      if (mul == nullptr || mul->dtype != t || mul->a.dtype() != t ||
+          mul->b.dtype() != t || addend.dtype() != t) {
+        return false;
+      }
+      use_fma = true;
+      fma_a = mul->a;
+      fma_b = mul->b;
+      fma_c = addend;
+      return true;
+    };
+    if (!try_fuse_mul_add(lhs, rhs)) {
+      try_fuse_mul_add(rhs, lhs);
+    }
+  }
+
   auto get_tl_func = [&](int width) -> std::string {
-    if (op == "+") {
+    if (use_fma) {
+      return "fma" + std::to_string(width);
+    } else if (op == "+") {
       return "add" + std::to_string(width);
     } else if (op == "-") {
       return "sub" + std::to_string(width);
@@ -854,8 +878,14 @@ void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
     std::string tl_func = get_tl_func(lanes);
 
     if (!tl_func.empty()) {
-      os << "tl::" << tl_func << "(" << PrintExpr(lhs) << ", "
-         << PrintExpr(rhs) << ")";
+      os << "tl::" << tl_func << "(";
+      if (use_fma) {
+        os << PrintExpr(fma_a) << ", " << PrintExpr(fma_b) << ", "
+           << PrintExpr(fma_c);
+      } else {
+        os << PrintExpr(lhs) << ", " << PrintExpr(rhs);
+      }
+      os << ")";
       return;
     }
   }
@@ -885,14 +915,29 @@ void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
       stream << ' ' << sret << ";\n";
       int ssa_scope = BeginScope();
       {
-        std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.dtype());
-        std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
+        std::vector<std::string> packed_vecs;
+        if (use_fma) {
+          packed_vecs = {
+              SSAGetID(PrintExpr(fma_a), fma_a.dtype()),
+              SSAGetID(PrintExpr(fma_b), fma_b.dtype()),
+              SSAGetID(PrintExpr(fma_c), fma_c.dtype()),
+          };
+        } else {
+          packed_vecs = {
+              SSAGetID(PrintExpr(lhs), lhs.dtype()),
+              SSAGetID(PrintExpr(rhs), rhs.dtype()),
+          };
+        }
         for (int i = 0; i < lanes / chunk_width; ++i) {
           this->PrintIndent();
           stream << "((" << chunk_type << "*)(&" << sret << "))[" << i
                  << "] = tl::" << tl_func << "(((" << chunk_type << "*)(&"
-                 << vlhs << "))[" << i << "], ((" << chunk_type << "*)(&"
-                 << vrhs << "))[" << i << "]);\n";
+                 << packed_vecs[0] << "))[" << i << "]";
+          for (size_t arg_idx = 1; arg_idx < packed_vecs.size(); ++arg_idx) {
+            stream << ", ((" << chunk_type << "*)(&" << packed_vecs[arg_idx]
+                   << "))[" << i << "]";
+          }
+          stream << ");\n";
         }
       }
       EndScope(ssa_scope);
