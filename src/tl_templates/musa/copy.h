@@ -167,6 +167,10 @@ TL_DEVICE uint4 load_global_128(const void *ptr) {
   return *reinterpret_cast<const uint4 *>(ptr);
 }
 
+TL_DEVICE ulonglong3 load_global_192(const void *ptr) {
+  return *reinterpret_cast<const ulonglong3 *>(ptr);
+}
+
 TL_DEVICE longlong4 load_global_256(const longlong4 *ptr) { return *ptr; }
 
 TL_DEVICE ulonglong4 load_global_256(const ulonglong4 *ptr) { return *ptr; }
@@ -212,6 +216,10 @@ TL_DEVICE void store_global_64(void *ptr, uint2 value) {
 
 TL_DEVICE void store_global_128(void *ptr, uint4 value) {
   *reinterpret_cast<uint4 *>(ptr) = value;
+}
+
+TL_DEVICE void store_global_192(void *ptr, const ulonglong3 &value) {
+  *reinterpret_cast<ulonglong3 *>(ptr) = value;
 }
 
 TL_DEVICE void store_global_256(void *ptr, const longlong4 &value) {

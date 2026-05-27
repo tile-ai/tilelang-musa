@@ -835,23 +835,68 @@ void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
   int lanes = t.lanes();
-  if (UseMusaNativeVector(t) && (lanes == 2 || lanes == 4)) {
-    std::string tl_func;
+  auto get_tl_func = [&](int width) -> std::string {
     if (op == "+") {
-      tl_func = "add";
+      return "add" + std::to_string(width);
     } else if (op == "-") {
-      tl_func = "sub";
+      return "sub" + std::to_string(width);
     } else if (op == "*") {
-      tl_func = "mul";
+      return "mul" + std::to_string(width);
     } else if (op == "min") {
-      tl_func = "min";
+      return "min" + std::to_string(width);
     } else if (op == "max") {
-      tl_func = "max";
+      return "max" + std::to_string(width);
     }
+    return "";
+  };
+
+  if (UseMusaNativeVector(t) && (lanes == 2 || lanes == 4)) {
+    std::string tl_func = get_tl_func(lanes);
 
     if (!tl_func.empty()) {
-      os << "tl::" << tl_func << lanes << "(" << PrintExpr(lhs) << ", "
+      os << "tl::" << tl_func << "(" << PrintExpr(lhs) << ", "
          << PrintExpr(rhs) << ")";
+      return;
+    }
+  }
+
+  int chunk_width = 0;
+  std::string chunk_type;
+  if (t.is_float() && t.bits() == 32) {
+    if (lanes == 6) {
+      chunk_width = 2;
+      chunk_type = "tl_f2";
+    } else if (lanes == 8) {
+      chunk_width = 4;
+      chunk_type = "tl_f4";
+    }
+  } else if ((t.is_float16() || t.is_bfloat16()) &&
+             (lanes == 8 || lanes == 12 || lanes == 16)) {
+    chunk_width = 4;
+    chunk_type = t.is_float16() ? "tl_h4" : "tl_bf4";
+  }
+
+  if (chunk_width != 0) {
+    std::string tl_func = get_tl_func(chunk_width);
+    if (!tl_func.empty()) {
+      std::string sret = name_supply_->FreshName("_");
+      this->PrintIndent();
+      this->PrintType(t, stream);
+      stream << ' ' << sret << ";\n";
+      int ssa_scope = BeginScope();
+      {
+        std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.dtype());
+        std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
+        for (int i = 0; i < lanes / chunk_width; ++i) {
+          this->PrintIndent();
+          stream << "((" << chunk_type << "*)(&" << sret << "))[" << i
+                 << "] = tl::" << tl_func << "(((" << chunk_type << "*)(&"
+                 << vlhs << "))[" << i << "], ((" << chunk_type << "*)(&"
+                 << vrhs << "))[" << i << "]);\n";
+        }
+      }
+      EndScope(ssa_scope);
+      os << sret;
       return;
     }
   }
@@ -1545,11 +1590,15 @@ std::string CodeGenTileLangMUSA::GetVecLoad(DataType t,
   if (scope != "global" || t.bits() * t.lanes() <= 128) {
     return this->CodeGenC::GetVecLoad(t, buffer, base);
   }
-  ICHECK_EQ(t.bits() * t.lanes(), 256)
+  ICHECK(t.bits() * t.lanes() == 192 || t.bits() * t.lanes() == 256)
       << "Unsupported vector load size: " << t.bits() * t.lanes();
   auto buffer_ref = this->GetBufferRef(t, buffer, base);
   std::ostringstream os;
-  os << "tl::load_global_256(&(" << buffer_ref << "))";
+  if (t.bits() * t.lanes() == 192) {
+    os << "tl::load_global_192(&(" << buffer_ref << "))";
+  } else {
+    os << "tl::load_global_256(&(" << buffer_ref << "))";
+  }
   return os.str();
 }
 
@@ -1569,12 +1618,17 @@ void CodeGenTileLangMUSA::PrintVecStore(const BufferNode *buffer, DataType t,
     this->CodeGenC::PrintVecStore(buffer, t, base, value);
     return;
   }
-  ICHECK_EQ(t.bits() * t.lanes(), 256)
+  ICHECK(t.bits() * t.lanes() == 192 || t.bits() * t.lanes() == 256)
       << "Unsupported vector load size: " << t.bits() * t.lanes();
   auto buffer_ref = this->GetBufferRef(t, buffer, base);
   this->PrintIndent();
-  this->stream << "tl::store_global_256(&(" << buffer_ref << "), " << value
-               << ");\n";
+  if (t.bits() * t.lanes() == 192) {
+    this->stream << "tl::store_global_192(&(" << buffer_ref << "), " << value
+                 << ");\n";
+  } else {
+    this->stream << "tl::store_global_256(&(" << buffer_ref << "), " << value
+                 << ");\n";
+  }
 }
 
 /**
