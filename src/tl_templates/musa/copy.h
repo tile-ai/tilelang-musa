@@ -22,11 +22,7 @@ TL_DEVICE void cp_async_commit() {
 
 template <int N> TL_DEVICE void cp_async_wait() {
 #if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
-  if constexpr (N == 0) {
-    __musa_memcpy_g2s_wait();
-  } else {
-    __musa_memcpy_g2s_wait_group(N);
-  }
+  __musa_memcpy_g2s_wait_group(N);
 #else
   __musa_memcpy_g2s_wait();
 #endif
