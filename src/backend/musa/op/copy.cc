@@ -674,7 +674,9 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
   auto loop_layout = par_op->GetLoopLayout();
   Stmt lowered_loop =
       LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var, analyzer,
-                        T.layout_map, par_op->GetPredicate(T.thread_var));
+                        T.layout_map, par_op->GetPredicate(T.thread_var),
+                        /*parallel_loop=*/true, /*should_vectorize=*/true,
+                        par_op->LoopLayoutRequiresPaddingGuard());
 
   auto inject_result =
       InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
@@ -767,7 +769,10 @@ Stmt Copy::LowerNormal(const CopyNode &op, const LowerArgs &T,
       auto loop_layout = par_op->GetLoopLayout();
       lowered_body = LowerParallelLoop(par_op->GetRoot(), loop_layout,
                                        T.thread_var, analyzer, T.layout_map,
-                                       par_op->GetPredicate(T.thread_var));
+                                       par_op->GetPredicate(T.thread_var),
+                                       /*parallel_loop=*/true,
+                                       /*should_vectorize=*/true,
+                                       par_op->LoopLayoutRequiresPaddingGuard());
     }
 
     Stmt body = lowered_body;
