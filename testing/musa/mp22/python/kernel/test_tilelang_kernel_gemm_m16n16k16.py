@@ -1,3 +1,5 @@
+import re
+
 import pytest
 import tilelang
 from tilelang import tvm as tvm
@@ -5,21 +7,29 @@ import tilelang.testing
 
 
 @pytest.fixture(autouse=True)
-def disable_tilelang_cache():
+def force_mp22_m16_mma(monkeypatch):
     cache_enabled = tilelang.is_cache_enabled()
     tilelang.disable_cache()
+    monkeypatch.setenv("TILELANG_MUSA_MP22_FORCE_M16_MMA", "1")
     yield
     if cache_enabled:
         tilelang.enable_cache()
 
 
-THREADS = [128, 256, 512, 1024]
+THREADS = [32, 64, 128, 256, 512, 1024]
 TRANSPOSE_CASES = [
     (False, False, "nn"),
     (False, True, "nt"),
     (True, False, "tn"),
     (True, True, "tt"),
 ]
+
+
+def _assert_uses_m16_gemm(kernel_source, op_name, layout_tag):
+    if not re.search(rf"tl::{op_name}<[^;]*,\s*16,\s*16,\s*16>", kernel_source):
+        raise AssertionError(
+            f"{layout_tag} did not lower to MP22 m16n16k16 {op_name}. Expected trailing inst shape template args: 16, 16, 16."
+        )
 
 
 def matmul(
@@ -101,7 +111,9 @@ def run_gemm(
         num_threads,
     )
     kernel = tilelang.compile(program, out_idx=[2])
-    print(kernel.get_kernel_source())
+    kernel_source = kernel.get_kernel_source()
+    _assert_uses_m16_gemm(kernel_source, "gemm_ss", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
+    print(kernel_source)
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -132,31 +144,6 @@ def run_gemm(
     TRANSPOSE_CASES,
     ids=[case[2] for case in TRANSPOSE_CASES],
 )
-def test_gemm_i8i8i32(trans_A, trans_B, layout_tag, num_threads):
-    run_gemm(
-        512,
-        1024,
-        768,
-        trans_A,
-        trans_B,
-        "int8",
-        "int8",
-        "int32",
-        128,
-        128,
-        32,
-        0,
-        num_threads,
-    )
-
-
-@tilelang.testing.requires_musa_compute_version_eq(2, 2)
-@pytest.mark.parametrize("num_threads", THREADS)
-@pytest.mark.parametrize(
-    "trans_A, trans_B, layout_tag",
-    TRANSPOSE_CASES,
-    ids=[case[2] for case in TRANSPOSE_CASES],
-)
 def test_gemm_f16f16f32(trans_A, trans_B, layout_tag, num_threads):
     run_gemm(
         512,
@@ -166,31 +153,6 @@ def test_gemm_f16f16f32(trans_A, trans_B, layout_tag, num_threads):
         trans_B,
         "float16",
         "float16",
-        "float32",
-        128,
-        128,
-        32,
-        0,
-        num_threads,
-    )
-
-
-@tilelang.testing.requires_musa_compute_version_eq(2, 2)
-@pytest.mark.parametrize("num_threads", THREADS)
-@pytest.mark.parametrize(
-    "trans_A, trans_B, layout_tag",
-    TRANSPOSE_CASES,
-    ids=[case[2] for case in TRANSPOSE_CASES],
-)
-def test_gemm_f32f32f32(trans_A, trans_B, layout_tag, num_threads):
-    run_gemm(
-        512,
-        1024,
-        768,
-        trans_A,
-        trans_B,
-        "float32",
-        "float32",
         "float32",
         128,
         128,
@@ -281,6 +243,9 @@ def run_gemm_sr(
     )
 
     kernel = tilelang.compile(program, out_idx=[2], verbose=True)
+    kernel_source = kernel.get_kernel_source()
+    _assert_uses_m16_gemm(kernel_source, "gemm_sr", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
+    print(kernel_source)
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -306,31 +271,6 @@ def run_gemm_sr(
     TRANSPOSE_CASES,
     ids=[case[2] for case in TRANSPOSE_CASES],
 )
-def test_gemm_i8i8i32_sr(trans_A, trans_B, layout_tag, num_threads):
-    run_gemm_sr(
-        512,
-        1024,
-        768,
-        trans_A,
-        trans_B,
-        "int8",
-        "int8",
-        "int32",
-        128,
-        128,
-        32,
-        0,
-        num_threads,
-    )
-
-
-@tilelang.testing.requires_musa_compute_version_eq(2, 2)
-@pytest.mark.parametrize("num_threads", THREADS)
-@pytest.mark.parametrize(
-    "trans_A, trans_B, layout_tag",
-    TRANSPOSE_CASES,
-    ids=[case[2] for case in TRANSPOSE_CASES],
-)
 def test_gemm_f16f16f32_sr(trans_A, trans_B, layout_tag, num_threads):
     run_gemm_sr(
         512,
@@ -340,31 +280,6 @@ def test_gemm_f16f16f32_sr(trans_A, trans_B, layout_tag, num_threads):
         trans_B,
         "float16",
         "float16",
-        "float32",
-        128,
-        128,
-        32,
-        0,
-        num_threads,
-    )
-
-
-@tilelang.testing.requires_musa_compute_version_eq(2, 2)
-@pytest.mark.parametrize("num_threads", THREADS)
-@pytest.mark.parametrize(
-    "trans_A, trans_B, layout_tag",
-    TRANSPOSE_CASES,
-    ids=[case[2] for case in TRANSPOSE_CASES],
-)
-def test_gemm_f32f32f32_sr(trans_A, trans_B, layout_tag, num_threads):
-    run_gemm_sr(
-        512,
-        1024,
-        768,
-        trans_A,
-        trans_B,
-        "float32",
-        "float32",
         "float32",
         128,
         128,
@@ -454,7 +369,9 @@ def run_gemm_rr(
     )
 
     kernel = tilelang.compile(program, out_idx=[2])
-    print(kernel.get_kernel_source())
+    kernel_source = kernel.get_kernel_source()
+    _assert_uses_m16_gemm(kernel_source, "gemm_rr", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
+    print(kernel_source)
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -478,31 +395,6 @@ def run_gemm_rr(
     TRANSPOSE_CASES,
     ids=[case[2] for case in TRANSPOSE_CASES],
 )
-def test_gemm_i8i8i32_rr(trans_A, trans_B, layout_tag, num_threads):
-    run_gemm_rr(
-        512,
-        1024,
-        768,
-        trans_A,
-        trans_B,
-        "int8",
-        "int8",
-        "int",
-        128,
-        128,
-        32,
-        0,
-        num_threads,
-    )
-
-
-@tilelang.testing.requires_musa_compute_version_eq(2, 2)
-@pytest.mark.parametrize("num_threads", THREADS)
-@pytest.mark.parametrize(
-    "trans_A, trans_B, layout_tag",
-    TRANSPOSE_CASES,
-    ids=[case[2] for case in TRANSPOSE_CASES],
-)
 def test_gemm_f16f16f32_rr(trans_A, trans_B, layout_tag, num_threads):
     run_gemm_rr(
         512,
@@ -512,31 +404,6 @@ def test_gemm_f16f16f32_rr(trans_A, trans_B, layout_tag, num_threads):
         trans_B,
         "float16",
         "float16",
-        "float32",
-        128,
-        128,
-        32,
-        0,
-        num_threads,
-    )
-
-
-@tilelang.testing.requires_musa_compute_version_eq(2, 2)
-@pytest.mark.parametrize("num_threads", THREADS)
-@pytest.mark.parametrize(
-    "trans_A, trans_B, layout_tag",
-    TRANSPOSE_CASES,
-    ids=[case[2] for case in TRANSPOSE_CASES],
-)
-def test_gemm_f32f32f32f32_rr(trans_A, trans_B, layout_tag, num_threads):
-    run_gemm_rr(
-        512,
-        1024,
-        768,
-        trans_A,
-        trans_B,
-        "float32",
-        "float32",
         "float32",
         128,
         128,
@@ -626,7 +493,9 @@ def run_gemm_rs(
     )
 
     kernel = tilelang.compile(program, out_idx=[2])
-    print(kernel.get_kernel_source())
+    kernel_source = kernel.get_kernel_source()
+    _assert_uses_m16_gemm(kernel_source, "gemm_rs", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
+    print(kernel_source)
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -650,31 +519,6 @@ def run_gemm_rs(
     TRANSPOSE_CASES,
     ids=[case[2] for case in TRANSPOSE_CASES],
 )
-def test_gemm_i8i8i32_rs(trans_A, trans_B, layout_tag, num_threads):
-    run_gemm_rs(
-        512,
-        1024,
-        768,
-        trans_A,
-        trans_B,
-        "int8",
-        "int8",
-        "int32",
-        128,
-        128,
-        32,
-        0,
-        num_threads,
-    )
-
-
-@tilelang.testing.requires_musa_compute_version_eq(2, 2)
-@pytest.mark.parametrize("num_threads", THREADS)
-@pytest.mark.parametrize(
-    "trans_A, trans_B, layout_tag",
-    TRANSPOSE_CASES,
-    ids=[case[2] for case in TRANSPOSE_CASES],
-)
 def test_gemm_f16f16f32_rs(trans_A, trans_B, layout_tag, num_threads):
     run_gemm_rs(
         512,
@@ -684,31 +528,6 @@ def test_gemm_f16f16f32_rs(trans_A, trans_B, layout_tag, num_threads):
         trans_B,
         "float16",
         "float16",
-        "float32",
-        128,
-        128,
-        32,
-        0,
-        num_threads,
-    )
-
-
-@tilelang.testing.requires_musa_compute_version_eq(2, 2)
-@pytest.mark.parametrize("num_threads", THREADS)
-@pytest.mark.parametrize(
-    "trans_A, trans_B, layout_tag",
-    TRANSPOSE_CASES,
-    ids=[case[2] for case in TRANSPOSE_CASES],
-)
-def test_gemm_f32f32f32_rs(trans_A, trans_B, layout_tag, num_threads):
-    run_gemm_rs(
-        512,
-        1024,
-        768,
-        trans_A,
-        trans_B,
-        "float32",
-        "float32",
         "float32",
         128,
         128,

@@ -1,7 +1,8 @@
 #pragma once
 
+#include <stdio.h>
+
 #include <mute/algorithm/clear.hpp>
-#include <mute/arch/mma_mp22.hpp>
 #include <mute/atom/mma_atom.hpp>
 #include <mute/underscore.hpp>
 
@@ -10,19 +11,22 @@
 
 namespace mute::tl_mma {
 
-template <typename A_type, typename B_type, typename C_type, int num_warp_m,
-          int num_warp_n, int N, bool trans_A, bool trans_B>
+template <typename A_type, typename B_type, typename C_type, int M, int N,
+          int K, int num_warp_m, int num_warp_n, int inst_m, int inst_n,
+          int inst_k, bool trans_A, bool trans_B>
 struct DispatchInstruction;
 
 using _X = Underscore;
 
 } // namespace mute::tl_mma
 
-#define TL_DISPATCH_MMA(A_type, B_type, C_type, trans_A, trans_B, MMA_instr)   \
+#define TL_DISPATCH_MMA(A_type, B_type, C_type, inst_m, inst_n, inst_k,        \
+                        trans_A, trans_B, MMA_instr)                           \
   namespace mute::tl_mma {                                                     \
-  template <int num_warp_m, int num_warp_n, int N>                             \
-  struct DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n,   \
-                             N, trans_A, trans_B> {                            \
+  template <int M, int N, int K, int num_warp_m, int num_warp_n>               \
+  struct DispatchInstruction<A_type, B_type, C_type, M, N, K, num_warp_m,      \
+                             num_warp_n, inst_m, inst_n, inst_k, trans_A,      \
+                             trans_B> {                                        \
     using MMA = MMA_Atom<MMA_instr>;                                           \
     using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 32, N)>, _X>;         \
   };                                                                           \
@@ -30,46 +34,70 @@ using _X = Underscore;
 
 #ifdef __MUSA_ARCH_LIST__
 #if __MUSA_ARCH_LIST__ == 220
+#include "mp22_mma_ext.h"
 #include <mute/arch/mma_mp22.hpp>
-TL_DISPATCH_MMA(half_t, half_t, float, false, false,
+TL_DISPATCH_MMA(half_t, half_t, float, 32, 32, 16, false, false,
                 MP22_32x32x16_F32F16F16F32_TT)
-TL_DISPATCH_MMA(half_t, half_t, float, false, true,
+TL_DISPATCH_MMA(half_t, half_t, float, 32, 32, 16, false, true,
                 MP22_32x32x16_F32F16F16F32_TN)
-TL_DISPATCH_MMA(half_t, half_t, float, true, false,
+TL_DISPATCH_MMA(half_t, half_t, float, 32, 32, 16, true, false,
                 MP22_32x32x16_F32F16F16F32_NT)
-TL_DISPATCH_MMA(half_t, half_t, float, true, true,
+TL_DISPATCH_MMA(half_t, half_t, float, 32, 32, 16, true, true,
                 MP22_32x32x16_F32F16F16F32_NN)
 
-TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, false, false,
+TL_DISPATCH_MMA(half_t, half_t, float, 16, 16, 16, false, false,
+                TL_MP22_16x16x16_F32F16F16F32_TT)
+TL_DISPATCH_MMA(half_t, half_t, float, 16, 16, 16, false, true,
+                TL_MP22_16x16x16_F32F16F16F32_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, 16, 16, 16, true, false,
+                TL_MP22_16x16x16_F32F16F16F32_NT)
+TL_DISPATCH_MMA(half_t, half_t, float, 16, 16, 16, true, true,
+                TL_MP22_16x16x16_F32F16F16F32_NN)
+
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 32, 32, 16, false, false,
                 MP22_32x32x16_F32BF16BF16F32_TT)
-TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, false, true,
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 32, 32, 16, false, true,
                 MP22_32x32x16_F32BF16BF16F32_TN)
-TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, true, false,
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 32, 32, 16, true, false,
                 MP22_32x32x16_F32BF16BF16F32_NT)
-TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, true, true,
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 32, 32, 16, true, true,
                 MP22_32x32x16_F32BF16BF16F32_NN)
 
-TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, false, false,
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 16, 16, 16, false, false,
+                TL_MP22_16x16x16_F32BF16BF16F32_TT)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 16, 16, 16, false, true,
+                TL_MP22_16x16x16_F32BF16BF16F32_TN)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 16, 16, 16, true, false,
+                TL_MP22_16x16x16_F32BF16BF16F32_NT)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 16, 16, 16, true, true,
+                TL_MP22_16x16x16_F32BF16BF16F32_NN)
+
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, 32, 32, 8, false, false,
                 MP22_32x32x8_F32TF32TF32F32_TT)
-TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, false, true,
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, 32, 32, 8, false, true,
                 MP22_32x32x8_F32TF32TF32F32_TN)
-TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, true, false,
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, 32, 32, 8, true, false,
                 MP22_32x32x8_F32TF32TF32F32_NT)
-TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, true, true,
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, 32, 32, 8, true, true,
                 MP22_32x32x8_F32TF32TF32F32_NN)
 
-TL_DISPATCH_MMA(float, float, float, false, false,
+TL_DISPATCH_MMA(float, float, float, 32, 32, 8, false, false,
                 MP22_32x32x8_F32TF32TF32F32_TT)
-TL_DISPATCH_MMA(float, float, float, false, true,
+TL_DISPATCH_MMA(float, float, float, 32, 32, 8, false, true,
                 MP22_32x32x8_F32TF32TF32F32_TN)
-TL_DISPATCH_MMA(float, float, float, true, false,
+TL_DISPATCH_MMA(float, float, float, 32, 32, 8, true, false,
                 MP22_32x32x8_F32TF32TF32F32_NT)
-TL_DISPATCH_MMA(float, float, float, true, true, MP22_32x32x8_F32TF32TF32F32_NN)
+TL_DISPATCH_MMA(float, float, float, 32, 32, 8, true, true,
+                MP22_32x32x8_F32TF32TF32F32_NN)
 
-TL_DISPATCH_MMA(int8_t, int8_t, int, false, false, MP22_32x32x32_S32S8S8S32_TT)
-TL_DISPATCH_MMA(int8_t, int8_t, int, false, true, MP22_32x32x32_S32S8S8S32_TN)
-TL_DISPATCH_MMA(int8_t, int8_t, int, true, false, MP22_32x32x32_S32S8S8S32_NT)
-TL_DISPATCH_MMA(int8_t, int8_t, int, true, true, MP22_32x32x32_S32S8S8S32_NN)
+TL_DISPATCH_MMA(int8_t, int8_t, int, 32, 32, 32, false, false,
+                MP22_32x32x32_S32S8S8S32_TT)
+TL_DISPATCH_MMA(int8_t, int8_t, int, 32, 32, 32, false, true,
+                MP22_32x32x32_S32S8S8S32_TN)
+TL_DISPATCH_MMA(int8_t, int8_t, int, 32, 32, 32, true, false,
+                MP22_32x32x32_S32S8S8S32_NT)
+TL_DISPATCH_MMA(int8_t, int8_t, int, 32, 32, 32, true, true,
+                MP22_32x32x32_S32S8S8S32_NN)
 #endif
 #endif // __MUSA_ARCH_LIST__
 #undef TL_DISPATCH_MMA
@@ -215,7 +243,8 @@ struct OperandTraits<64, N, K, false, num_warp_n, leading_dim,
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
-          int offset_b, typename A_type_raw, typename B_type_raw,
+          int offset_b, int inst_m_override, int inst_n_override,
+          int inst_k_override, typename A_type_raw, typename B_type_raw,
           typename C_type_raw>
 class GemmTensorOp {
 public:
@@ -229,18 +258,48 @@ public:
                                 tfloat32_t, B_type_mute>::type;
   using C_type = C_type_raw;
 
+  static constexpr bool is_f16_mma = std::is_same<A_type_raw, half_t>::value &&
+                                     std::is_same<B_type_raw, half_t>::value &&
+                                     std::is_same<C_type_raw, float>::value;
+  static constexpr bool is_bf16_mma =
+      std::is_same<A_type_raw, bfloat16_t>::value &&
+      std::is_same<B_type_raw, bfloat16_t>::value &&
+      std::is_same<C_type_raw, float>::value;
+  static constexpr bool can_use_mp22_m16 =
+      (is_f16_mma || is_bf16_mma) && M % 16 == 0 && N % 16 == 0 && K % 16 == 0;
+  static constexpr bool use_mp22_m16 =
+      can_use_mp22_m16 &&
+      ((inst_m_override == 16 && inst_n_override == 16 &&
+        inst_k_override == 16) ||
+       (inst_m_override == 0 && (M % 32 != 0 || N % 32 != 0)));
+  static constexpr int inst_m =
+      inst_m_override != 0 ? inst_m_override : (use_mp22_m16 ? 16 : 32);
+  static constexpr int inst_n =
+      inst_n_override != 0 ? inst_n_override : (use_mp22_m16 ? 16 : 32);
+  static constexpr int inst_k =
+      inst_k_override != 0
+          ? inst_k_override
+          : (use_mp22_m16 ? 16
+                          : (sizeof_bits<A_type>::value == 8    ? 32
+                             : sizeof_bits<A_type>::value == 16 ? 16
+                                                                : 8));
+
   using InstructionSS =
-      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, num_warp_m,
-                          num_warp_n, N, trans_A, trans_B>;
+      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, M, N, K,
+                          num_warp_m, num_warp_n, inst_m, inst_n, inst_k,
+                          trans_A, trans_B>;
   using InstructionRS =
-      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, num_warp_m,
-                          num_warp_n, N, trans_A, trans_B>;
+      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, M, N, K,
+                          num_warp_m, num_warp_n, inst_m, inst_n, inst_k,
+                          trans_A, trans_B>;
   using InstructionSR =
-      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, num_warp_m,
-                          num_warp_n, N, trans_A, trans_B>;
+      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, M, N, K,
+                          num_warp_m, num_warp_n, inst_m, inst_n, inst_k,
+                          trans_A, trans_B>;
   using InstructionRR =
-      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, num_warp_m,
-                          num_warp_n, N, trans_A, trans_B>;
+      DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, M, N, K,
+                          num_warp_m, num_warp_n, inst_m, inst_n, inst_k,
+                          trans_A, trans_B>;
 
   using OperandATraits = OperandTraits<sizeof_bits<A_type>::value, M, K,
                                        !trans_A, num_warp_m, lda>;
@@ -305,6 +364,7 @@ public:
 
   static MUTE_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC) {
     const int tid = threadIdx.x;
+
     Tensor sA_all = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
                                 SmemLayoutA{});
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
@@ -447,45 +507,45 @@ namespace tl::tl_mma {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
-          int offset_b, typename A_type, typename B_type, typename C_type>
+          int offset_b, int inst_m = 0, int inst_n = 0, int inst_k = 0,
+          typename A_type, typename B_type, typename C_type>
 MUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA =
-      mute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a,
-                                 offset_b, A_type, B_type, C_type>;
+  using MMA = mute::tl_mma::GemmTensorOp<
+      M, N, K, num_warp_m, num_warp_n, trans_A, trans_B, clear_accum, lda, ldb,
+      offset_a, offset_b, inst_m, inst_n, inst_k, A_type, B_type, C_type>;
   MMA::body(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
-          int offset_b, typename A_type, typename B_type, typename C_type>
+          int offset_b, int inst_m = 0, int inst_n = 0, int inst_k = 0,
+          typename A_type, typename B_type, typename C_type>
 MUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA =
-      mute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a,
-                                 offset_b, A_type, B_type, C_type>;
+  using MMA = mute::tl_mma::GemmTensorOp<
+      M, N, K, num_warp_m, num_warp_n, trans_A, trans_B, clear_accum, lda, ldb,
+      offset_a, offset_b, inst_m, inst_n, inst_k, A_type, B_type, C_type>;
   MMA::body_rs(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
-          int offset_b, typename A_type, typename B_type, typename C_type>
+          int offset_b, int inst_m = 0, int inst_n = 0, int inst_k = 0,
+          typename A_type, typename B_type, typename C_type>
 MUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA =
-      mute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a,
-                                 offset_b, A_type, B_type, C_type>;
+  using MMA = mute::tl_mma::GemmTensorOp<
+      M, N, K, num_warp_m, num_warp_n, trans_A, trans_B, clear_accum, lda, ldb,
+      offset_a, offset_b, inst_m, inst_n, inst_k, A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
-          int offset_b, typename A_type, typename B_type, typename C_type>
+          int offset_b, int inst_m = 0, int inst_n = 0, int inst_k = 0,
+          typename A_type, typename B_type, typename C_type>
 MUTLASS_DEVICE void gemm_rr(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA =
-      mute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a,
-                                 offset_b, A_type, B_type, C_type>;
+  using MMA = mute::tl_mma::GemmTensorOp<
+      M, N, K, num_warp_m, num_warp_n, trans_A, trans_B, clear_accum, lda, ldb,
+      offset_a, offset_b, inst_m, inst_n, inst_k, A_type, B_type, C_type>;
   MMA::body_rr(pA, pB, accum);
 }
 

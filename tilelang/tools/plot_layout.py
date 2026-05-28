@@ -9,7 +9,7 @@ def plot_layout(
     name: str = "layout",
     colormap: str = None,
     verbose: bool = False,
-    formats: str | list[str] = "pdf",
+    formats: str | list[str] = "png",
     view: str = "input",
     grid_shape: tuple[int, int] | None = None,
 ) -> None:

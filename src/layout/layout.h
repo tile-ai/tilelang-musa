@@ -239,6 +239,25 @@ Fragment makeGemmQY2FragmentBCol(const int block_m, const int block_n,
 Fragment makeGemmQY2FragmentC(const int block_m, const int block_n,
                               const int warp_m, const int warp_n,
                               const int element_size);
+Fragment makeGemmQY2FragmentC_M16N16K16(const int block_m, const int block_n,
+                                        const int warp_m, const int warp_n,
+                                        const int element_size);
+Fragment makeGemmQY2FragmentARow_M16N16K16(const int block_m, const int block_n,
+                                           const int block_k, const int warp_m,
+                                           const int warp_n,
+                                           const int element_size);
+Fragment makeGemmQY2FragmentACol_M16N16K16(const int block_m, const int block_n,
+                                           const int block_k, const int warp_m,
+                                           const int warp_n,
+                                           const int element_size);
+Fragment makeGemmQY2FragmentBCol_M16N16K16(const int block_m, const int block_n,
+                                           const int block_k, const int warp_m,
+                                           const int warp_n,
+                                           const int element_size);
+Fragment makeGemmQY2FragmentBRow_M16N16K16(const int block_m, const int block_n,
+                                           const int block_k, const int warp_m,
+                                           const int warp_n,
+                                           const int element_size);
 Fragment makeGemmFragmentC(const int block_m, const int block_n,
                            const int warp_m, const int warp_n,
                            const int element_size);

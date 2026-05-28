@@ -50,6 +50,7 @@ enum class GemmInst : uint8_t {
   kFMA,
   kSQMMA,
   kPH1WMMA,
+  kQY2M16MMA,
   kScalar,
 };
 
@@ -70,6 +71,8 @@ inline const char *GemmInstToString(GemmInst inst) {
     return "SQMMA";
   case GemmInst::kPH1WMMA:
     return "PH1WMMA";
+  case GemmInst::kQY2M16MMA:
+    return "QY2M16MMA";
   case GemmInst::kScalar:
     return "Scalar";
   default:
@@ -144,6 +147,8 @@ public:
                                                          Target target) const;
   std::optional<std::array<int, 3>> SelectPH1WmmaInstShape(int block_size,
                                                            Target target) const;
+  std::optional<std::array<int, 3>> SelectQY2MmaInstShape(int block_size,
+                                                          Target target) const;
   tir::Buffer a_, b_, c_;
   // BufferRegion for A, B and C
   BufferRegion aRegion_, bRegion_, cRegion_;

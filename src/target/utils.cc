@@ -7,6 +7,7 @@
 
 #include "../support/ffi_aliases.h"
 #include "dlpack/dlpack.h"
+#include <cstdlib>
 #include <tvm/node/node.h>
 
 namespace tvm {
@@ -203,8 +204,10 @@ int TargetGetWarpSize(Target target) {
   int res = 32;
   if (TargetIsCDNA(target))
     res = 64;
-  if (TargetIsQY2(target))
-    res = 128;
+  if (TargetIsQY2(target)) {
+    const char *force_m16 = std::getenv("TILELANG_MUSA_MP22_FORCE_M16_MMA");
+    res = force_m16 != nullptr && std::string(force_m16) == "1" ? 32 : 128;
+  }
   return res;
 }
 

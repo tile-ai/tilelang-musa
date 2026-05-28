@@ -6,6 +6,7 @@
 #include "gemm.h"
 
 #include "builtin.h"
+#include <cstdlib>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -38,6 +39,11 @@ Layout MakeTransposedPH1SqmmaOperandLayout(int actual_rows, int actual_cols,
   auto mapped = base->Forward({InputPlaceholder(1), InputPlaceholder(0)});
   return Layout(Array<PrimExpr>{Integer(actual_rows), Integer(actual_cols)},
                 mapped);
+}
+
+bool EnvTruthy(const char *name) {
+  const char *value = std::getenv(name);
+  return value != nullptr && std::string(value) == "1";
 }
 
 } // namespace
@@ -461,6 +467,44 @@ bool GemmNode::AllowPH1Wmma(int block_size, Target target) const {
   return SelectPH1WmmaInstShape(block_size, target).has_value();
 }
 
+std::optional<std::array<int, 3>>
+GemmNode::SelectQY2MmaInstShape(int block_size, Target target) const {
+  if (!TargetIsQY2(target)) {
+    return std::nullopt;
+  }
+  const bool a_is_shared = a_.scope() == "shared.dyn" || a_.scope() == "shared";
+  const bool b_is_shared = b_.scope() == "shared.dyn" || b_.scope() == "shared";
+  const bool a_is_fragment = IsFragmentBuffer(a_);
+  const bool b_is_fragment = IsFragmentBuffer(b_);
+  if (!((a_is_shared && b_is_shared) || a_is_fragment || b_is_fragment)) {
+    return std::nullopt;
+  }
+  if (c_.scope() != "local.fragment") {
+    return std::nullopt;
+  }
+  const bool is_f16_mma = a_->dtype == DataType::Float(16) &&
+                          b_->dtype == DataType::Float(16) &&
+                          c_->dtype == DataType::Float(32);
+  const bool is_bf16_mma = a_->dtype == DataType::BFloat(16) &&
+                           b_->dtype == DataType::BFloat(16) &&
+                           c_->dtype == DataType::Float(32);
+  if (!(is_f16_mma || is_bf16_mma)) {
+    return std::nullopt;
+  }
+  if (m_ % 16 != 0 || n_ % 16 != 0 || k_ % 16 != 0) {
+    return std::nullopt;
+  }
+  const bool force_m16 = EnvTruthy("TILELANG_MUSA_MP22_FORCE_M16_MMA");
+  if (!force_m16 && m_ % 32 == 0 && n_ % 32 == 0) {
+    return std::nullopt;
+  }
+  int warp_size = TargetGetWarpSize(target);
+  if (block_size % warp_size != 0) {
+    return std::nullopt;
+  }
+  return std::array<int, 3>{16, 16, 16};
+}
+
 GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
   if (allowTcgen5Mma(target)) {
     return GemmInst::kTCGEN5MMA;
@@ -468,7 +512,12 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
-  } else if (TargetIsCuda(target) || TargetIsQY2(target)) {
+  } else if (TargetIsQY2(target)) {
+    if (SelectQY2MmaInstShape(block_size, target).has_value()) {
+      return GemmInst::kQY2M16MMA;
+    }
+    return GemmInst::kMMA;
+  } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else if (TargetIsPH1(target)) {
     if (AllowSQMMA(block_size, target)) {
@@ -501,8 +550,13 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
   if (TargetIsVolta(target)) {
     kNPerWarp = 16;
   } else if (TargetIsQY2(target)) {
-    kMPerWarp = 32;
-    kNPerWarp = 32;
+    if (gemm_inst == GemmInst::kQY2M16MMA) {
+      kMPerWarp = 16;
+      kNPerWarp = 16;
+    } else {
+      kMPerWarp = 32;
+      kNPerWarp = 32;
+    }
   } else if (TargetIsCDNA(target)) {
     kNPerWarp = 16;
   } else if (TargetIsPH1(target)) {
@@ -1054,6 +1108,8 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           << "Unexpected PH1 GEMM instruction kind in templated lowering: "
           << static_cast<int>(gemm_inst);
     }
+  } else if (TargetIsQY2(T.target) && gemm_inst == GemmInst::kQY2M16MMA) {
+    ss << ", 16, 16, 16";
   }
 
   if ((TargetIsHopper(T.target) || TargetIsPH1(T.target)) && wgWait_ != 0) {
@@ -1353,8 +1409,12 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     ICHECK(c_.scope() == "local.fragment")
         << "QY2 MMA only supports C in local.fragment scope, got "
         << c_.scope();
-    auto fragment = makeGemmQY2FragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
-                                         c_->dtype.bits());
+    const bool use_qy2_m16 = gemm_inst == GemmInst::kQY2M16MMA;
+    auto fragment =
+        use_qy2_m16 ? makeGemmQY2FragmentC_M16N16K16(
+                          m_, n_, m_ / warp_m, n_ / warp_n, c_->dtype.bits())
+                    : makeGemmQY2FragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
+                                           c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
 
     if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
@@ -1365,11 +1425,20 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                      a_->dtype.bits(), !transA_);
       results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
     } else if (a_.scope() == "local.fragment") {
-      auto fragment =
-          transA_ ? makeGemmQY2FragmentACol(m_, n_, k_, m_ / warp_m,
-                                            n_ / warp_n, a_->dtype.bits())
-                  : makeGemmQY2FragmentARow(m_, n_, k_, m_ / warp_m,
-                                            n_ / warp_n, a_->dtype.bits());
+      auto fragment = [&]() {
+        if (use_qy2_m16) {
+          return transA_ ? makeGemmQY2FragmentACol_M16N16K16(
+                               m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                               a_->dtype.bits())
+                         : makeGemmQY2FragmentARow_M16N16K16(
+                               m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                               a_->dtype.bits());
+        }
+        return transA_ ? makeGemmQY2FragmentACol(m_, n_, k_, m_ / warp_m,
+                                                 n_ / warp_n, a_->dtype.bits())
+                       : makeGemmQY2FragmentARow(m_, n_, k_, m_ / warp_m,
+                                                 n_ / warp_n, a_->dtype.bits());
+      }();
       results.Set(a_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
@@ -1382,11 +1451,20 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                      b_->dtype.bits(), transB_);
       results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
     } else if (b_.scope() == "local.fragment") {
-      auto fragment =
-          transB_ ? makeGemmQY2FragmentBRow(m_, n_, k_, m_ / warp_m,
-                                            n_ / warp_n, b_->dtype.bits())
-                  : makeGemmQY2FragmentBCol(m_, n_, k_, m_ / warp_m,
-                                            n_ / warp_n, b_->dtype.bits());
+      auto fragment = [&]() {
+        if (use_qy2_m16) {
+          return transB_ ? makeGemmQY2FragmentBRow_M16N16K16(
+                               m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                               b_->dtype.bits())
+                         : makeGemmQY2FragmentBCol_M16N16K16(
+                               m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                               b_->dtype.bits());
+        }
+        return transB_ ? makeGemmQY2FragmentBRow(m_, n_, k_, m_ / warp_m,
+                                                 n_ / warp_n, b_->dtype.bits())
+                       : makeGemmQY2FragmentBCol(m_, n_, k_, m_ / warp_m,
+                                                 n_ / warp_n, b_->dtype.bits());
+      }();
       results.Set(b_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
