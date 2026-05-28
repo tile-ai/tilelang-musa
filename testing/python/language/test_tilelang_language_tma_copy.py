@@ -1,4 +1,16 @@
-"""Test T.tma_copy() with user-managed mbarrier synchronization on MUSA."""
+"""Test T.tma_copy() with user-managed mbarrier synchronization on MUSA.
+
+For TMA loads (global -> shared):
+  T.tma_copy() emits only expect_tx + tma_load (no arrive, no wait).
+  The user must explicitly call T.barrier_arrive() and T.mbarrier_wait_parity().
+  This allows multiple tma_copy operations to share a single barrier arrive.
+  Pipeline buffer versioning expands the barrier to num_stages versions automatically.
+
+For TMA stores (shared -> global):
+  T.tma_copy() emits tma_store + tma_store_arrive (no wait).
+  The user must explicitly call T.tma_store_wait() for synchronization.
+  No barrier argument is needed for stores.
+"""
 
 import tilelang
 import tilelang.language as T
@@ -73,9 +85,7 @@ def run_gemm_tma_copy(num_stages, verbose=False):
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     if verbose:
         print(kernel.get_kernel_source())
@@ -171,9 +181,7 @@ def run_gemm_tma_copy_store(num_stages, verbose=False):
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     kernel_source = kernel.get_kernel_source()
     if verbose:
@@ -204,4 +212,4 @@ def test_tma_copy_store_pipeline_3_stages():
 
 
 if __name__ == "__main__":
-    run_gemm_tma_copy(num_stages=2, verbose=True)
+    tilelang.testing.main()

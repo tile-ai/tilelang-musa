@@ -41,10 +41,6 @@ def _set_tma_cache_annotations(ann: dict) -> None:
         ann["outer_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
 
 
-def _manual_tma_barrier(expr: tir.PrimExpr) -> tir.Call:
-    return tir.call_intrin("handle", tir.op.Op.get("tl.manual_tma_barrier"), expr)
-
-
 def _normalize_copy_regions(
     src: BufferLikeType, dst: BufferLikeType
 ) -> tuple[
@@ -93,7 +89,6 @@ def copy(
     inner_cache_policy: CachePolicy | None = None,
     outer_cache_policy: CachePolicy | None = None,
     src_robust_desc: tir.PrimExpr | None = None,
-    barrier: BarrierType | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tir.PrimExpr | tir.Stmt:
@@ -116,10 +111,6 @@ def copy(
             Defaults to ``cache_normal`` when omitted.
         src_robust_desc (Optional[tir.PrimExpr], keyword-only): MUSA robust source
             descriptor created by `T.make_robust_desc(addr, size_bytes)`.
-        barrier (Optional[BarrierType], keyword-only):
-            User-managed `shared.barrier` for TMA load synchronization. When
-            provided, TileLang emits the TMA load against this barrier and
-            leaves `T.barrier_arrive` / `T.barrier_wait` under user control.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
             coalesced_width, disable_tma, force_async_copy, src_robust_desc, and
             cache-policy fields can also be specified here.
@@ -161,26 +152,7 @@ def copy(
         and len(src_robust_desc.args) == 2
     ):
         raise ValueError("src_robust_desc must be created by T.make_robust_desc(addr, size_bytes)")
-    barrier_expr = None
-    if barrier is not None:
-        if isinstance(barrier, tir.Buffer):
-            barrier_load = tir.BufferLoad(barrier, [0])
-        elif isinstance(barrier, tir.BufferLoad):
-            barrier_load = barrier
-        else:
-            raise TypeError(f"barrier must be a tir.Buffer or tir.BufferLoad, but got {type(barrier)}")
-        barrier_buf = barrier_load.buffer
-        if barrier_buf.scope() != "shared.barrier":
-            raise ValueError(f"barrier must be in scope 'shared.barrier', but got scope {barrier_buf.scope()!r}")
-        if len(barrier_buf.shape) != 1:
-            raise ValueError(f"barrier must come from a 1-D buffer, but got shape {barrier_buf.shape}")
-        if len(barrier_load.indices) != 1:
-            raise ValueError(f"barrier index must be 1-D, but got {len(barrier_load.indices)} indices")
-        barrier_expr = _manual_tma_barrier(barrier_load)
-
     if isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
-        if barrier_expr is not None:
-            raise ValueError("barrier is only supported for region/bulk TMA copy, not scalar copy")
         body: tir.Stmt = tir.BufferStore(dst.buffer, src, dst.indices)
         if src_robust_desc is not None:
             body = tir.AttrStmt(
@@ -210,9 +182,6 @@ def copy(
         ann["force_async_copy"] = tir.IntImm("int32", 1)
     if "src_robust_desc" not in ann and src_robust_desc is not None:
         ann["src_robust_desc"] = src_robust_desc
-    if "barrier" not in ann and barrier_expr is not None:
-        ann["barrier"] = barrier_expr
-
     if "eviction_policy" not in ann and eviction_policy is not None:
         ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
     if "inner_cache_policy" not in ann and inner_cache_policy is not None:
@@ -276,7 +245,7 @@ def tma_copy(
     src: BufferLikeType,
     dst: BufferLikeType,
     *,
-    barrier=None,
+    barrier: BarrierType | None = None,
     eviction_policy: EvictionPolicy | None = None,
     inner_cache_policy: CachePolicy | None = None,
     outer_cache_policy: CachePolicy | None = None,

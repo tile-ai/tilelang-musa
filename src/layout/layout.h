@@ -319,6 +319,14 @@ Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size);
 Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size);
 Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
                                     int element_size);
+Layout makeSwizzledLayout(const Buffer &buffer, bool k_inner = true,
+                          bool allow_pad = true);
+Layout makeVoltaSwizzledLayout(const Buffer &buffer, bool is_a = true,
+                               bool k_inner = true);
+Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity = -1,
+                               bool k_inner = true);
+Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity = -1,
+                                    bool k_inner = true);
 Layout makeFullBankSwizzleLayout(const Buffer &buffer);
 Layout makeHalfBankSwizzleLayout(const Buffer &buffer);
 Layout makeQuarterBankSwizzleLayout(const Buffer &buffer);

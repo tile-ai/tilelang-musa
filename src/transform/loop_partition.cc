@@ -172,7 +172,9 @@ private:
   Stmt VisitStmt_(const ForNode *node) final {
     if (node->kind == ForKind::kSerial) {
       auto analyzer = std::make_shared<arith::Analyzer>();
-      if (as_const_int(analyzer->Simplify(node->extent)) == nullptr) {
+      auto extent = as_const_int(analyzer->Simplify(node->extent));
+      constexpr int64_t kMaxAutomaticPragmaUnrollExtent = 256;
+      if (extent == nullptr || *extent > kMaxAutomaticPragmaUnrollExtent) {
         return StmtExprMutator::VisitStmt_(node);
       }
       For new_for = tvm::ffi::GetRef<For>(node);

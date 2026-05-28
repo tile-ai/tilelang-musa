@@ -21,7 +21,7 @@ using mutlass::half_t;
 using mutlass::tfloat32_t;
 using int4_t = int4;
 
-using tl_h_elem_t = decltype(__half_raw{}.data);
+using tl_h_elem_t = decltype(__half_raw{}.x);
 using tl_bf_elem_t = decltype(__mt_bfloat16_raw{}.data);
 using tl_h2 = tl_h_elem_t __attribute__((ext_vector_type(2)));
 using tl_h4 = tl_h_elem_t __attribute__((ext_vector_type(4)));
@@ -60,7 +60,7 @@ using v32i32_t = int32_t __attribute__((vector_size(128)));
 #define _AS3 __attribute__((address_space(3)))
 
 TL_DEVICE tl_h_elem_t make_tl_h_elem(half_t x) {
-  return static_cast<__half_raw>(x.to_half()).data;
+  return static_cast<__half_raw>(x.to_half()).x;
 }
 
 TL_DEVICE tl_bf_elem_t make_tl_bf_elem(bfloat16_t x) {
@@ -68,11 +68,15 @@ TL_DEVICE tl_bf_elem_t make_tl_bf_elem(bfloat16_t x) {
 }
 
 TL_DEVICE half_t tl_h_elem_to_half(tl_h_elem_t x) {
-  return half_t(__half(__half_raw{x}));
+  __half_raw raw;
+  raw.x = x;
+  return half_t(__half(raw));
 }
 
 TL_DEVICE bfloat16_t tl_bf_elem_to_bfloat16(tl_bf_elem_t x) {
-  return bfloat16_t(static_cast<float>(__mt_bfloat16(__mt_bfloat16_raw{x})));
+  __mt_bfloat16_raw raw;
+  raw.data = x;
+  return bfloat16_t(static_cast<float>(__mt_bfloat16(raw)));
 }
 
 TL_DEVICE tl_h2 make_tl_h2(tl_h_elem_t x0, tl_h_elem_t x1) {
@@ -468,7 +472,9 @@ struct float_e5m2_t : public mutlass::float_e5m2_t {
   }
 };
 
-template <typename T> struct to_mute_type { using type = T; };
+template <typename T> struct to_mute_type {
+  using type = T;
+};
 
 template <> struct to_mute_type<tl::float_e4m3_t> {
   using type = mutlass::float_e4m3_t;

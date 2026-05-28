@@ -20,14 +20,27 @@ def _compile_tvm_ffi(func, pass_configs, **kwargs):
         tilelang.enable_cache()
 
 
-def test_tma_lower_no_warp_specialized_injects_mbarrier():
-    """Regression for TMA lowering when warp specialization is disabled.
+def _find_ws_branch_bounds(src, producer_threads):
+    producer_match = re.search(
+        rf"if\s*\([^\n{{]*{producer_threads}\s*<=\s*\(\(int\)threadIdx\.x\)[^\n{{]*\)\s*\{{",
+        src,
+    )
+    assert producer_match, f"Expected producer guard for {producer_threads} producer threads"
+    producer_idx = producer_match.start()
+    else_idx = src.find("} else {", producer_idx)
+    consumer_match = re.search(
+        rf"if\s*\([^\n{{]*\(\(int\)threadIdx\.x\)\s*<\s*{producer_threads}[^\n{{]*\)\s*\{{",
+        src[producer_idx:],
+    )
+    consumer_idx = producer_idx + consumer_match.start() if consumer_match else -1
+    if else_idx != -1 and (consumer_idx == -1 or else_idx < consumer_idx):
+        consumer_idx = else_idx
+    assert consumer_idx != -1, "Expected a consumer branch after the WS producer branch"
+    return producer_idx, consumer_idx
 
-    When `tl.disable_tma_lower=False` but `tl.disable_warp_specialized=True`, the
-    optimization pipeline must still run the TMA barrier allocation/injection
-    passes so generated MUSA source initializes and uses async named barrier
-    correctly.
-    """
+
+def test_plain_copy_no_warp_specialized_uses_cp_async():
+    """Plain global->shared T.copy should not auto-upgrade to TMA without WS."""
 
     M, K = 16, 128
     block_m, block_k = 4, 128
@@ -51,20 +64,20 @@ def test_tma_lower_no_warp_specialized_injects_mbarrier():
 
     pass_configs = {
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     }
     kernel = _compile_tvm_ffi(tma_copy, pass_configs)
 
     src = kernel.get_kernel_source()
-    assert "tl::tma_load" in src
-    assert "__musa_async_bar_record(1)" in src
-    assert "__musa_async_init_arrival(1" in src
-    assert "tl::mbarrier_arrive_expect_tx(1" in src
+    assert "tl::tma_load" not in src
+    assert "tl::cp_async_gs<16>" in src
+    assert "__musa_async_bar_record(0)" in src
+    assert "__musa_async_init_arrival(" not in src
+    assert "tl::mbarrier_arrive_expect_tx(" not in src
 
 
-def test_tma_lower_no_warp_specialized_2d_descriptor_uses_args1_barrier():
-    """Cover the 2D-descriptor TMA barrier rewrite path (barrier at args[1])."""
+def test_plain_copy_no_warp_specialized_2d_desc_stays_cp_async():
+    """2D plain global->shared T.copy should stay on the non-TMA path."""
 
     M, K = 16, 256
     block_m, block_k = 4, 128
@@ -88,26 +101,20 @@ def test_tma_lower_no_warp_specialized_2d_descriptor_uses_args1_barrier():
 
     pass_configs = {
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     }
 
     kernel = _compile_tvm_ffi(tma_copy_2d_desc, pass_configs)
 
     src = kernel.get_kernel_source()
-    assert "MUtensorDescriptor" in src
-    assert "tl::tma_load" in src
-
-    flat_src = " ".join(src.split())
-    pattern = r"tl::tma_load(?:<[^>]+>)?\([^,]+,\s*1\s*,"
-    assert re.search(pattern, flat_src), (
-        f"Expected regex {pattern!r} to match flattened MUSA source. Generated source (truncated):\n{src[:1000]}"
-    )
+    assert "MUtensorDescriptor" not in src
+    assert "tl::tma_load" not in src
+    assert "tl::cp_async_gs<16>" in src
 
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_num_stages_zero_pure_tma_does_not_auto_warp_specialize():
-    """num_stages=0 should keep pure TMA loops out of auto-WS."""
+    """num_stages=0 should keep ordinary T.copy on the synchronous non-WS path."""
 
     M, K = 8, 256
     block_m, block_k = 4, 128
@@ -136,15 +143,12 @@ def test_num_stages_zero_pure_tma_does_not_auto_warp_specialize():
                     ],
                 )
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(copy_loop_num_stages_zero, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
-    assert "tl::tma_load" in src
+    assert "tl::tma_load" not in src
+    assert "tl::cp_async_gs<16>" in src
     assert "__launch_bounds__(160, 1)" not in src
     assert "if (32 <= ((int)threadIdx.x))" not in src
 
@@ -184,17 +188,13 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
                     ],
                 )
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(copy_loop_num_stages_one, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
     assert "__launch_bounds__(160, 1)" in src
-    assert "if (32 <= ((int)threadIdx.x))" in src
+    _find_ws_branch_bounds(src, 32)
     x = torch.randn((M, K), device="musa", dtype=torch.float16)
     y = kernel(x)
     torch.testing.assert_close(y, x)
@@ -225,11 +225,7 @@ def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
                 for i in T.serial(bytes_per_copy):
                     y[ko * bytes_per_copy + i] = x_shared[i]
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(cp_async_only_num_stages_zero, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
@@ -287,11 +283,7 @@ def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
                 for i in T.serial(cp_async_bytes):
                     meta_out[ko * cp_async_bytes + i] = meta_shared[i]
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(mixed_async_num_stages_one, pass_configs, out_idx=[2, 3])
 
     src = kernel.get_kernel_source()
@@ -299,8 +291,7 @@ def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
     assert "cp_async_gs<16>" in src
     assert "__launch_bounds__(256, 1)" in src
     assert "__launch_bounds__(160, 1)" not in src
-    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
-    consumer_idx = src.index("} else {", producer_idx)
+    producer_idx, consumer_idx = _find_ws_branch_bounds(src, 128)
     cp_async_idx = src.index("cp_async_gs<16>")
     tma_idx = src.index("tl::tma_load")
     assert producer_idx < cp_async_idx < consumer_idx
@@ -337,11 +328,7 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
 
             T.copy(C_local, C[by * block_m, bx * block_n])
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(mixed_gemm_shared_barrier, pass_configs, out_idx=[2])
 
     src = kernel.get_kernel_source()
@@ -354,8 +341,7 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
     for barrier_id in range(1, 9):
         assert f"__musa_async_init_arrival({barrier_id}," in src
 
-    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
-    consumer_idx = src.index("} else {", producer_idx)
+    producer_idx, consumer_idx = _find_ws_branch_bounds(src, 128)
     cp_async_idx = src.index("cp_async_gs<16>")
     tma_idx = src.index("tl::tma_load")
     assert producer_idx < cp_async_idx < consumer_idx
@@ -408,14 +394,12 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
 
     pass_configs = {
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
     }
     kernel = _compile_tvm_ffi(metadata_copy_pipeline, pass_configs, out_idx=[3, 4])
 
     src = kernel.get_kernel_source()
-    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
-    consumer_idx = src.index("} else {", producer_idx)
+    producer_idx, consumer_idx = _find_ws_branch_bounds(src, 128)
 
     def find_tma_call(op, desc):
         match = re.search(rf"tl::{op}(?:<[^\n]*>)?\({desc}", src)
@@ -464,14 +448,12 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
 
     pass_configs = {
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
     }
     kernel = _compile_tvm_ffi(mixed_gemm_consumer_local_init, pass_configs, out_idx=[2])
 
     src = kernel.get_kernel_source()
-    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
-    consumer_idx = src.index("} else {", producer_idx)
+    producer_idx, consumer_idx = _find_ws_branch_bounds(src, 128)
     prelude_src = src[:producer_idx]
     producer_src = src[producer_idx:consumer_idx]
     consumer_src = src[consumer_idx:]

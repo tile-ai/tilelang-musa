@@ -489,8 +489,13 @@ private:
         if (!all_invariant)
           return;
         if (auto *load = obj.as<BufferLoadNode>()) {
-          auto transformed_indices =
-              TransformIndices(load->indices, load->buffer);
+          bool layout_transform_valid = true;
+          auto transformed_indices = TransformIndices(
+              load->indices, load->buffer, &layout_transform_valid);
+          if (!layout_transform_valid) {
+            all_invariant = false;
+            return;
+          }
           PrimExpr elem_offset = ComputeBufferElemOffset(
               transformed_indices, load->buffer, analyzer_);
           if (!IsExprInvariantInVectorBoundary(elem_offset,
@@ -499,8 +504,13 @@ private:
             all_invariant = false;
           }
         } else if (auto *store = obj.as<BufferStoreNode>()) {
-          auto transformed_indices =
-              TransformIndices(store->indices, store->buffer);
+          bool layout_transform_valid = true;
+          auto transformed_indices = TransformIndices(
+              store->indices, store->buffer, &layout_transform_valid);
+          if (!layout_transform_valid) {
+            all_invariant = false;
+            return;
+          }
           PrimExpr elem_offset = ComputeBufferElemOffset(
               transformed_indices, store->buffer, analyzer_);
           if (!IsExprInvariantInVectorBoundary(elem_offset,
@@ -617,12 +627,13 @@ private:
   }
 
   Array<PrimExpr> TransformIndices(const Array<PrimExpr> &indices,
-                                   const Buffer &buffer) {
+                                   const Buffer &buffer,
+                                   bool *layout_transform_valid = nullptr) {
+    if (layout_transform_valid) {
+      *layout_transform_valid = true;
+    }
     auto transformed_indices = indices;
     if (layout_map_.defined() && layout_map_.count(buffer)) {
-      ICHECK(IsBufferContiguous(buffer, analyzer_))
-          << buffer
-          << " has non-contiguous strides, but layout map is provided.";
       // forward indices
       auto layout = layout_map_[buffer];
       transformed_indices = layout->Forward(indices);
@@ -630,9 +641,12 @@ private:
       if (transformed_indices.size() != buffer->shape.size()) {
         // Step 1: Compute linear offset using layout->OutputShape()
         auto output_shape = layout->OutputShape();
-        ICHECK_EQ(transformed_indices.size(), output_shape.size())
-            << "Forward indices size " << transformed_indices.size()
-            << " != OutputShape size " << output_shape.size();
+        if (transformed_indices.size() != output_shape.size()) {
+          if (layout_transform_valid) {
+            *layout_transform_valid = false;
+          }
+          return indices;
+        }
         PrimExpr linear_offset = 0;
         PrimExpr stride = 1;
         for (int i = output_shape.size() - 1; i >= 0; --i) {
@@ -695,7 +709,12 @@ private:
     }
 
     // Transform indices using layout_map if present
-    auto transformed_indices = TransformIndices(indices, buffer);
+    bool layout_transform_valid = true;
+    auto transformed_indices =
+        TransformIndices(indices, buffer, &layout_transform_valid);
+    if (!layout_transform_valid) {
+      return 1;
+    }
 
     // 1. Compute raw element offset. Simplify it early so shared-layout stores
     // that are linear after row-major flattening are not misclassified as

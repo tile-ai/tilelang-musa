@@ -141,6 +141,10 @@ private:
   std::unordered_map<ffi::String, ffi::Array<PrimExpr>> tma_descriptor_args_;
   // Current robust descriptor attached to source-side copy lowering.
   PrimExpr current_src_robust_desc_;
+  // MUSA's dependency pass crashes on cp.async commit/wait with no preceding
+  // async copies. Track emitted copies so orphan sync intrinsics become no-ops.
+  bool has_uncommitted_cp_async_{false};
+  int pending_cp_async_groups_{0};
 
   // The name of the barrier array in shared memory
   const std::string barrier_name_ = "barrier";

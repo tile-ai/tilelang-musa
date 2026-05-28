@@ -8,6 +8,7 @@
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <unordered_set>
@@ -1812,6 +1813,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << dst << ", " << src << ", " << robust_base << ", "
                    << robust_size << ", " << condition << ");\n";
     }
+    has_uncommitted_cp_async_ = true;
   } else if (op->op.same_as(builtin::ptx_cp_async()) ||
              op->op.same_as(tl::ptx_cp_async())) {
     // Keep compatibility with both cp.async signatures:
@@ -1853,12 +1855,26 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
                      << ", " << condition << ");\n";
       }
     }
+    has_uncommitted_cp_async_ = true;
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
-    print_extern_call_stmt("tl::cp_async_commit");
+    if (has_uncommitted_cp_async_) {
+      print_extern_call_stmt("tl::cp_async_commit");
+      has_uncommitted_cp_async_ = false;
+      ++pending_cp_async_groups_;
+    }
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
-    int n = Downcast<IntImm>(op->args[0])->value;
-    std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
-    print_extern_call_stmt(func_name, 1);
+    if (pending_cp_async_groups_ > 0) {
+      int n = Downcast<IntImm>(op->args[0])->value;
+      // mcc 5.1 dependency analysis can crash on rolling wait_group(N>0)
+      // patterns in software pipelines. wait_all is more conservative and keeps
+      // the program order correct for MUSA.
+      if (n > 0) {
+        n = 0;
+      }
+      std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
+      print_extern_call_stmt(func_name, 1);
+      pending_cp_async_groups_ = std::min(pending_cp_async_groups_, n);
+    }
   } else if (op->op.same_as(builtin::create_barriers())) {
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
     this->PrintIndent();
@@ -2712,8 +2728,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "}\n";
     } else {
       os << "for (int local_id = 0; local_id < 8; ++local_id) {\n";
-      os << dst << "[" + this->PrintExpr(dst_ind) + "]"
-         << " = " << src << "[" << src_offset << " + local_id];\n";
+      os << dst << "[" + this->PrintExpr(dst_ind) + "]" << " = " << src << "["
+         << src_offset << " + local_id];\n";
       os << "}\n";
     }
 
@@ -2741,6 +2757,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << PrintPredicatedCpAsyncAssembly(
           dst, dst_offset, src, src_offset, size, this->PrintExpr(op->args[5]));
     }
+    has_uncommitted_cp_async_ = true;
   } else if (op->op.same_as(builtin::ptx_cp_async_bulk())) {
     need_cast_smem_ptr_to_int_ = true;
     std::string dst = this->PrintExpr(op->args[0]);
@@ -2755,11 +2772,18 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << PrintCpAsyncBulkAsm(dst, dst_offset, src, src_offset, size,
                                         barrier);
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
-    this->stream << "__asm__ __volatile__(\"cp.async.commit_group;\");\n\n";
+    if (has_uncommitted_cp_async_) {
+      this->stream << "__asm__ __volatile__(\"cp.async.commit_group;\");\n\n";
+      has_uncommitted_cp_async_ = false;
+      ++pending_cp_async_groups_;
+    }
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
-    int n = Downcast<IntImm>(op->args[0])->value;
-    this->stream << "__asm__ __volatile__(\"cp.async.wait_group " << n
-                 << ";\");\n\n";
+    if (pending_cp_async_groups_ > 0) {
+      int n = Downcast<IntImm>(op->args[0])->value;
+      this->stream << "__asm__ __volatile__(\"cp.async.wait_group " << n
+                   << ";\");\n\n";
+      pending_cp_async_groups_ = std::min(pending_cp_async_groups_, n);
+    }
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;
@@ -3357,6 +3381,36 @@ void CodeGenTileLangMUSA::VisitStmt_(const AttrStmtNode *op) {
     this->VisitStmt(op->body);
     current_src_robust_desc_ = previous_src_robust_desc;
     return;
+  } else if (op->attr_key == tl::attr::kWarpSpecializationScope) {
+    const auto *if_node = op->body.as<IfThenElseNode>();
+    if (if_node && if_node->else_case.defined()) {
+      // mcc 5.1 LiveVariables can crash on a large producer/consumer if/else
+      // where one side contains TMA/mbarrier ops. Keep the TIR branch
+      // structured for sync analysis, but print two mutually exclusive guards
+      // for MUSA C.
+      std::string cond = PrintExpr(if_node->condition);
+      std::string else_cond = "!(" + cond + ")";
+      if (const auto *ge = if_node->condition.as<GENode>()) {
+        else_cond = PrintExpr(LT(ge->a, ge->b));
+      } else if (const auto *le = if_node->condition.as<LENode>()) {
+        else_cond = PrintExpr(LT(le->b, le->a));
+      }
+      this->PrintIndent();
+      this->stream << "if (" << cond << ") {\n";
+      int producer_scope = this->BeginScope();
+      this->VisitStmt(if_node->then_case);
+      this->EndScope(producer_scope);
+      this->PrintIndent();
+      this->stream << "}\n";
+      this->PrintIndent();
+      this->stream << "if (" << else_cond << ") {\n";
+      int consumer_scope = this->BeginScope();
+      this->VisitStmt(if_node->else_case.value());
+      this->EndScope(consumer_scope);
+      this->PrintIndent();
+      this->stream << "}\n";
+      return;
+    }
   } else if (op->attr_key == tir::attr::fragment_layout) {
     const VarNode *buffer = op->node.as<VarNode>();
     const StringImmNode *layout_str = op->value.as<StringImmNode>();
@@ -4186,6 +4240,8 @@ void CodeGenTileLangMUSA::AddFunction(const GlobalVar &gvar,
   // clear previous generated state.
   this->InitFuncState(f);
   tma_descriptor_args_.clear();
+  has_uncommitted_cp_async_ = false;
+  pending_cp_async_groups_ = 0;
   if (auto attr =
           f->GetAttr<Map<String, Array<PrimExpr>>>("tma_descriptor_args")) {
     for (const auto &kv : attr.value()) {

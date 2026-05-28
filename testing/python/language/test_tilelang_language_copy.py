@@ -30,7 +30,7 @@ def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16)
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     source = kernel.get_kernel_source()
     print(source)
@@ -66,10 +66,7 @@ def run_tilelang_copy_with_stride(M=1024, N=1024, NN=2048, block_M=128, block_N=
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     if isinstance(NN, T.Var):
         NN = N * 2
@@ -103,7 +100,7 @@ def run_tilelang_copy_bufferload(num_tokens=128, dtype=T.float16):
     tilelang.compile(
         program,
         out_idx=[1],
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
 
 
@@ -130,7 +127,7 @@ def run_tilelang_copy_buffer_load_with_parallel(M=1024, N=1024, block_M=128, blo
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     a = torch.randn(M, N, device="musa", dtype=getattr(torch, dtype))
     b = kernel(a)
@@ -159,7 +156,7 @@ def run_tilelang_copy_shape_mismatched(M=1024, N=1024, dtype=T.float16):
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     a = torch.randn(M, N, device="musa", dtype=getattr(torch, dtype))
     b = kernel(a)

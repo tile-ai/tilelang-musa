@@ -49,10 +49,7 @@ def run_tilelang_transpose(M=128, N=128, block_M=128, block_N=128, dtype=T.float
         program,
         out_idx=[1],
         target="musa",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     torch_dtype = map_torch_type(dtype)
     a = torch.randn(M, N, device="musa", dtype=torch_dtype)
@@ -94,10 +91,7 @@ def run_tilelang_transpose_square(M=256, block_M=128, dtype=T.float16):
         program,
         out_idx=[1],
         target="musa",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     torch_dtype = map_torch_type(dtype)
     a = torch.randn(M, M, device="musa", dtype=torch_dtype)

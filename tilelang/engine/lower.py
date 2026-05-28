@@ -310,11 +310,12 @@ def lower(
     # Before lowering, do semantic check
     PreLowerSemanticCheck(mod)
 
-    # Phase 1: Lower and legalize the IR
-    mod = LowerAndLegalize(mod, target)
+    with target:
+        # Phase 1: Lower and legalize the IR
+        mod = LowerAndLegalize(mod, target)
 
-    # Phase 2: Optimize the IR for the target
-    mod = OptimizeForTarget(mod, target)
+        # Phase 2: Optimize the IR for the target
+        mod = OptimizeForTarget(mod, target)
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)

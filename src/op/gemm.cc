@@ -62,12 +62,33 @@ bool IsPH1SupportedFp8(DataType dtype) {
 
 // MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
+static Array<PrimExpr> MakeRegionMatrixIndices(const BufferRegion &region,
+                                               PrimExpr row, PrimExpr col) {
+  ICHECK(region.defined());
+  ICHECK_GE(region->region.size(), 2U)
+      << "GEMM buffer region must have at least 2 dimensions";
+
+  Array<PrimExpr> indices;
+  size_t ndim = region->region.size();
+  for (size_t i = 0; i + 2 < ndim; ++i) {
+    indices.push_back(region->region[i]->min);
+  }
+  indices.push_back(region->region[ndim - 2]->min + row);
+  indices.push_back(region->region[ndim - 1]->min + col);
+  return indices;
+}
+
 Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
-  node->aRegion_ = NormalizeToBufferRegion(args[0]);
-  node->bRegion_ = NormalizeToBufferRegion(args[1]);
-  node->cRegion_ = NormalizeToBufferRegion(args[2]);
+  auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto b_access = NormalizeToAccessRegion(args[1], kAccessRead);
+  auto c_access = NormalizeToAccessRegion(args[2], kAccessReadWrite);
+
+  node->aRegion_ = a_access.region;
+  node->bRegion_ = b_access.region;
+  node->cRegion_ = c_access.region;
+  node->SetAccessRegions({a_access, b_access, c_access});
 
   node->a_ = node->aRegion_->buffer;
   node->b_ = node->bRegion_->buffer;
@@ -99,7 +120,19 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  node->annotations_ = annotations;
   data_ = std::move(node);
+}
+
+AccessRegions GemmNode::GetAccessRegions() const {
+  AccessRegions result;
+  result.reads.push_back(aRegion_);
+  result.reads.push_back(bRegion_);
+  if (!is_one(clearAccum_)) {
+    result.reads.push_back(cRegion_);
+  }
+  result.writes.push_back(cRegion_);
+  return result;
 }
 
 /**
@@ -754,32 +787,24 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto B_buffer = bRegion_->buffer;
     auto C_buffer = cRegion_->buffer;
 
-    PrimExpr a0 = aRegion_->region[0]->min;
-    PrimExpr a1 = aRegion_->region[1]->min;
-    PrimExpr b0 = bRegion_->region[0]->min;
-    PrimExpr b1 = bRegion_->region[1]->min;
-    PrimExpr c0 = cRegion_->region[0]->min;
-    PrimExpr c1 = cRegion_->region[1]->min;
-
     Var i("i", DataType::Int(32));
     Var j("j", DataType::Int(32));
     Var k("k", DataType::Int(32));
 
     Buffer accum_buf = decl_buffer({IntImm(DataType::Int(32), 1)}, c_->dtype,
                                    "accum", "local");
-    PrimExpr init_val = clear_accum_bool.value()
-                            ? make_const(c_->dtype, 0)
-                            : BufferLoad(C_buffer, {c0 + i, c1 + j});
+    PrimExpr init_val =
+        clear_accum_bool.value()
+            ? make_const(c_->dtype, 0)
+            : BufferLoad(C_buffer, MakeRegionMatrixIndices(cRegion_, i, j));
     Stmt init = BufferStore(accum_buf, init_val, {0});
 
-    Array<PrimExpr> a_indices{
-        a0 + (transA_ ? PrimExpr(k) : PrimExpr(i)),
-        a1 + (transA_ ? PrimExpr(i) : PrimExpr(k)),
-    };
-    Array<PrimExpr> b_indices{
-        b0 + (transB_ ? PrimExpr(j) : PrimExpr(k)),
-        b1 + (transB_ ? PrimExpr(k) : PrimExpr(j)),
-    };
+    Array<PrimExpr> a_indices =
+        MakeRegionMatrixIndices(aRegion_, transA_ ? PrimExpr(k) : PrimExpr(i),
+                                transA_ ? PrimExpr(i) : PrimExpr(k));
+    Array<PrimExpr> b_indices =
+        MakeRegionMatrixIndices(bRegion_, transB_ ? PrimExpr(j) : PrimExpr(k),
+                                transB_ ? PrimExpr(k) : PrimExpr(j));
     PrimExpr a_val = Cast(c_->dtype, BufferLoad(A_buffer, a_indices));
     PrimExpr b_val = Cast(c_->dtype, BufferLoad(B_buffer, b_indices));
     PrimExpr update_val = BufferLoad(accum_buf, {0}) + a_val * b_val;
@@ -787,8 +812,8 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Stmt k_loop =
         For(k, 0, IntImm(DataType::Int(32), k_), ForKind::kSerial, update);
 
-    Stmt store_c =
-        BufferStore(C_buffer, BufferLoad(accum_buf, {0}), {c0 + i, c1 + j});
+    Stmt store_c = BufferStore(C_buffer, BufferLoad(accum_buf, {0}),
+                               MakeRegionMatrixIndices(cRegion_, i, j));
     Stmt body = SeqStmt({init, k_loop, store_c});
     Stmt j_loop =
         For(j, 0, IntImm(DataType::Int(32), n_), ForKind::kSerial, body);
@@ -836,28 +861,26 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     PrimExpr j = linear - i * n_;
 
     auto a_indices = [&]() {
-      Array<PrimExpr> idx;
       if (transA_) {
-        idx = {k_iter, i};
+        return MakeRegionMatrixIndices(aRegion_, k_iter, i);
       } else {
-        idx = {i, k_iter};
+        return MakeRegionMatrixIndices(aRegion_, i, k_iter);
       }
-      return idx;
     };
     auto b_indices = [&]() {
-      Array<PrimExpr> idx;
       if (transB_) {
-        idx = {j, k_iter};
+        return MakeRegionMatrixIndices(bRegion_, j, k_iter);
       } else {
-        idx = {k_iter, j};
+        return MakeRegionMatrixIndices(bRegion_, k_iter, j);
       }
-      return idx;
     };
 
     Buffer accum_buf = decl_buffer({IntImm(DataType::Int(32), 1)}, c_->dtype,
                                    "accum", "local");
-    PrimExpr init_val = clear_accum_bool.value() ? make_const(c_->dtype, 0)
-                                                 : BufferLoad(C_buffer, {i, j});
+    PrimExpr init_val =
+        clear_accum_bool.value()
+            ? make_const(c_->dtype, 0)
+            : BufferLoad(C_buffer, MakeRegionMatrixIndices(cRegion_, i, j));
     Stmt init = BufferStore(accum_buf, init_val, {0});
 
     PrimExpr a_val = Cast(c_->dtype, BufferLoad(A_buffer, a_indices()));
@@ -867,7 +890,8 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Stmt k_loop =
         For(k_iter, 0, IntImm(DataType::Int(32), k_), ForKind::kSerial, update);
 
-    Stmt store_c = BufferStore(C_buffer, BufferLoad(accum_buf, {0}), {i, j});
+    Stmt store_c = BufferStore(C_buffer, BufferLoad(accum_buf, {0}),
+                               MakeRegionMatrixIndices(cRegion_, i, j));
     Stmt body = SeqStmt({init, k_loop, store_c});
     Stmt guarded = IfThenElse(guard, body);
     Stmt idx_loop = For(idx_iter, 0, trip, ForKind::kSerial, guarded);
@@ -942,17 +966,23 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                 0))
         << "TCGEN5MMA requires thread bounds to be multiples of warp size (32) "
            "and aligned to warps.";
+    Stmt tcgen5mma_call;
     if (analyzer->CanProveEqual(T.thread_bounds->extent, warp_size)) {
       // If the thread bounds is exactly one warp, we can use the original call
-      return Evaluate(new_call);
+      tcgen5mma_call = Evaluate(new_call);
     } else {
       // Add an if-else clause
-      auto tcgen5mma_call =
-          IfThenElse(EQ(FloorDiv(T.thread_var, warp_size),
-                        FloorDiv(T.thread_bounds->min, warp_size)),
-                     Evaluate(new_call));
-      return tcgen5mma_call;
+      tcgen5mma_call = IfThenElse(EQ(FloorDiv(T.thread_var, warp_size),
+                                     FloorDiv(T.thread_bounds->min, warp_size)),
+                                  Evaluate(new_call));
     }
+    PrimExpr mbar_phase = T.mbar_phase_expr;
+    if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
+      mbar_phase = explicit_phase.value();
+    }
+    Stmt wait_stmt = Evaluate(
+        Call(DataType::Handle(), mbarrier_wait_parity(), {mbar_, mbar_phase}));
+    return SeqStmt(Array<Stmt>{tcgen5mma_call, wait_stmt});
   }
 
   if (IsFragmentBuffer(a_)) {
