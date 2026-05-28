@@ -4,8 +4,8 @@ from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
-from tilelang.backend.pipeline import Pipeline, register_pipeline
-from tilelang.backend.pipeline_utils import (
+from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipeline
+from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
     should_disable_shared_memory_reuse,
@@ -23,7 +23,9 @@ def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target |
 
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if (not is_cuda_target(target)) or (not have_tma(target)):
+    if target is None:
+        return False
+    if not ((is_cuda_target(target) or is_musa_target(target)) and target_has_tma(target)):
         return False
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not disable_warp_specialized
@@ -83,12 +85,6 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
-    # @Metal specific
-    # On Metal, rewrite local.fragment GEMM accumulators to metal.simdgroup
-    # before layout inference. simdgroup matrices are opaque and have no
-    # explicit thread-level layout, so layout inference must not see them.
-    # mod = tilelang.transform.metal.MetalFragmentToSimdgroup(mod)
-
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout
@@ -98,7 +94,7 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
 
     # @CUDA specific
     # Lower l2 persistent map
-    mod = tilelang.cuda.transform.LowerL2Persistent()(mod)
+    mod = lower_l2_persistent_for_target(mod, target)
     # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
@@ -113,6 +109,8 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
+    if allow_lower_musa_burst(target) and hasattr(tilelang.transform, "LateVectorizePlanner"):
+        mod = tilelang.transform.LateVectorizePlanner()(mod)
     # Hoist any root-block annotations to PrimFunc attrs if pass is available
     mod = tilelang.transform.HoistNonRestrictParams()(mod)
     return mod
@@ -180,7 +178,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     # @CUDA-specific
     # Mark the function contains pdl_sync or pdl_trigger
-    mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
+    mod = tilelang.transform.MarkCudaSyncCalls(nvcc.have_pdl(target))(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
@@ -217,11 +215,11 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     # @CUDA-specific
     # Transform threadblock to persistent threadblock
-    mod = tilelang.cuda.transform.PersistThreadblock()(mod)
+    mod = persist_threadblock_for_target(mod, target)
 
     return mod
 
 
-cuda_pipeline = Pipeline("cuda", CUDAPassPipelineBody)
+cuda_pipeline = PassPipeline("cuda", CUDAPassPipelineBody)
 
 register_pipeline(cuda_pipeline)
