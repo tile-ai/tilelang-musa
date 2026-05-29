@@ -669,6 +669,121 @@ TVM_DLL const Op &pdl_trigger();
 TVM_DLL const Op &pdl_sync();
 
 /*!
+ * \brief Warp-vote: non-zero if ANY active lane in the mask has a non-zero
+ * predicate. Lowers to `__any_sync(mask, predicate)` on MUSA.
+ *
+ * int32 any_sync(mask, predicate)
+ */
+TVM_DLL const Op &any_sync();
+
+/*!
+ * \brief Warp-vote: non-zero only if ALL active lanes in the mask have a
+ * non-zero predicate. Lowers to `__all_sync(mask, predicate)` on MUSA.
+ *
+ * int32 all_sync(mask, predicate)
+ */
+TVM_DLL const Op &all_sync();
+
+/*!
+ * \brief Warp-ballot: bitmask of lanes in the mask with non-zero predicate.
+ *
+ * MUSA: `__ballot_sync(mask, predicate)` returns `uint32`; the codegen
+ * zero-extends the result to `uint64`.
+ *
+ * uint64 ballot_sync(mask, predicate)
+ */
+TVM_DLL const Op &ballot_sync();
+
+/*!
+ * \brief Full-warp ballot. Equivalent to
+ * `ballot_sync(0xFFFFFFFF, predicate)`.
+ *
+ * uint64 ballot(predicate)
+ */
+TVM_DLL const Op &ballot();
+
+/*!
+ * \brief Bitmask of currently active (non-exited) lanes. Lowers to
+ * `__activemask()` (zero-extended to `uint64`) on MUSA.
+ *
+ * uint64 activemask()
+ */
+TVM_DLL const Op &activemask();
+
+/*!
+ * \brief Block barrier that returns the number of threads whose predicate
+ * evaluates to non-zero. Lowers to `__syncthreads_count(predicate)` on MUSA.
+ *
+ * int32 syncthreads_count(predicate)
+ */
+TVM_DLL const Op &syncthreads_count();
+
+/*!
+ * \brief Block barrier that returns non-zero only if ALL threads have a
+ * non-zero predicate. Lowers to `__syncthreads_and(predicate)` on MUSA.
+ *
+ * int32 syncthreads_and(predicate)
+ */
+TVM_DLL const Op &syncthreads_and();
+
+/*!
+ * \brief Block barrier that returns non-zero if ANY thread has a non-zero
+ * predicate. Lowers to `__syncthreads_or(predicate)` on MUSA.
+ *
+ * int32 syncthreads_or(predicate)
+ */
+TVM_DLL const Op &syncthreads_or();
+
+/*!
+ * \brief Warp shuffle: broadcast `value` from `src_lane` within each subgroup
+ * of `width` lanes. Lowers to
+ * `__shfl_sync(mask, value, src_lane, width)` on MUSA. The dtype of the
+ * result matches the dtype of `value`.
+ *
+ * T shfl_sync(mask, value, src_lane, width)
+ */
+TVM_DLL const Op &shfl_sync();
+
+/*!
+ * \brief Warp shuffle (XOR-swap variant). Lowers to `__shfl_xor_sync` on MUSA.
+ *
+ * T shfl_xor_sync(mask, value, lane_mask, width)
+ */
+TVM_DLL const Op &shfl_xor_sync();
+
+/*!
+ * \brief Warp shuffle (shift-down variant). Lowers to `__shfl_down_sync` on
+ * MUSA.
+ *
+ * T shfl_down_sync(mask, value, delta, width)
+ */
+TVM_DLL const Op &shfl_down_sync();
+
+/*!
+ * \brief Warp shuffle (shift-up variant). Lowers to `__shfl_up_sync` on MUSA.
+ *
+ * T shfl_up_sync(mask, value, delta, width)
+ */
+TVM_DLL const Op &shfl_up_sync();
+
+/*!
+ * \brief Warp match-any: returns a mask of lanes in `mask` whose `value`
+ * equals the calling lane's value. Lowers to `__match_any_sync` on MUSA.
+ *
+ * uint32 match_any_sync(mask, value)
+ */
+TVM_DLL const Op &match_any_sync();
+
+/*!
+ * \brief Warp match-all: returns `mask` if all lanes in `mask` agree on
+ * `value`, else 0. Lowers to `__match_all_sync` on MUSA; the trailing `int*`
+ * predicate output is discarded via an immediately-invoked lambda.
+ *
+ * uint32 match_all_sync(mask, value)
+ */
+TVM_DLL const Op &match_all_sync();
+
+/*!
  * \brief tvm intrinsic for loop continue
  *
  * loop_break()

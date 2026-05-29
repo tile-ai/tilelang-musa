@@ -58,5 +58,28 @@ def test_shfl_sync():
     assert torch.all(a == 310)
 
 
+@tilelang.jit
+def kernel_with_legacy_shfl_xor():
+    @T.prim_func
+    def main(
+        A: T.Tensor((32,), "int32"),
+    ):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            A[tx] = T.shfl_xor(tx, 1)
+
+    return main
+
+
+@tilelang.testing.requires_musa
+def test_legacy_shfl_xor_signature():
+    a = torch.empty((32), device="musa", dtype=torch.int32)
+    kernel = kernel_with_legacy_shfl_xor()
+    assert "__shfl_xor_sync" in kernel.get_kernel_source()
+    kernel(a)
+    expected = torch.arange(32, device="musa", dtype=torch.int32).bitwise_xor(1)
+    assert torch.equal(a, expected)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
