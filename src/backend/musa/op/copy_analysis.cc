@@ -14,6 +14,7 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/transform.h>
 
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -72,6 +73,46 @@ bool GetIsAsyncCopy(const CopyNode &op) {
 
 bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+enum class PreferredCopyInstruction {
+  kAuto,
+  kTMA,
+  kCPAsync,
+  kSync,
+};
+
+constexpr const char *kPreferInstruction = "prefer_instruction";
+
+std::optional<std::string> GetStringAnnotation(const CopyNode &op,
+                                               const char *key) {
+  auto val = op.annotations.Get(key);
+  if (!val) {
+    return std::nullopt;
+  }
+  auto str = val->as<StringImmNode>();
+  ICHECK(str) << "T.copy " << key << " annotation must be a string, but got "
+              << val.value().GetTypeKey();
+  return str->value;
+}
+
+PreferredCopyInstruction GetPreferredInstruction(const CopyNode &op) {
+  auto prefer = GetStringAnnotation(op, kPreferInstruction);
+  if (!prefer) {
+    return PreferredCopyInstruction::kAuto;
+  }
+  if (*prefer == "tma") {
+    return PreferredCopyInstruction::kTMA;
+  }
+  if (*prefer == "cp_async") {
+    return PreferredCopyInstruction::kCPAsync;
+  }
+  if (*prefer == "sync") {
+    return PreferredCopyInstruction::kSync;
+  }
+  LOG(FATAL) << "Unsupported T.copy prefer_instruction=\"" << *prefer
+             << "\". Expected one of: \"tma\", \"cp_async\", \"sync\".";
+  return PreferredCopyInstruction::kAuto;
 }
 
 bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
@@ -355,6 +396,7 @@ struct CopyFacts {
   bool explicit_cp_async = false;
   bool has_source_robust_desc = false;
   bool no_implicit_async_commit_wait = false;
+  PreferredCopyInstruction prefer_instruction = PreferredCopyInstruction::kAuto;
   bool disable_tma = false;
   bool can_bulk_load_1d = false;
   bool can_bulk_store_1d = false;
@@ -546,6 +588,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.explicit_cp_async = GetIsAsyncCopy(op);
   facts.has_source_robust_desc = HasSourceRobustDesc(op);
   facts.no_implicit_async_commit_wait = GetNoImplicitAsyncCommitWait(op);
+  facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
   facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
   facts.async_unavailable_reason = MakeAsyncUnavailableReason(op, ctx.target);
@@ -637,6 +680,40 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                               : Unsupported(facts.async_unavailable_reason);
   }
 
+  if (facts.prefer_instruction == PreferredCopyInstruction::kTMA) {
+    if (facts.disable_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "disable_tma=true.");
+    }
+    if (facts.pass_context_disables_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "pass config tl.disable_tma_lower=true.");
+    }
+    CopyInst inst =
+        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
+                      /*check_last_dim=*/true);
+    return inst == CopyInst::kInvalid
+               ? Unsupported("T.copy prefer_instruction=\"tma\" could not be honored: " +
+                             facts.tma_unavailable_reason)
+               : Supported(inst);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kCPAsync) {
+    if (!IsAutoAsyncCopyEnabled(/*default_enabled=*/true)) {
+      return Unsupported(
+          "T.copy prefer_instruction=\"cp_async\" conflicts with pass "
+          "config tl.enable_async_copy=false.");
+    }
+    return facts.can_cp_async
+               ? Supported(CopyInst::kCPAsync)
+               : Unsupported("T.copy prefer_instruction=\"cp_async\" could not be honored: " +
+                             facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
+    return Supported(SelectSyncLikeInst(facts));
+  }
+
   if (!facts.disable_tma && !facts.pass_context_disables_tma) {
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/false, /*allow_store=*/true,
@@ -670,6 +747,19 @@ std::string ClassifyCopyForInstructionAnnotation(const CopyNode &op,
     return facts.can_cp_async ? "cp_async" : "sync";
   }
 
+  if (facts.prefer_instruction == PreferredCopyInstruction::kTMA) {
+    CopyInst inst =
+        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
+                      /*check_last_dim=*/false);
+    return CopyInstIsTMA(inst) ? "tma" : "sync";
+  }
+  if (facts.prefer_instruction == PreferredCopyInstruction::kCPAsync) {
+    return facts.can_cp_async ? "cp_async" : "sync";
+  }
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
+    return "sync";
+  }
+
   if (in_pipeline && IsAutoAsyncCopyEnabled(/*default_enabled=*/false) &&
       facts.can_cp_async) {
     return "cp_async";
@@ -701,6 +791,22 @@ CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
                               : Unsupported(facts.async_unavailable_reason);
   }
 
+  if (facts.prefer_instruction == PreferredCopyInstruction::kTMA) {
+    CopyInst inst =
+        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/false,
+                      /*check_last_dim=*/false);
+    return inst == CopyInst::kInvalid
+               ? Unsupported(facts.tma_unavailable_reason)
+               : Supported(inst);
+  }
+  if (facts.prefer_instruction == PreferredCopyInstruction::kCPAsync) {
+    return facts.can_cp_async ? Supported(CopyInst::kCPAsync)
+                              : Unsupported(facts.async_unavailable_reason);
+  }
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
+    return Supported(SelectSyncLikeInst(facts));
+  }
+
   if (!facts.disable_tma && !facts.pass_context_disables_tma) {
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/false,
@@ -717,7 +823,8 @@ bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target) {
   CopyAnalysisContext ctx;
   ctx.target = target;
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
-  if (!facts.musa_target || facts.explicit_tma || facts.explicit_cp_async) {
+  if (!facts.musa_target || facts.explicit_tma || facts.explicit_cp_async ||
+      facts.prefer_instruction != PreferredCopyInstruction::kAuto) {
     return false;
   }
   return facts.can_cp_async;

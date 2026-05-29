@@ -91,6 +91,7 @@ def copy(
     inner_cache_policy: CachePolicy | None = None,
     outer_cache_policy: CachePolicy | None = None,
     src_robust_desc: tirx.PrimExpr | None = None,
+    prefer_instruction: str | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
@@ -107,9 +108,14 @@ def copy(
         outer_cache_policy (Optional[str], keyword-only): MUSA outer-cache policy.
         src_robust_desc (Optional[tirx.PrimExpr], keyword-only): MUSA robust source descriptor
             created by `T.make_robust_desc(addr, size_bytes)`.
+        prefer_instruction (Optional[str], keyword-only): Backend-specific preferred lowering
+            instruction category. CUDA and MUSA recognize "tma", "cp_async", and
+            "sync". For "tma", T.copy keeps synchronous copy semantics; global -> shared copies
+            lower through TMA with an automatically allocated barrier and wait when constraints
+            are satisfied.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
-            coalesced_width, disable_tma, force_async_copy, src_robust_desc, and cache-policy
-            fields can also be specified here.
+            coalesced_width, disable_tma, force_async_copy, src_robust_desc, cache-policy fields,
+            and prefer_instruction can also be specified here.
             Values in annotations take precedence over individual arguments.
         loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy
             (only valid for normal SIMT copy; incompatible with TMA/LDSM/STSM/TMem). When provided,
@@ -180,6 +186,10 @@ def copy(
     if "outer_cache_policy" not in ann and outer_cache_policy is not None:
         ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
     _set_tma_cache_annotations(ann)
+    if "prefer_instruction" not in ann and prefer_instruction is not None:
+        ann["prefer_instruction"] = prefer_instruction
+    if isinstance(ann.get("prefer_instruction"), str):
+        ann["prefer_instruction"] = tirx.StringImm(ann["prefer_instruction"])
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:

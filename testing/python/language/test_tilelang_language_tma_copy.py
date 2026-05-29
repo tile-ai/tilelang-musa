@@ -261,6 +261,40 @@ def run_gemm_tma_copy_store(num_stages, verbose=False):
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
+def test_copy_prefer_tma_lowers_as_synchronous_tma_load():
+    @T.prim_func
+    def main(x: T.Tensor((128, 32), T.float32)):
+        with T.Kernel(threads=128):
+            x_shared = T.alloc_shared((128, 32), T.float32)
+            T.copy(x, x_shared, annotations={"prefer_instruction": "tma"})
+
+    target = {"kind": "cuda", "arch": "sm_90"}
+    artifact = tilelang.lower(main, target=target, enable_device_compile=False)
+    device_source = str(artifact.kernel_source)
+    assert "tl::tma_load" in device_source
+    assert "x_to_x_shared_mbarrier_mem" in device_source
+    assert "x_to_x_shared_mbarrier[0]" in device_source
+    assert "arrive_and_expect_tx" in device_source
+    assert ".wait(0)" in device_source
+
+
+def test_copy_prefer_tma_lowers_as_synchronous_musa_tma_load():
+    @T.prim_func
+    def main(x: T.Tensor((128, 32), T.float32)):
+        with T.Kernel(threads=128):
+            x_shared = T.alloc_shared((128, 32), T.float32)
+            T.copy(x, x_shared, prefer_instruction="tma")
+
+    target = {"kind": "musa", "arch": "mp_31"}
+    artifact = tilelang.lower(main, target=target, enable_device_compile=False)
+    device_source = str(artifact.kernel_source)
+    assert "tl::tma_load" in device_source
+    assert "__musa_async_bar_record(1)" in device_source
+    assert "__musa_async_init_arrival(1" in device_source
+    assert "tl::mbarrier_arrive_expect_tx(1, 16384)" in device_source
+    assert "__musa_async_wait(1, 0)" in device_source
+
+
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_tma_copy_store_pipeline_2_stages():
     run_gemm_tma_copy_store(num_stages=2)
