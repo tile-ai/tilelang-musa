@@ -37,11 +37,6 @@ def allow_warp_group_reg_alloc(pass_ctx: PassContext, target: Target) -> bool:
     return False
 
 
-def allow_fence_proxy(target: Target | None = None) -> bool:
-    # MUSA backend does not require CUDA generic->async proxy fencing.
-    return False
-
-
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -301,10 +296,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
-    if allow_fence_proxy(target=target):
-        # in hopper device, wgmma is an async proxy
-        # so we need to inject a fence proxy before it
-        mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     if mcc.is_ph1(target):

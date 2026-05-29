@@ -19,6 +19,7 @@
 #include "tir/transforms/ir_utils.h"
 
 #include "../op/builtin.h"
+#include "../target/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -536,8 +537,15 @@ private:
 
 tvm::transform::Pass InjectFenceProxy() {
   auto pass_func = [](PrimFunc f, const IRModule &, const PassContext &) {
-    f = ProxyFenceRewriter::Apply(f);
-    return f;
+    // fence.proxy.async is only meaningful on CUDA targets that expose the
+    // TMA / async-proxy programming model (sm_90+). MUSA targets can report
+    // bulk-copy support too, but they do not use CUDA proxy fencing.
+    auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
+    if (!target_opt.defined() || !TargetIsCuda(target_opt.value()) ||
+        !TargetHasBulkCopy(target_opt.value())) {
+      return f;
+    }
+    return ProxyFenceRewriter::Apply(f);
   };
   return tir::transform::CreatePrimFuncPass(pass_func, 0, "tl.InjectFenceProxy",
                                             {});
