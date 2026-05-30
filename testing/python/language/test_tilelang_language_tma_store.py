@@ -180,5 +180,19 @@ def test_plain_copy_full_shape_tma_store_uses_1d():
     run_full_shape_tma_store_1d_codegen()
 
 
+def test_musa_tma_store_wait_rejects_read_false():
+    @T.prim_func
+    def main():
+        with T.Kernel(threads=128):
+            T.tma_store_wait(read=False)
+
+    with pytest.raises(Exception, match="MUSA T.tma_store_wait only supports read=True"):
+        tilelang.lower(
+            main,
+            target={"kind": "musa", "arch": "mp_31"},
+            enable_device_compile=False,
+        )
+
+
 if __name__ == "__main__":
     run_gemm_tma_store(2, verbose=True)

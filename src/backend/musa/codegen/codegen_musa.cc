@@ -2315,6 +2315,9 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
     int count = Downcast<IntImm>(op->args[0])->value;
+    bool read = Downcast<IntImm>(op->args[1])->value != 0;
+    ICHECK(read) << "MUSA T.tma_store_wait only supports read=True because "
+                    "the current SDK exposes __musa_tme_store_read_wait only.";
     this->PrintIndent();
     this->stream << "tl::tma_store_wait<" << count << ">();\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
