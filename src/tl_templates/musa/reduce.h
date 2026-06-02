@@ -40,6 +40,20 @@ struct MaxOp {
   }
 };
 
+struct MaxOpNan {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return mutlass::fast_max(x, y);
+  }
+
+  TL_DEVICE bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {
+    return bfloat16_t(__hmax_nan(__mt_bfloat16(x), __mt_bfloat16(y)));
+  }
+
+  TL_DEVICE half_t operator()(half_t const &x, half_t const &y) {
+    return half_t(__hmax_nan(x.to_half(), y.to_half()));
+  }
+};
+
 struct MinOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return mutlass::fast_min(x, y);
@@ -52,6 +66,20 @@ struct MinOp {
 
   TL_DEVICE half_t operator()(half_t const &x, half_t const &y) {
     return half_t(__hmin(x.to_half(), y.to_half()));
+  }
+};
+
+struct MinOpNan {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return mutlass::fast_min(x, y);
+  }
+
+  TL_DEVICE bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {
+    return bfloat16_t(__hmin_nan(__mt_bfloat16(x), __mt_bfloat16(y)));
+  }
+
+  TL_DEVICE half_t operator()(half_t const &x, half_t const &y) {
+    return half_t(__hmin_nan(x.to_half(), y.to_half()));
   }
 };
 

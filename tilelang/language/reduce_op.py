@@ -32,9 +32,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
         dim (int): Dimension along which to perform reduction
         clear (bool): Whether to initialize the output buffer before reduction
         nan_propagate (bool): Only meaningful for max/min/absmax on
-            float16/bfloat16. When True, lower to CUDA __hmax_nan/__hmin_nan so
+            float16/bfloat16. When True, lower to CUDA/MUSA __hmax_nan/__hmin_nan so
             NaNs propagate through the reduction. When False (default), use
-            __hmax/__hmin which return the non-NaN operand. CUDA-only.
+            __hmax/__hmin which return the non-NaN operand. CUDA/MUSA only.
     """
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
@@ -137,8 +137,8 @@ def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         If set to True, the output buffer will first be initialized to -inf.
     nan_propagate : bool
         For float16/bfloat16 only. When True, NaN inputs propagate through the
-        reduction (CUDA __hmax_nan). When False (default), NaN inputs are
-        ignored in favor of the other operand (CUDA __hmax). CUDA-only.
+        reduction (CUDA/MUSA __hmax_nan). When False (default), NaN inputs are
+        ignored in favor of the other operand (CUDA __hmax). CUDA/MUSA only.
     Returns
     -------
     handle : PrimExpr
@@ -156,8 +156,8 @@ def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         dim (int): The dimension to perform reduce on
         clear (bool, optional): If True, output buffer will be initialized to inf. Defaults to True.
         nan_propagate (bool, optional): For float16/bfloat16 only. When True,
-            NaN inputs propagate (CUDA __hmin_nan). When False (default), NaNs
-            are ignored (CUDA __hmin). CUDA-only.
+            NaN inputs propagate (CUDA/MUSA __hmin_nan). When False (default), NaNs
+            are ignored (CUDA __hmin). CUDA/MUSA only.
 
     Returns:
         tir.Call: Handle to the reduction operation
@@ -214,8 +214,8 @@ def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
         nan_propagate (bool, optional): For float16/bfloat16 only. When True,
-            NaN inputs propagate (CUDA __hmax_nan). When False (default), NaNs
-            are ignored. CUDA-only.
+            NaN inputs propagate (CUDA/MUSA __hmax_nan). When False (default), NaNs
+            are ignored. CUDA/MUSA only.
 
     Returns:
         tir.Call: Handle to the reduction operation

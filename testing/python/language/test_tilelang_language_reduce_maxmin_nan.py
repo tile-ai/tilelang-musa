@@ -1,5 +1,5 @@
 """Tests for the per-call ``nan_propagate`` kwarg on T.reduce_max / reduce_min /
-reduce_absmax for float16 and bfloat16 buffers (CUDA only)."""
+reduce_absmax for float16 and bfloat16 buffers (CUDA/MUSA)."""
 
 import math
 
@@ -13,7 +13,7 @@ _DTYPES = [("float16", T.float16, torch.float16), ("bfloat16", T.bfloat16, torch
 
 
 def _compile(prim_func):
-    return tilelang.compile(prim_func, out_idx=-1, target="cuda")
+    return tilelang.compile(prim_func, out_idx=-1, target="musa")
 
 
 def _make_reduce_kernel(reduce_fn, length, dtype, *, nan_propagate):
@@ -35,15 +35,15 @@ def _make_reduce_kernel(reduce_fn, length, dtype, *, nan_propagate):
 # ---------------------------------------------------------------------------
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_reduce_max_default_uses_plain_op():
     k = _compile(_make_reduce_kernel(T.reduce_max, 64, T.float16, nan_propagate=False))
     src = k.get_kernel_source()
     assert "tl::MaxOp" in src and "MaxOpNan" not in src
-    assert "__hmax(" in src and "__hmax_nan" not in src
+    assert "mutlass::fast_max" in src and "__hmax_nan" not in src
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_reduce_max_nan_propagate_uses_nan_op():
     k = _compile(_make_reduce_kernel(T.reduce_max, 64, T.float16, nan_propagate=True))
     src = k.get_kernel_source()
@@ -51,7 +51,7 @@ def test_reduce_max_nan_propagate_uses_nan_op():
     assert "__hmax_nan" in src
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_reduce_min_nan_propagate_uses_nan_op():
     k = _compile(_make_reduce_kernel(T.reduce_min, 64, T.bfloat16, nan_propagate=True))
     src = k.get_kernel_source()
@@ -59,7 +59,7 @@ def test_reduce_min_nan_propagate_uses_nan_op():
     assert "__hmin_nan" in src
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_reduce_absmax_nan_propagate_uses_nan_op():
     k = _compile(_make_reduce_kernel(T.reduce_absmax, 64, T.float16, nan_propagate=True))
     src = k.get_kernel_source()
@@ -72,11 +72,11 @@ def test_reduce_absmax_nan_propagate_uses_nan_op():
 # ---------------------------------------------------------------------------
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_reduce_max_runtime_nan_behavior():
     for _, tl_dtype, torch_dtype in _DTYPES:
         length = 64
-        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).cuda()
+        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).to("musa")
         a[7] = float("nan")
 
         k_default = _compile(_make_reduce_kernel(T.reduce_max, length, tl_dtype, nan_propagate=False))
@@ -89,11 +89,11 @@ def test_reduce_max_runtime_nan_behavior():
         assert math.isnan(out_nan.float().item()), f"{tl_dtype}: nan_propagate reduce_max should return NaN, got {out_nan}"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_reduce_min_runtime_nan_behavior():
     for _, tl_dtype, torch_dtype in _DTYPES:
         length = 64
-        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).cuda()
+        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).to("musa")
         a[13] = float("nan")
 
         k_default = _compile(_make_reduce_kernel(T.reduce_min, length, tl_dtype, nan_propagate=False))

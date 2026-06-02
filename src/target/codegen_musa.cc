@@ -1732,6 +1732,29 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+  if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
+    ICHECK_EQ(op->args.size(), 2);
+    const bool is_max = op->op.same_as(tl::max_nan());
+    const DataType t = op->dtype;
+    const char *f16_intrin = is_max ? "__hmax_nan" : "__hmin_nan";
+    const char *fallback = is_max ? "mutlass::fast_max" : "mutlass::fast_min";
+
+    if (t.is_bfloat16() && t.is_scalar()) {
+      os << "bfloat16_t(" << f16_intrin << "("
+         << "__mt_bfloat16(" << PrintExpr(op->args[0]) << "), "
+         << "__mt_bfloat16(" << PrintExpr(op->args[1]) << ")))";
+      return;
+    }
+    if (t.is_float16() && t.is_scalar()) {
+      os << "half_t(" << f16_intrin << "("
+         << "(" << PrintExpr(op->args[0]) << ").to_half(), "
+         << "(" << PrintExpr(op->args[1]) << ").to_half()))";
+      return;
+    }
+    os << fallback << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+    return;
+  }
   auto print_mbarrier_id = [&](PrimExpr barrier_id) {
     return this->PrintExpr(barrier_id);
   };
