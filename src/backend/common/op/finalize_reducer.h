@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace tvm {
@@ -87,11 +88,13 @@ template <typename Impl> struct FinalizeReducerLowerer {
           << "finalize_reducer requires an mbarrier allocator for named "
              "barrier synchronization";
       ICHECK(T.mbarrier_buffer != nullptr);
-      sync_barrier_id = T.AllocMBarrier(*as_const_int(all_threads));
+      sync_barrier_id =
+          T.AllocMBarrier(*as_const_int(all_threads), std::nullopt);
       // MUSA NamedBarrier uses two phases in AllReduce: sync<0>() before the
       // workspace write and sync<1>() before the peer read. Reserve both
       // consecutive barrier IDs while passing the first one to the template.
-      int sync_barrier_next_id = T.AllocMBarrier(*as_const_int(all_threads));
+      int sync_barrier_next_id =
+          T.AllocMBarrier(*as_const_int(all_threads), std::nullopt);
       ICHECK_EQ(sync_barrier_next_id, sync_barrier_id + 1)
           << "finalize_reducer requires consecutive named barrier IDs";
       sync_barrier = T.mbarrier_buffer->value();

@@ -9,7 +9,7 @@
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "support/check.h"
-#include "target/utils.h"
+#include "backend/common/target_utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 

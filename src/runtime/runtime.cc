@@ -10,7 +10,7 @@
 #if defined(MUSA_MAJOR_VERSION)
 #include <musa.h>
 #else
-#include "backend/cuda/stubs/cuda.h"
+#include "cuda/stubs/cuda.h"
 #endif
 
 #include <cstdint>

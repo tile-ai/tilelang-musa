@@ -21,7 +21,7 @@
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 
 namespace tvm {
 namespace tl {

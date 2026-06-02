@@ -32,7 +32,7 @@
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "tir/ir/buffer_common.h"
 
 namespace tvm {

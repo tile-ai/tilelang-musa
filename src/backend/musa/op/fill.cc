@@ -5,7 +5,7 @@
 
 #include "backend/common/op/fill.h"
 
-#include "target/utils.h"
+#include "backend/common/target_utils.h"
 
 namespace tvm {
 namespace tl {

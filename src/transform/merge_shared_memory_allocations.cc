@@ -46,7 +46,7 @@
 
 #include "../op/builtin.h"
 #include "../op/gemm.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>

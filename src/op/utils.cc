@@ -4,7 +4,7 @@
  */
 
 #include "utils.h"
-#include "backend/cuda/stubs/cuda.h"
+#include "cuda/stubs/cuda.h"
 #include "support/check.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/cast.h>

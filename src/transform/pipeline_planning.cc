@@ -24,7 +24,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "tvm/ir/expr.h"
 
 namespace tvm {

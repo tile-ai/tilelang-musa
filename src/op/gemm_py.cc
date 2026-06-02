@@ -14,7 +14,7 @@
 #include <tvm/tirx/transform.h>
 #include <vector>
 
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "tcgen5_meta.h"
 #include "utils.h"
 

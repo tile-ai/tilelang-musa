@@ -21,7 +21,7 @@
 #include "tir/transforms/ir_utils.h"
 
 #include "../op/builtin.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 
 namespace tvm {
 namespace tl {

@@ -8,7 +8,7 @@
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "support/check.h"
-#include "target/utils.h"
+#include "backend/common/target_utils.h"
 
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>

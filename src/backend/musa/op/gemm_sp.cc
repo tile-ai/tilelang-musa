@@ -6,7 +6,7 @@
 #include "op/gemm_sp.h"
 
 #include "support/check.h"
-#include "target/utils.h"
+#include "backend/common/target_utils.h"
 
 #include <tvm/runtime/logging.h>
 

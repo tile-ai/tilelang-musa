@@ -6,7 +6,7 @@
 #include "backend/common/op/finalize_reducer.h"
 
 #include "support/check.h"
-#include "target/utils.h"
+#include "backend/common/target_utils.h"
 
 #include <sstream>
 

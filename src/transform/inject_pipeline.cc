@@ -1,4 +1,4 @@
-﻿/*!
+/*!
  * \file inject_software_pipeline.cc
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers
@@ -31,7 +31,7 @@
 #include "../op/operator.h"
 #include "../op/region.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
 #include "support/utils.h"

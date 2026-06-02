@@ -4,7 +4,7 @@
  *         coordinate translation (from logical address to physical address)
  */
 #include "../op/builtin.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "support/check.h"
 #include "tvm/ir/type.h"
 #include <tvm/arith/analyzer.h>

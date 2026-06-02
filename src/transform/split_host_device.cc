@@ -37,7 +37,7 @@
 #include <unordered_set>
 
 #include "../op/builtin.h"
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "common/assume.h"
 #include "common/attr.h"
 #include "tir/analysis/var_use_def_analysis.h"

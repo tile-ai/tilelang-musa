@@ -9,7 +9,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../target/utils.h"
+#include "backend/common/target_utils.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "loop_vectorize.h"
 
