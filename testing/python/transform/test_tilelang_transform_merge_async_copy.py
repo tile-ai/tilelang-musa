@@ -48,7 +48,7 @@ def test_merge_async_copy_folds_plain_unrolled_loop():
                 T.ptx_cp_async(
                     T.access_ptr(S[v * 4], "w", 4),
                     T.access_ptr(A[v * 4], "r", 4),
-                    8,
+                    4,
                 )
             )
         B[0] = S[0]
@@ -58,7 +58,7 @@ def test_merge_async_copy_folds_plain_unrolled_loop():
 
     calls = _collect_async_copy_calls(mod["main"])
     assert len(calls) == 1
-    assert int(calls[0].args[2]) == 16
+    assert int(calls[0].args[2]) == 8
     assert _count_for_loops(mod["main"]) == 0
 
 

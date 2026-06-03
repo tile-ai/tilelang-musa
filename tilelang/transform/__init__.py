@@ -432,11 +432,11 @@ def LateVectorizePlanner():
 
 
 def LowerPTXAsyncCopy():
-    """Lower eligible global->shared copies into PTX `cp.async` on CUDA.
+    """Lower eligible global->shared copies into TileLang `cp.async`.
 
     When enabled (pass config `tl.enable_async_copy`, default True), this pass
     may rewrite plain user-written global->shared `BufferStore` patterns (e.g.
-    SIMT copies in `T.Parallel`) into `tir.ptx_cp_async`, and insert
+    SIMT copies in `T.Parallel`) into `tl.ptx_cp_async`, and insert
     `tir.ptx_commit_group` + `tir.ptx_wait_group(0)` to preserve synchronous
     semantics for normal stores. If explicit commit/wait intrinsics already
     exist, the pass avoids duplicating them (and may insert a missing commit
@@ -454,7 +454,7 @@ def MergeAsyncCopy():
     """Merge narrow async-copy loops into a wider async-copy when legal.
 
     This pass is intended to run after `LowerPTXAsyncCopy`, where async copies
-    have already been rewritten into `ptx_cp_async` / `musa_cp_async_robust`
+    have already been rewritten into `tl.ptx_cp_async` / `musa_cp_async_robust`
     calls but may still appear as short unrolled loops.
 
     Returns

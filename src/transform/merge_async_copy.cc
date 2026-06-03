@@ -50,7 +50,7 @@ private:
     Op op;
     AccessPtrInfo dst;
     AccessPtrInfo src;
-    IntImm bytes;
+    IntImm count;
     Optional<PrimExpr> predicate;
     Optional<PrimExpr> robust_base;
     Optional<PrimExpr> robust_size;
@@ -99,8 +99,8 @@ private:
 
     std::optional<AccessPtrInfo> dst = MatchAccessPtr(call->args[0]);
     std::optional<AccessPtrInfo> src = MatchAccessPtr(call->args[1]);
-    const auto *bytes = call->args[2].as<IntImmNode>();
-    if (!dst.has_value() || !src.has_value() || bytes == nullptr) {
+    const auto *count = call->args[2].as<IntImmNode>();
+    if (!dst.has_value() || !src.has_value() || count == nullptr) {
       return std::nullopt;
     }
 
@@ -175,19 +175,25 @@ private:
     }
 
     const AsyncCopyInfo &copy = wrapped.value().copy;
-    int64_t total_bytes = static_cast<int64_t>(copy.bytes->value) * extent;
+    std::optional<int64_t> per_copy_bits = GetTransferBits(copy);
+    if (!per_copy_bits.has_value()) {
+      return Optional<Stmt>();
+    }
+    int64_t total_bits = per_copy_bits.value() * extent;
+    if (total_bits % 8 != 0) {
+      return Optional<Stmt>();
+    }
+    int64_t total_bytes = total_bits / 8;
     if (!IsValidCPAsyncTransferBytes(static_cast<int>(total_bytes))) {
       return Optional<Stmt>();
     }
     if (!AttrsInvariant(wrapped.value().attrs, loop->loop_var)) {
       return Optional<Stmt>();
     }
-    if (!AccessPtrHasConstantStep(
-            copy.dst, loop->loop_var, min, extent,
-            StepInElements(copy.dst.base_load, copy.bytes)) ||
-        !AccessPtrHasConstantStep(
-            copy.src, loop->loop_var, min, extent,
-            StepInElements(copy.src.base_load, copy.bytes))) {
+    if (!AccessPtrHasConstantStep(copy.dst, loop->loop_var, min, extent,
+                                  StepInElements(copy, copy.dst.base_load)) ||
+        !AccessPtrHasConstantStep(copy.src, loop->loop_var, min, extent,
+                                  StepInElements(copy, copy.src.base_load))) {
       return Optional<Stmt>();
     }
     if (!AsyncCopyInvariant(copy, loop->loop_var)) {
@@ -197,7 +203,8 @@ private:
     AsyncCopyInfo merged = copy;
     merged.dst = MakeMergedAccessPtr(copy.dst, loop->loop_var, min, extent);
     merged.src = MakeMergedAccessPtr(copy.src, loop->loop_var, min, extent);
-    merged.bytes = IntImm(copy.bytes->dtype, total_bytes);
+    int64_t merged_count = static_cast<int64_t>(copy.count->value) * extent;
+    merged.count = IntImm(copy.count->dtype, merged_count);
     return Rewrap(wrapped.value().attrs, MakeAsyncCopyStmt(merged));
   }
 
@@ -205,7 +212,7 @@ private:
     Array<PrimExpr> args{
         MakeAccessPtr(copy.dst),
         MakeAccessPtr(copy.src),
-        copy.bytes,
+        copy.count,
     };
     if (copy.robust_base.defined()) {
       args.push_back(copy.robust_base.value());
@@ -301,12 +308,51 @@ private:
     return false;
   }
 
-  static int64_t StepInElements(const BufferLoad &load, const IntImm &bytes) {
+  static bool UsesByteCount(const Op &op) {
+    return op.same_as(builtin::ptx_cp_async()) ||
+           op.same_as(tl::musa_cp_async_robust());
+  }
+
+  static std::optional<int64_t> GetElementBits(const BufferLoad &load) {
+    DataType dtype = load->buffer->dtype;
+    int64_t bits = static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+    if (bits <= 0) {
+      return std::nullopt;
+    }
+    return bits;
+  }
+
+  static std::optional<int64_t> GetTransferBits(const AsyncCopyInfo &copy) {
+    if (copy.count->value <= 0) {
+      return std::nullopt;
+    }
+    if (UsesByteCount(copy.op)) {
+      return static_cast<int64_t>(copy.count->value) * 8;
+    }
+    ICHECK(copy.op.same_as(tl::ptx_cp_async()));
+    auto dst_elem_bits = GetElementBits(copy.dst.base_load);
+    auto src_elem_bits = GetElementBits(copy.src.base_load);
+    if (!dst_elem_bits.has_value() || !src_elem_bits.has_value()) {
+      return std::nullopt;
+    }
+    int64_t dst_total_bits = copy.count->value * dst_elem_bits.value();
+    int64_t src_total_bits = copy.count->value * src_elem_bits.value();
+    ICHECK_EQ(dst_total_bits, src_total_bits)
+        << "tl.ptx_cp_async requires src/dst transfer widths to match, but got "
+        << dst_total_bits << " vs " << src_total_bits << " bits";
+    return dst_total_bits;
+  }
+
+  static int64_t StepInElements(const AsyncCopyInfo &copy,
+                                const BufferLoad &load) {
+    if (!UsesByteCount(copy.op)) {
+      return copy.count->value;
+    }
     int elem_bytes = load->buffer->dtype.bytes();
-    if (elem_bytes <= 0 || bytes->value % elem_bytes != 0) {
+    if (elem_bytes <= 0 || copy.count->value % elem_bytes != 0) {
       return 0;
     }
-    return bytes->value / elem_bytes;
+    return copy.count->value / elem_bytes;
   }
 
   PrimExpr SubstituteValue(const PrimExpr &expr, const Var &var,

@@ -32,8 +32,8 @@ def test_access_ptr_cp_async_codegen():
 
 
 @tilelang.testing.requires_musa
-def test_vectorized_cp_async_bytes_codegen():
-    """Check vectorized ptx_cp_async byte folding (elem_bytes * lanes)."""
+def test_vectorized_cp_async_num_elems_codegen():
+    """Check vectorized ptx_cp_async element-count folding."""
 
     @T.prim_func
     def main(
@@ -46,7 +46,7 @@ def test_vectorized_cp_async_bytes_codegen():
                 T.ptx_cp_async(
                     T.access_ptr(S[i], "w", 1),
                     T.access_ptr(A[i], "r", 1),
-                    2,
+                    1,
                 )
             T.ptx_commit_group()
             T.ptx_wait_group(0)
@@ -56,8 +56,32 @@ def test_vectorized_cp_async_bytes_codegen():
     src = kernel.get_kernel_source()
     print("=== vectorized cp.async codegen ===")
     print(src)
-    assert "cp_async_gs<8>" in src, "Expected vectorized cp.async bytes to fold into cp_async_gs<8>"
+    assert "cp_async_gs<8>" in src, "Expected vectorized cp.async element count to fold into cp_async_gs<8>"
     assert "cp_async_gs<2>" not in src, "Did not expect scalar cp.async bytes in generated MUSA source"
+
+
+@tilelang.testing.requires_musa
+def test_vectorized_int4_cp_async_num_elems_codegen():
+    """Check subbyte ptx_cp_async derives bytes from logical element counts."""
+
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.int4)):
+        with T.Kernel(1, threads=32):
+            S = T.alloc_shared((128,), T.int4)
+            for i in T.vectorized(32):
+                T.ptx_cp_async(
+                    T.access_ptr(S[i], "w", 1),
+                    T.access_ptr(A[i], "r", 1),
+                    1,
+                )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    kernel = tilelang.compile(main, target="musa")
+    src = kernel.get_kernel_source()
+    print("=== vectorized int4 cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs<16>" in src, "Expected 32 x int4 elems to fold into cp_async_gs<16>"
 
 
 @tilelang.testing.requires_musa

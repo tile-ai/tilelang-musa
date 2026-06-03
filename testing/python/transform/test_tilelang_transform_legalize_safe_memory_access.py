@@ -187,9 +187,9 @@ def cp_async_access_ptr_legalize(N: int = 16, offset: int = 10):
         A_shared = T.alloc_buffer((N,), dtype=dtype, scope="shared")
         for i in T.serial(4):
             T.ptx_cp_async(
-                T.access_ptr(A_shared[i * 4], "w", 4),
-                T.access_ptr(A[i * 4 + offset], "r", 4),
-                4,
+                T.access_ptr(A_shared[i * 4], "w", 2),
+                T.access_ptr(A[i * 4 + offset], "r", 2),
+                2,
             )
         T.ptx_commit_group()
         T.ptx_wait_group(0)
@@ -201,9 +201,9 @@ def cp_async_access_ptr_legalize(N: int = 16, offset: int = 10):
         A_shared = T.alloc_buffer((N,), dtype=dtype, scope="shared")
         for i in T.serial(4):
             T.ptx_cp_async(
-                T.access_ptr(A_shared[i * 4], "w", 4),
-                T.access_ptr(A[i * 4 + offset], "r", 4),
-                4,
+                T.access_ptr(A_shared[i * 4], "w", 2),
+                T.access_ptr(A[i * 4 + offset], "r", 2),
+                2,
                 i * 4 + offset < N,
             )
         T.ptx_commit_group()
@@ -236,9 +236,9 @@ def cp_async_access_ptr_nonzero_safe_value_legalize(N: int = 16, offset: int = 1
             A_shared = T.alloc_buffer((N,), dtype=dtype, scope="shared")
             for i in T.serial(4):
                 T.ptx_cp_async(
-                    T.access_ptr(A_shared[i * 4], "w", 4),
-                    T.access_ptr(A[i * 4 + offset], "r", 4),
-                    4,
+                    T.access_ptr(A_shared[i * 4], "w", 2),
+                    T.access_ptr(A[i * 4 + offset], "r", 2),
+                    2,
                 )
             T.ptx_commit_group()
             T.ptx_wait_group(0)
@@ -255,9 +255,9 @@ def cp_async_access_ptr_nonzero_safe_value_legalize(N: int = 16, offset: int = 1
             for i in T.serial(4):
                 if i * 4 + offset < N:
                     T.ptx_cp_async(
-                        T.access_ptr(A_shared[i * 4], "w", 4),
-                        T.access_ptr(A[i * 4 + offset], "r", 4),
-                        4,
+                        T.access_ptr(A_shared[i * 4], "w", 2),
+                        T.access_ptr(A[i * 4 + offset], "r", 2),
+                        2,
                     )
             T.ptx_commit_group()
             T.ptx_wait_group(0)
