@@ -94,6 +94,26 @@ bool AllowWgmma(const GemmNode &op, int block_size, Target target) {
          CheckWgmma(op);
 }
 
+void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
+  LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
+                "constraints were not satisfied. Got target="
+             << target << ", A(scope=" << op.a_.scope()
+             << ", dtype=" << op.a_->dtype << "), B(scope=" << op.b_.scope()
+             << ", dtype=" << op.b_->dtype << "), C(scope=" << op.c_.scope()
+             << ", dtype=" << op.c_->dtype << "), M=" << op.m_
+             << ", N=" << op.n_ << ", K=" << op.k_ << ".";
+}
+
+void FatalTcgen5Unavailable(const GemmNode &op, Target target) {
+  LOG(FATAL) << "T.tcgen05_gemm() requires Blackwell TCGEN5MMA lowering, "
+                "but constraints were not satisfied. Got target="
+             << target << ", A(scope=" << op.a_.scope()
+             << ", dtype=" << op.a_->dtype << "), B(scope=" << op.b_.scope()
+             << ", dtype=" << op.b_->dtype << "), C(scope=" << op.c_.scope()
+             << ", dtype=" << op.c_->dtype << "), M=" << op.m_
+             << ", N=" << op.n_ << ", K=" << op.k_ << ".";
+}
+
 std::pair<int, int>
 ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                             int num_warps, int k_n_per_warp) {
@@ -134,12 +154,14 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
     float best_balance = std::numeric_limits<float>::max();
     for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
       int n = num_warps / m;
+
       float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
       float n_per_warp = static_cast<float>(N) / (n * k_n_per_warp);
       if (m_per_warp < 1 || n_per_warp < 1)
         continue;
       if (m * n != num_warps)
         continue;
+
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
       if (balance < best_balance) {
         best_balance = balance;
@@ -147,6 +169,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
         best_n = n;
       }
     }
+
     m_warp = best_m;
     n_warp = best_n;
   } else {
@@ -241,6 +264,19 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
 
 struct Gemm {
   static String SelectInst(const GemmNode &op, int block_size, Target target) {
+    if (op.isWgmma_) {
+      if (!AllowWgmma(op, block_size, target)) {
+        FatalWgmmaUnavailable(op, target);
+      }
+      return kCudaWGMMA;
+    }
+    if (op.isTcgen05_) {
+      if (!AllowTcgen5Mma(op, target)) {
+        FatalTcgen5Unavailable(op, target);
+      }
+      return kCudaTCGEN05;
+    }
+
     if (AllowTcgen5Mma(op, target)) {
       return kCudaTCGEN05;
     }
@@ -312,8 +348,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def(
       "tl.get_tcgen5_mma_meta",
-      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype);
+      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype,
+         bool disable_2cta, bool disable_ws = false) {
+        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype,
+                                                disable_2cta, disable_ws);
         Array<Integer> result;
         if (success) {
           result.push_back(Integer(meta.atom_m));
@@ -326,12 +364,22 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       });
   refl::GlobalDef().def(
       "tl.get_tcgen5_instr_desc",
-      [](int atom_m, int atom_n, int atom_k, DataType ab_dtype,
+      [](int atom_m, int atom_n, int atom_k, DataType a_dtype, DataType b_dtype,
          DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int scale_in_a,
          int scale_in_b) {
-        uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, ab_dtype,
-                                           c_dtype, a_is_k_major, b_is_k_major,
-                                           scale_in_a, scale_in_b);
+        uint32_t desc = GetTCGEN5InstrDesc(
+            atom_m, atom_n, atom_k, a_dtype, b_dtype, c_dtype, a_is_k_major,
+            b_is_k_major, scale_in_a, scale_in_b);
+        return Integer(static_cast<int64_t>(desc));
+      });
+  refl::GlobalDef().def(
+      "tl.get_tcgen5_blockscaled_instr_desc",
+      [](int atom_m, int atom_n, DataType a_dtype, DataType b_dtype,
+         bool a_is_k_major, bool b_is_k_major, int scale_in_a, int scale_in_b,
+         int a_sf_id, int b_sf_id) {
+        uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
+            atom_m, atom_n, a_dtype, b_dtype, a_is_k_major, b_is_k_major,
+            scale_in_a, scale_in_b, a_sf_id, b_sf_id);
         return Integer(static_cast<int64_t>(desc));
       });
 }
