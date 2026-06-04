@@ -524,7 +524,7 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
 
     k_load = src.find("tl::tma_load(K_in_desc")
     v_load = src.find("tl::tma_load(V_in_desc")
-    branch = src.find("if (128 <= ((int)threadIdx.x))")
+    branch = src.find("if (((int)threadIdx.x) < 128)")
     first_wait = src.find(".wait(0)")
 
     assert min(k_load, v_load, branch, first_wait) >= 0
@@ -570,7 +570,7 @@ def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
     start_bind = _find_after(src, "int start =")
     first_tma_load = _find_after(src, "tl::tma_load<")
     k_load = _find_after(src, "K_in_desc", first_tma_load)
-    branch = _find_after(src, "if (128 <= ((int)threadIdx.x))")
+    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
 
     assert start_bind < k_load < branch
 
@@ -583,7 +583,7 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     func = guarded_prelude_tma_postloop_scalar().with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
     mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "musa", "arch": "mp_31"}))(mod)
-    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tilelang.musa.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
@@ -603,7 +603,7 @@ def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     kernel, batch_sizes = _compile_grouped_gemm_ws(target={"kind": "musa", "arch": "mp_31"})
     src = kernel.get_kernel_source()
 
-    branch = _find_after(src, "256 <= ((int)threadIdx.x)")
+    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
     cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
     m_start = _find_after(src, "int m_start =")
     actual_rows = _find_after(src, "int actual_rows =")
