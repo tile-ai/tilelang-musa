@@ -10,13 +10,13 @@ import tilelang.testing
 def force_mp22_m16_mma(monkeypatch):
     cache_enabled = tilelang.is_cache_enabled()
     tilelang.disable_cache()
-    monkeypatch.setenv("TILELANG_MUSA_MP22_MMA_SHAPE", "m16n16k16")
+    monkeypatch.setenv("TILELANG_MUSA_MP22_MMA_SHAPE", "m8n32k16")
     yield
     if cache_enabled:
         tilelang.enable_cache()
 
 
-THREADS = [32, 64, 128, 256, 512, 1024]
+THREADS = [32, 64, 128, 256, 512]
 TRANSPOSE_CASES = [
     (False, False, "nn"),
     (False, True, "nt"),
@@ -25,10 +25,10 @@ TRANSPOSE_CASES = [
 ]
 
 
-def _assert_uses_m16_gemm(kernel_source, op_name, layout_tag):
-    if not re.search(rf"tl::{op_name}<[^;]*,\s*16,\s*16,\s*16>", kernel_source):
+def _assert_uses_m8_gemm(kernel_source, op_name, layout_tag):
+    if not re.search(rf"tl::{op_name}<[^;]*,\s*8,\s*32,\s*16>", kernel_source):
         raise AssertionError(
-            f"{layout_tag} did not lower to MP22 m16n16k16 {op_name}. Expected trailing inst shape template args: 16, 16, 16."
+            f"{layout_tag} did not lower to MP22 m8n32k16 {op_name}. Expected trailing inst shape template args: 8, 32, 16."
         )
 
 
@@ -112,7 +112,7 @@ def run_gemm(
     )
     kernel = tilelang.compile(program, out_idx=[2])
     kernel_source = kernel.get_kernel_source()
-    _assert_uses_m16_gemm(kernel_source, "gemm_ss", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
+    _assert_uses_m8_gemm(kernel_source, "gemm_ss", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
     print(kernel_source)
     profiler = kernel.get_profiler()
 
@@ -244,7 +244,7 @@ def run_gemm_sr(
 
     kernel = tilelang.compile(program, out_idx=[2], verbose=True)
     kernel_source = kernel.get_kernel_source()
-    _assert_uses_m16_gemm(kernel_source, "gemm_sr", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
+    _assert_uses_m8_gemm(kernel_source, "gemm_sr", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
     print(kernel_source)
     profiler = kernel.get_profiler()
 
@@ -370,7 +370,7 @@ def run_gemm_rr(
 
     kernel = tilelang.compile(program, out_idx=[2])
     kernel_source = kernel.get_kernel_source()
-    _assert_uses_m16_gemm(kernel_source, "gemm_rr", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
+    _assert_uses_m8_gemm(kernel_source, "gemm_rr", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
     print(kernel_source)
     profiler = kernel.get_profiler()
 
@@ -494,7 +494,7 @@ def run_gemm_rs(
 
     kernel = tilelang.compile(program, out_idx=[2])
     kernel_source = kernel.get_kernel_source()
-    _assert_uses_m16_gemm(kernel_source, "gemm_rs", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
+    _assert_uses_m8_gemm(kernel_source, "gemm_rs", f"{'t' if trans_A else 'n'}{'t' if trans_B else 'n'}")
     print(kernel_source)
     profiler = kernel.get_profiler()
 

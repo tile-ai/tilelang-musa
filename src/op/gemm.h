@@ -50,7 +50,7 @@ enum class GemmInst : uint8_t {
   kFMA,
   kSQMMA,
   kPH1WMMA,
-  kQY2M16MMA,
+  kQY2MMA,
   kScalar,
 };
 
@@ -71,8 +71,8 @@ inline const char *GemmInstToString(GemmInst inst) {
     return "SQMMA";
   case GemmInst::kPH1WMMA:
     return "PH1WMMA";
-  case GemmInst::kQY2M16MMA:
-    return "QY2M16MMA";
+  case GemmInst::kQY2MMA:
+    return "QY2MMA";
   case GemmInst::kScalar:
     return "Scalar";
   default:
@@ -96,9 +96,9 @@ public:
         .def_ro("n_warp", &GemmWarpPolicyNode::n_warp);
   }
 
-  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
-                                           Target target,
-                                           GemmInst gemm_inst) const;
+  std::pair<int, int> computeWarpPartition(
+      int M, int N, int block_size, Target target, GemmInst gemm_inst,
+      std::optional<std::array<int, 3>> mma_inst_shape = std::nullopt) const;
 
   bool isSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);

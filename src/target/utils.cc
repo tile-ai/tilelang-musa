@@ -205,8 +205,11 @@ int TargetGetWarpSize(Target target) {
   if (TargetIsCDNA(target))
     res = 64;
   if (TargetIsQY2(target)) {
-    const char *force_m16 = std::getenv("TILELANG_MUSA_MP22_FORCE_M16_MMA");
-    res = force_m16 != nullptr && std::string(force_m16) == "1" ? 32 : 128;
+    const char *mma_shape = std::getenv("TILELANG_MUSA_MP22_MMA_SHAPE");
+    const bool use_wave32_shape =
+        mma_shape != nullptr && (std::string(mma_shape) == "m16n16k16" ||
+                                 std::string(mma_shape) == "m8n32k16");
+    res = use_wave32_shape ? 32 : 128;
   }
   return res;
 }

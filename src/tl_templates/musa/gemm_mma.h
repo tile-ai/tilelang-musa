@@ -28,7 +28,7 @@ using _X = Underscore;
                              num_warp_n, inst_m, inst_n, inst_k, trans_A,      \
                              trans_B> {                                        \
     using MMA = MMA_Atom<MMA_instr>;                                           \
-    using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 32, N)>, _X>;         \
+    using MMA_Group = Tile<_X, Int<std::min(num_warp_n *inst_n, N)>, _X>;      \
   };                                                                           \
   }
 
@@ -54,6 +54,15 @@ TL_DISPATCH_MMA(half_t, half_t, float, 16, 16, 16, true, false,
 TL_DISPATCH_MMA(half_t, half_t, float, 16, 16, 16, true, true,
                 TL_MP22_16x16x16_F32F16F16F32_NN)
 
+TL_DISPATCH_MMA(half_t, half_t, float, 8, 32, 16, false, false,
+                TL_MP22_8x32x16_F32F16F16F32_TT)
+TL_DISPATCH_MMA(half_t, half_t, float, 8, 32, 16, false, true,
+                TL_MP22_8x32x16_F32F16F16F32_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, 8, 32, 16, true, false,
+                TL_MP22_8x32x16_F32F16F16F32_NT)
+TL_DISPATCH_MMA(half_t, half_t, float, 8, 32, 16, true, true,
+                TL_MP22_8x32x16_F32F16F16F32_NN)
+
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 32, 32, 16, false, false,
                 MP22_32x32x16_F32BF16BF16F32_TT)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 32, 32, 16, false, true,
@@ -71,6 +80,15 @@ TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 16, 16, 16, true, false,
                 TL_MP22_16x16x16_F32BF16BF16F32_NT)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 16, 16, 16, true, true,
                 TL_MP22_16x16x16_F32BF16BF16F32_NN)
+
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 8, 32, 16, false, false,
+                TL_MP22_8x32x16_F32BF16BF16F32_TT)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 8, 32, 16, false, true,
+                TL_MP22_8x32x16_F32BF16BF16F32_TN)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 8, 32, 16, true, false,
+                TL_MP22_8x32x16_F32BF16BF16F32_NT)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, 8, 32, 16, true, true,
+                TL_MP22_8x32x16_F32BF16BF16F32_NN)
 
 TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, 32, 32, 8, false, false,
                 MP22_32x32x8_F32TF32TF32F32_TT)
@@ -283,6 +301,8 @@ public:
                           : (sizeof_bits<A_type>::value == 8    ? 32
                              : sizeof_bits<A_type>::value == 16 ? 16
                                                                 : 8));
+  static constexpr bool use_mp22_m8n32 =
+      inst_m == 8 && inst_n == 32 && inst_k == 16;
 
   using InstructionSS =
       DispatchInstruction<A_type_raw, B_type_raw, C_type_raw, M, N, K,

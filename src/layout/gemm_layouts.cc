@@ -371,23 +371,108 @@ Fragment makeGemmQY2FragmentC(const int block_m, const int block_n,
   return block_layout;
 }
 
-Fragment makeGemmQY2FragmentC_M16N16K16(const int block_m, const int block_n,
-                                        const int warp_m, const int warp_n,
-                                        const int element_size) {
+Fragment makeGemmQY2WmmaCLayout(const int block_m, const int block_n,
+                                const int warp_m, const int warp_n,
+                                const int element_size,
+                                const std::array<int, 3> &inst_shape) {
   if (element_size == 64) {
     ICHECK(false) << "Not supported";
   }
+  const int inst_m = inst_shape[0];
+  const int inst_n = inst_shape[1];
+  const int inst_k = inst_shape[2];
+  ICHECK(inst_m > 0 && inst_n > 0 && inst_k > 0);
   ICHECK(block_m % warp_m == 0);
   ICHECK(block_n % warp_n == 0);
-  ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
-  ICHECK(warp_n % 16 == 0) << "warp_n=" << warp_n;
+  ICHECK(warp_m % inst_m == 0) << "warp_m=" << warp_m;
+  ICHECK(warp_n % inst_n == 0) << "warp_n=" << warp_n;
+  ICHECK(inst_m % 4 == 0) << "inst_m=" << inst_m;
+  ICHECK(inst_n % 8 == 0) << "inst_n=" << inst_n;
   auto base_layout = makeGemmFragment4x8();
-  auto warp_16x16_layout = base_layout->Repeat({4, 2}, false, true);
-  auto warp_layout = warp_16x16_layout->Repeat(
-      {block_m / warp_m, block_n / warp_n}, true, false);
+  auto inst_layout = base_layout->Repeat({inst_m / 4, inst_n / 8}, false, true);
+  auto warp_layout =
+      inst_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
   auto block_layout =
-      warp_layout->Repeat({warp_m / 16, warp_n / 16}, false, false);
+      warp_layout->Repeat({warp_m / inst_m, warp_n / inst_n}, false, false);
   return block_layout;
+}
+
+Fragment makeGemmQY2WmmaFragmentA(const int block_m, const int block_n,
+                                  const int block_k, const int warp_m,
+                                  const int warp_n, const int element_size,
+                                  bool transposed,
+                                  const std::array<int, 3> &inst_shape) {
+  const int inst_m = inst_shape[0];
+  const int inst_k = inst_shape[2];
+  ICHECK(inst_m > 0 && inst_k > 0);
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_m % inst_m == 0) << "warp_m=" << warp_m;
+  ICHECK(block_k % inst_k == 0) << "block_k=" << block_k;
+  ICHECK(inst_m % 8 == 0) << "inst_m=" << inst_m;
+  ICHECK(inst_k % 8 == 0) << "inst_k=" << inst_k;
+  ICHECK(element_size == 16) << "unsupported element bitwidth=" << element_size;
+
+  if (element_size == 16) {
+    if (transposed) {
+      auto base_layout =
+          makeGemmFragment8x8()->Repeat({inst_k / 8, inst_m / 8}, false, true);
+      auto warp_layout = base_layout->Repeat({1, block_m / warp_m}, true, false)
+                             ->Replicate(block_n / warp_n);
+      auto block_layout =
+          warp_layout->Repeat({block_k / inst_k, warp_m / inst_m}, false, true);
+      return block_layout;
+    }
+    auto base_layout =
+        makeGemmFragment8x8()->Repeat({inst_m / 8, inst_k / 8}, false, true);
+    auto warp_layout = base_layout->Repeat({block_m / warp_m, 1}, true, false)
+                           ->Replicate(block_n / warp_n);
+    auto block_layout =
+        warp_layout->Repeat({warp_m / inst_m, block_k / inst_k}, false, false);
+    return block_layout;
+  }
+
+  ICHECK(false) << "QY2 WMMA A layout currently supports fp16 only";
+  return Fragment();
+}
+
+Fragment makeGemmQY2WmmaFragmentB(const int block_m, const int block_n,
+                                  const int block_k, const int warp_m,
+                                  const int warp_n, const int element_size,
+                                  bool transposed,
+                                  const std::array<int, 3> &inst_shape) {
+  const int inst_n = inst_shape[1];
+  const int inst_k = inst_shape[2];
+  ICHECK(inst_n > 0 && inst_k > 0);
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_n % inst_n == 0) << "warp_n=" << warp_n;
+  ICHECK(block_k % inst_k == 0) << "block_k=" << block_k;
+  ICHECK(inst_n % 8 == 0) << "inst_n=" << inst_n;
+  ICHECK(inst_k % 8 == 0) << "inst_k=" << inst_k;
+  ICHECK(element_size == 16) << "unsupported element bitwidth=" << element_size;
+
+  if (element_size == 16) {
+    if (transposed) {
+      auto base_layout =
+          makeGemmFragment8x8()->Repeat({inst_n / 8, inst_k / 8}, false, true);
+      auto warp_layout = base_layout->Replicate(block_m / warp_m)
+                             ->Repeat({block_n / warp_n, 1}, true, true);
+      auto block_layout = warp_layout->Repeat(
+          {warp_n / inst_n, block_k / inst_k}, false, false);
+      return block_layout;
+    }
+    auto base_layout =
+        makeGemmFragment8x8()->Repeat({inst_k / 8, inst_n / 8}, false, true);
+    auto warp_layout = base_layout->Replicate(block_m / warp_m)
+                           ->Repeat({1, block_n / warp_n}, true, true);
+    auto block_layout =
+        warp_layout->Repeat({block_k / inst_k, warp_n / inst_n}, false, true);
+    return block_layout;
+  }
+
+  ICHECK(false) << "QY2 WMMA B layout currently supports fp16 only";
+  return Fragment();
 }
 
 Fragment makeGemmFragmentCLinear(const int block_m, const int block_n,
@@ -399,126 +484,6 @@ Fragment makeGemmFragmentCLinear(const int block_m, const int block_n,
   PrimExpr forward_thread = FloorMod(linear, block_size);
   PrimExpr index = FloorDiv(linear, block_size);
   return Fragment({i, j}, {index}, forward_thread, rep);
-}
-
-Fragment makeGemmQY2FragmentARow_M16N16K16(const int block_m, const int block_n,
-                                           const int block_k, const int warp_m,
-                                           const int warp_n,
-                                           const int element_size) {
-  ICHECK(block_m % warp_m == 0);
-  ICHECK(block_n % warp_n == 0);
-  ICHECK(warp_m % 16 == 0);
-  ICHECK(block_k % 16 == 0);
-  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
-      << "unsupported element bitwidth=" << element_size;
-
-  if (element_size == 8) {
-    ICHECK(false) << "QY2 m16n16k16 A row layout currently supports fp16 only";
-    return Fragment();
-  } else if (element_size == 16) {
-    auto base_layout = makeGemmFragment8x8()->Repeat({2, 2}, false, true);
-    auto warp_layout = base_layout->Repeat({block_m / warp_m, 1}, true, false)
-                           ->Replicate(block_n / warp_n);
-    auto block_layout =
-        warp_layout->Repeat({warp_m / 16, block_k / 16}, false, false);
-    return block_layout;
-  } else if (element_size == 32) {
-    ICHECK(false) << "QY2 m16n16k16 A row layout currently supports fp16 only";
-    return Fragment();
-  } else {
-    ICHECK(0);
-    return Fragment();
-  }
-}
-
-Fragment makeGemmQY2FragmentACol_M16N16K16(const int block_m, const int block_n,
-                                           const int block_k, const int warp_m,
-                                           const int warp_n,
-                                           const int element_size) {
-  ICHECK(block_m % warp_m == 0);
-  ICHECK(block_n % warp_n == 0);
-  ICHECK(warp_m % 16 == 0);
-  ICHECK(block_k % 16 == 0);
-  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
-      << "unsupported element bitwidth=" << element_size;
-
-  if (element_size == 8) {
-    ICHECK(false) << "QY2 m16n16k16 A row layout currently supports fp16 only";
-    return Fragment();
-  } else if (element_size == 16) {
-    auto base_layout = makeGemmFragment8x8()->Repeat({2, 2}, false, true);
-    auto warp_layout = base_layout->Repeat({1, block_m / warp_m}, true, false)
-                           ->Replicate(block_n / warp_n);
-    auto block_layout =
-        warp_layout->Repeat({block_k / 16, warp_m / 16}, false, true);
-    return block_layout;
-  } else if (element_size == 32) {
-    ICHECK(false) << "QY2 m16n16k16 A row layout currently supports fp16 only";
-    return Fragment();
-  } else {
-    ICHECK(0);
-    return Fragment();
-  }
-}
-
-Fragment makeGemmQY2FragmentBRow_M16N16K16(const int block_m, const int block_n,
-                                           const int block_k, const int warp_m,
-                                           const int warp_n,
-                                           const int element_size) {
-  ICHECK(block_m % warp_m == 0);
-  ICHECK(block_n % warp_n == 0);
-  ICHECK(warp_n % 16 == 0);
-  ICHECK(block_k % 16 == 0);
-  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
-      << "unsupported element bitwidth=" << element_size;
-
-  if (element_size == 8) {
-    ICHECK(false) << "QY2 m16n16k16 B col layout currently supports fp16 only";
-    return Fragment();
-  } else if (element_size == 16) {
-    auto base_layout = makeGemmFragment8x8()->Repeat({2, 2}, false, true);
-    auto warp_layout = base_layout->Replicate(block_m / warp_m)
-                           ->Repeat({block_n / warp_n, 1}, true, true);
-    auto block_layout =
-        warp_layout->Repeat({warp_n / 16, block_k / 16}, false, false);
-    return block_layout;
-  } else if (element_size == 32) {
-    ICHECK(false) << "QY2 m16n16k16 B col layout currently supports fp16 only";
-    return Fragment();
-  } else {
-    ICHECK(0);
-    return Fragment();
-  }
-}
-
-Fragment makeGemmQY2FragmentBCol_M16N16K16(const int block_m, const int block_n,
-                                           const int block_k, const int warp_m,
-                                           const int warp_n,
-                                           const int element_size) {
-  ICHECK(block_m % warp_m == 0);
-  ICHECK(block_n % warp_n == 0);
-  ICHECK(warp_n % 16 == 0);
-  ICHECK(block_k % 16 == 0);
-  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
-      << "unsupported element bitwidth=" << element_size;
-
-  if (element_size == 8) {
-    ICHECK(false) << "QY2 m16n16k16 B row layout currently supports fp16 only";
-    return Fragment();
-  } else if (element_size == 16) {
-    auto base_layout = makeGemmFragment8x8()->Repeat({2, 2}, false, true);
-    auto warp_layout = base_layout->Replicate(block_m / warp_m)
-                           ->Repeat({1, block_n / warp_n}, true, true);
-    auto block_layout =
-        warp_layout->Repeat({block_k / 16, warp_n / 16}, false, true);
-    return block_layout;
-  } else if (element_size == 32) {
-    ICHECK(false) << "QY2 m16n16k16 B row layout currently supports fp16 only";
-    return Fragment();
-  } else {
-    ICHECK(0);
-    return Fragment();
-  }
 }
 
 Fragment makeGemmQY2FragmentARow(const int block_m, const int block_n,
