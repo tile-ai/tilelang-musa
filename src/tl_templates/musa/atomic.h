@@ -23,7 +23,7 @@ template <> struct normalize_atomic_type<bfloat16_t> {
 };
 
 template <> struct normalize_atomic_type<int64_t> {
-  using type = unsigned long long;
+  using type = long long;
 };
 
 template <typename T> TL_DEVICE unsigned short BitCastToU16(T value) {
@@ -246,7 +246,7 @@ TL_DEVICE void AtomicAdd(T1 &ref, T2 val, int memory_order = 0) {
   if constexpr (std::is_same_v<RawT, int64_t>) {
     // MTCC exposes 64-bit integer atomicAdd through the unsigned long long
     // overload, so preserve the signed payload as raw bits on the way in.
-    atomicAdd(reinterpret_cast<NT1 *>(address),
+    atomicAdd(reinterpret_cast<unsigned long long *>(address),
               BitCastToU64(static_cast<RawT>(val)));
   } else {
     atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
@@ -260,7 +260,7 @@ TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val, int memory_order = 0) {
   using NT1 = typename normalize_atomic_type<RawT>::type;
   RawT *address = reinterpret_cast<RawT *>(&ref);
   if constexpr (std::is_same_v<RawT, int64_t>) {
-    auto old = atomicAdd(reinterpret_cast<NT1 *>(address),
+    auto old = atomicAdd(reinterpret_cast<unsigned long long *>(address),
                          BitCastToU64(static_cast<RawT>(val)));
     return static_cast<T1>(BitCastFromU64<RawT>(old));
   } else {
