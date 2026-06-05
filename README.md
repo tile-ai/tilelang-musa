@@ -14,13 +14,17 @@ In most cases, you only need to:
 
 ## Latest News
 
-### 0.1.8+musa3
+### 0.1.9+musa.1
+
+🚀 tilelang_musa0.1.9+musa.1 has been released. This version is based on tilelang 0.1.9 and is deeply adapted for the musa platform. You can use the latest tilelang syntax to write kernels that can run on the musa platform.
+
+### 0.1.8+musa.3
 
 Add support for DeepSeek [TileKernels](./tilekernels/) on the MUSA platform. The upstream repository is https://github.com/deepseek-ai/TileKernels.
 
-### 0.1.8+musa1
+### 0.1.8+musa.1
 
-🚀 tilelang_musa0.1.8+musa1 has been released. This version is based on tilelang 0.1.8 and is deeply adapted for the musa platform. You can use the latest tilelang syntax to write kernels that can run on the musa platform. Our developers have already written some high-performance operators, including [GEMM](./testing/musa/mp31/basic/test_gemm.py), [FA](./testing/musa/mp31/flash_attention/), [DSA](./testing/musa/mp31/dsa/), etc.
+🚀 tilelang_musa0.1.8+musa.1 has been released. This version is based on tilelang 0.1.8 and is deeply adapted for the musa platform. You can use the latest tilelang syntax to write kernels that can run on the musa platform. Our developers have already written some high-performance operators, including [GEMM](./testing/musa/mp31/basic/test_gemm.py), [FA](./testing/musa/mp31/flash_attention/), [DSA](./testing/musa/mp31/dsa/), etc.
 
 ## Tested Devices
 
