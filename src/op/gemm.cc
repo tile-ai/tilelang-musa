@@ -30,6 +30,16 @@ bool IsPH1SupportedFp8(DataType dtype) {
          dtype.is_float8_e5m2();
 }
 
+Layout MakeTransposedPH1SqmmaOperandLayout(int actual_rows, int actual_cols,
+                                           int logical_rows, int logical_cols,
+                                           int element_bits, bool k_inner) {
+  auto base = makeGemmABLayoutPH1(logical_rows, logical_cols, logical_cols,
+                                  element_bits, k_inner);
+  auto mapped = base->Forward({InputPlaceholder(1), InputPlaceholder(0)});
+  return Layout(Array<PrimExpr>{Integer(actual_rows), Integer(actual_cols)},
+                mapped);
+}
+
 } // namespace
 
 /**
@@ -246,6 +256,18 @@ GemmNode::SelectSQMMAInstShape(int block_size, Target target) const {
              c_dtype == DataType::UInt(32)) {
     type_class = SqmmaTypeClass::kUInt8;
   } else {
+    return std::nullopt;
+  }
+
+  if ((*type_class == SqmmaTypeClass::kFP16 ||
+       *type_class == SqmmaTypeClass::kBF16) &&
+      transA_ && warp_groups_m > 1) {
+    return std::nullopt;
+  }
+  // PH1 TF32 SQMMA is reliable for the basic tile range covered by the
+  // dedicated fp32 SQMMA tests; larger multi-inst tiles fall back to WMMA.
+  if (*type_class == SqmmaTypeClass::kTF32 &&
+      (m_ > 128 || n_ > 128 || k_ > 32)) {
     return std::nullopt;
   }
 
@@ -1219,9 +1241,14 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t a_mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t a_mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
       const int64_t a_continuity = a_mat_continuous;
+      const bool a_is_fp8 = IsPH1SupportedFp8(a_->dtype);
       auto ALayout =
-          makeGemmABLayoutPH1(a_mat_stride, a_mat_continuous, a_continuity,
-                              a_->dtype.bits(), !transA_);
+          (transA_ && a_is_fp8)
+              ? MakeTransposedPH1SqmmaOperandLayout(
+                    a_mat_stride, a_mat_continuous, m_, k_, a_->dtype.bits(),
+                    /*k_inner=*/true)
+              : makeGemmABLayoutPH1(a_mat_stride, a_mat_continuous,
+                                    a_continuity, a_->dtype.bits(), !transA_);
       // PH1 32x32x32 SQMMA kernels require the legacy K-inner expansion to
       // match tilelang_musa_6 shared-memory staging.
       const bool a_need_legacy_repeat =
@@ -1242,9 +1269,14 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       if (!transB_) {
         b_continuity = (*sqmma_inst)[1];
       }
+      const bool b_is_fp8 = IsPH1SupportedFp8(b_->dtype);
       auto BLayout =
-          makeGemmABLayoutPH1(b_mat_stride, b_mat_continuous, b_continuity,
-                              b_->dtype.bits(), transB_);
+          (!transB_ && b_is_fp8)
+              ? MakeTransposedPH1SqmmaOperandLayout(
+                    b_mat_stride, b_mat_continuous, n_, k_, b_->dtype.bits(),
+                    /*k_inner=*/true)
+              : makeGemmABLayoutPH1(b_mat_stride, b_mat_continuous,
+                                    b_continuity, b_->dtype.bits(), transB_);
       const bool b_need_legacy_repeat =
           (b_mat_stride == 32 && b_mat_continuous == 32);
       if (b_need_legacy_repeat) {

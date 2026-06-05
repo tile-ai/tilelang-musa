@@ -48,7 +48,74 @@ static bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
   return true;
 }
 
+static bool ShapesStructurallyEqual(const Array<PrimExpr> &lhs,
+                                    const Array<PrimExpr> &rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  StructuralEqual equal;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!equal(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool IsProvenSubdomainShape(const Array<PrimExpr> &sub_shape,
+                                   const Array<PrimExpr> &base_shape,
+                                   arith::Analyzer *analyzer) {
+  if (sub_shape.size() != base_shape.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < sub_shape.size(); ++i) {
+    if (analyzer->CanProveEqual(sub_shape[i], base_shape[i])) {
+      continue;
+    }
+    if (!analyzer->CanProve(sub_shape[i] <= base_shape[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static std::optional<int64_t> ConstProductShape(const Array<PrimExpr> &shape);
+
+static bool IsSharedLayoutOutputExtentCompatible(const Buffer &buffer,
+                                                 const Layout &layout) {
+  if (!IsSharedBuffer(buffer)) {
+    return true;
+  }
+  auto buffer_extent = ConstProductShape(buffer->shape);
+  auto layout_extent = ConstProductShape(layout->OutputShape());
+  if (!buffer_extent.has_value() || !layout_extent.has_value() ||
+      layout_extent.value() <= 0) {
+    return false;
+  }
+  if (layout_extent.value() > buffer_extent.value()) {
+    return false;
+  }
+  return buffer_extent.value() % layout_extent.value() == 0;
+}
+
+static Layout ExpandLayoutToBufferSubdomain(const Buffer &buffer,
+                                            const Layout &layout,
+                                            size_t leading_ndim) {
+  Array<PrimExpr> expanded_forward;
+  expanded_forward.reserve(leading_ndim + layout->GetForwardIndex().size());
+  for (size_t i = 0; i < leading_ndim; ++i) {
+    expanded_forward.push_back(InputPlaceholder(i));
+  }
+
+  Map<Var, PrimExpr> shifted_vars;
+  for (size_t i = 0; i < layout->InputShape().size(); ++i) {
+    shifted_vars.Set(InputPlaceholder(i), InputPlaceholder(i + leading_ndim));
+  }
+  for (const auto &e : layout->GetForwardIndex()) {
+    expanded_forward.push_back(Substitute(e, shifted_vars));
+  }
+  return Layout(buffer->shape, expanded_forward);
+}
 
 static Layout ExpandLayoutToBufferShape(const Buffer &buffer,
                                         const Layout &layout) {
@@ -59,6 +126,7 @@ static Layout ExpandLayoutToBufferShape(const Buffer &buffer,
       buffer->shape.size() <= layout->InputShape().size()) {
     if (layout.defined() && buffer->shape.size() > 2 &&
         buffer->shape.size() == layout->InputShape().size()) {
+      arith::Analyzer analyzer;
       auto input_elems = ConstProductShape(layout->InputShape());
       auto output_elems = ConstProductShape(layout->OutputShape());
       bool output_preserves_stage =
@@ -66,13 +134,18 @@ static Layout ExpandLayoutToBufferShape(const Buffer &buffer,
           StructuralEqual()(layout->OutputShape()[0], buffer->shape[0]);
       if (input_elems.has_value() && output_elems.has_value() &&
           output_elems.value() < input_elems.value() &&
-          !output_preserves_stage) {
+          !output_preserves_stage &&
+          IsProvenSubdomainShape(buffer->shape, layout->InputShape(),
+                                 &analyzer)) {
         Array<PrimExpr> lifted_forward;
         lifted_forward.push_back(InputPlaceholder(0));
         for (const auto &e : layout->GetForwardIndex()) {
           lifted_forward.push_back(e);
         }
-        return Layout(layout->InputShape(), lifted_forward);
+        Layout lifted_layout = Layout(layout->InputShape(), lifted_forward);
+        if (IsSharedLayoutOutputExtentCompatible(buffer, lifted_layout)) {
+          return lifted_layout;
+        }
       }
     }
     return layout;
@@ -90,9 +163,21 @@ static Layout ExpandLayoutToBufferShape(const Buffer &buffer,
 
   arith::Analyzer analyzer;
   if (!ShapesEqual(trailing_shape, layout->InputShape(), &analyzer)) {
+    if (IsProvenSubdomainShape(trailing_shape, layout->InputShape(),
+                               &analyzer)) {
+      Layout expanded_layout =
+          ExpandLayoutToBufferSubdomain(buffer, layout, leading_ndim);
+      if (IsSharedLayoutOutputExtentCompatible(buffer, expanded_layout)) {
+        return expanded_layout;
+      }
+    }
     return layout;
   }
-  return layout->Expand(leading_shape);
+  Layout expanded_layout = layout->Expand(leading_shape);
+  if (!IsSharedLayoutOutputExtentCompatible(buffer, expanded_layout)) {
+    return layout;
+  }
+  return expanded_layout;
 }
 
 static PrimExpr ProductShape(const Array<PrimExpr> &shape, size_t begin,
@@ -114,6 +199,51 @@ static std::optional<int64_t> ConstProductShape(const Array<PrimExpr> &shape) {
     product *= imm->value;
   }
   return product;
+}
+
+static std::optional<Array<PrimExpr>>
+PreserveSharedStageStrides(const Buffer &buffer,
+                           const Array<PrimExpr> &output_shape) {
+  if (!IsSharedBuffer(buffer) || buffer->strides.empty()) {
+    return std::nullopt;
+  }
+  if (buffer->strides.size() == output_shape.size() &&
+      ShapesStructurallyEqual(buffer->shape, output_shape)) {
+    return buffer->strides;
+  }
+  if (buffer->shape.empty() || output_shape.size() < 2 ||
+      buffer->strides.empty() ||
+      !StructuralEqual()(buffer->shape[0], output_shape[0])) {
+    return std::nullopt;
+  }
+
+  Array<PrimExpr> tail_shape;
+  tail_shape.reserve(output_shape.size() - 1);
+  for (size_t i = 1; i < output_shape.size(); ++i) {
+    tail_shape.push_back(output_shape[i]);
+  }
+  auto tail_extent = ConstProductShape(tail_shape);
+  if (!tail_extent.has_value() || tail_extent.value() <= 0) {
+    return std::nullopt;
+  }
+  const auto *stage_stride = buffer->strides[0].as<IntImmNode>();
+  if (stage_stride != nullptr && stage_stride->value < tail_extent.value()) {
+    return std::nullopt;
+  }
+
+  Array<PrimExpr> output_strides;
+  output_strides.reserve(output_shape.size());
+  output_strides.push_back(buffer->strides[0]);
+  std::vector<PrimExpr> tail_strides(output_shape.size() - 1);
+  PrimExpr stride = Integer(1);
+  for (int i = static_cast<int>(output_shape.size()) - 1; i >= 1; --i) {
+    tail_strides[i - 1] = stride;
+    stride = stride * output_shape[i];
+  }
+  for (const PrimExpr &tail_stride : tail_strides) {
+    output_strides.push_back(tail_stride);
+  }
+  return output_strides;
 }
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
@@ -171,9 +301,14 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                           IntImm(DataType::Int(32), replicate_extent));
     }
   }
-  return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
-                buffer->name, buffer->data_alignment, buffer->offset_factor,
-                buffer->buffer_type);
+  Array<PrimExpr> output_strides;
+  if (auto preserved_strides =
+          PreserveSharedStageStrides(buffer, output_shape)) {
+    output_strides = preserved_strides.value();
+  }
+  return Buffer(new_var, buffer->dtype, output_shape, output_strides,
+                buffer->elem_offset, buffer->name, buffer->data_alignment,
+                buffer->offset_factor, buffer->buffer_type);
 }
 
 // The function `makeBufferWithLayout` creates a new Buffer object based on the
@@ -593,8 +728,9 @@ private:
     block_ptr->annotations.erase("layout_override_seq");
     for (size_t i = 0; i < block->alloc_buffers.size(); i++) {
       auto buffer = block->alloc_buffers[i];
-      if (buffer_remap_.count(buffer)) {
-        block_ptr->alloc_buffers.Set(i, buffer_remap_[buffer]);
+      Optional<Buffer> remap_key = FindRemapBuffer(buffer);
+      if (remap_key.defined() && buffer_remap_.count(remap_key.value())) {
+        block_ptr->alloc_buffers.Set(i, buffer_remap_[remap_key.value()]);
       }
     }
     // Attach any workspaces requested within this block to its alloc_buffers
@@ -621,6 +757,57 @@ private:
     PrimExpr expr;
     bool rewritten{false};
   };
+
+  PrimExpr LinearizeIndicesForBuffer(const Buffer &buffer,
+                                     const Array<PrimExpr> &indices) const {
+    ICHECK_EQ(indices.size(), buffer->shape.size())
+        << "Indices size and shape size must match for buffer " << buffer->name;
+    PrimExpr elem_offset =
+        make_const(indices.empty() ? DataType::Int(32) : indices[0].dtype(), 0);
+    if (!buffer->strides.empty()) {
+      ICHECK_EQ(buffer->strides.size(), indices.size())
+          << "Buffer " << buffer->name << " has mismatched shape/stride rank.";
+      for (size_t i = 0; i < indices.size(); ++i) {
+        elem_offset = elem_offset + indices[i] * buffer->strides[i];
+      }
+      return analyzer_->Simplify(elem_offset);
+    }
+
+    PrimExpr stride = 1;
+    for (int i = static_cast<int>(indices.size()) - 1; i >= 0; --i) {
+      elem_offset = elem_offset + indices[i] * stride;
+      stride = stride * buffer->shape[i];
+    }
+    return analyzer_->Simplify(elem_offset);
+  }
+
+  Array<PrimExpr> OffsetToIndicesForBuffer(const Buffer &buffer,
+                                           PrimExpr elem_offset) const {
+    Array<PrimExpr> indices;
+    const Array<PrimExpr> &shape = buffer->shape;
+    if (!buffer->strides.empty()) {
+      ICHECK_EQ(buffer->strides.size(), shape.size())
+          << "Buffer " << buffer->name << " has mismatched shape/stride rank.";
+      PrimExpr remaining_offset = elem_offset;
+      for (size_t i = 0; i < shape.size(); ++i) {
+        PrimExpr index =
+            analyzer_->Simplify(floordiv(remaining_offset, buffer->strides[i]));
+        indices.push_back(index);
+        remaining_offset =
+            analyzer_->Simplify(remaining_offset - index * buffer->strides[i]);
+      }
+      return indices;
+    }
+
+    PrimExpr remaining_offset = elem_offset;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+      indices.insert(indices.begin(),
+                     analyzer_->Simplify(floormod(remaining_offset, shape[i])));
+      remaining_offset =
+          analyzer_->Simplify(floordiv(remaining_offset, shape[i]));
+    }
+    return indices;
+  }
 
   PrimExpr AdjustTmaOffsetForLeadingLayout(const Buffer &original_buffer,
                                            const Buffer &new_buffer,
@@ -743,29 +930,12 @@ private:
       if (offset.defined()) {
         elem_offset = elem_offset + offset.value();
       }
-      // Get original and new buffer shapes
-      Array<PrimExpr> old_shape = original_buffer->shape;
-      Array<PrimExpr> new_shape = new_buffer->shape;
-      // Convert linear offset to multi-dimensional indices
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = elem_offset;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(
-            multi_dim_indices.begin(),
-            analyzer_->Simplify(floormod(remaining_offset, old_shape[i])));
-        remaining_offset =
-            analyzer_->Simplify(floordiv(remaining_offset, old_shape[i]));
-      }
+      Array<PrimExpr> multi_dim_indices =
+          OffsetToIndicesForBuffer(original_buffer, elem_offset);
       // Apply layout transformation
       auto forward_indices = layout->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
-      }
-      new_offset = analyzer_->Simplify(new_offset);
-      Array<PrimExpr> new_indices;
+      PrimExpr new_offset =
+          LinearizeIndicesForBuffer(new_buffer, forward_indices);
       layout_remap_.Set(new_buffer, layout);
 
       // Build new tvm_access_ptr call with new buffer and offset
@@ -824,12 +994,7 @@ private:
       }
 
       PrimExpr elem_offset = 0;
-      PrimExpr stride = 1;
-
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        elem_offset += indices[i] * stride;
-        stride *= old_shape[i];
-      }
+      elem_offset = LinearizeIndicesForBuffer(load->buffer, indices);
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
@@ -839,31 +1004,14 @@ private:
       int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
       (void)buffer_row_size;
 
-      // Convert offset to target-dimension, reindex it and convert it back
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = smem_offset;
-
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(multi_dim_indices.begin(),
-                                 floormod(remaining_offset, old_shape[i]));
-        remaining_offset = floordiv(remaining_offset, old_shape[i]);
-      }
+      Array<PrimExpr> multi_dim_indices =
+          OffsetToIndicesForBuffer(load->buffer, smem_offset);
 
       auto forward_indices = layout.value()->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
-      }
-      new_offset = analyzer_->Simplify(new_offset);
-
-      Array<PrimExpr> new_indices;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_indices.insert(new_indices.begin(),
-                           floormod(new_offset, new_shape[i]));
-        new_offset = floordiv(new_offset, new_shape[i]);
-      }
+      PrimExpr new_offset =
+          LinearizeIndicesForBuffer(new_buffer, forward_indices);
+      Array<PrimExpr> new_indices =
+          OffsetToIndicesForBuffer(new_buffer, new_offset);
 
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices)};
       if (buffer_remap_.count(remap_key)) {
@@ -930,11 +1078,7 @@ private:
       }
 
       PrimExpr elem_offset = 0;
-      PrimExpr stride = 1;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        elem_offset += indices[i] * stride;
-        stride *= old_shape[i];
-      }
+      elem_offset = LinearizeIndicesForBuffer(load->buffer, indices);
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
@@ -943,30 +1087,14 @@ private:
       int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
       (void)buffer_row_size;
 
-      // Convert offset to target-dimension, reindex it and convert it back
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = smem_offset;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(multi_dim_indices.begin(),
-                                 floormod(remaining_offset, old_shape[i]));
-        remaining_offset = floordiv(remaining_offset, old_shape[i]);
-      }
+      Array<PrimExpr> multi_dim_indices =
+          OffsetToIndicesForBuffer(load->buffer, smem_offset);
 
       auto forward_indices = layout.value()->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
-      }
-      new_offset = analyzer_->Simplify(new_offset);
-
-      Array<PrimExpr> new_indices;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_indices.insert(new_indices.begin(),
-                           floormod(new_offset, new_shape[i]));
-        new_offset = floordiv(new_offset, new_shape[i]);
-      }
+      PrimExpr new_offset =
+          LinearizeIndicesForBuffer(new_buffer, forward_indices);
+      Array<PrimExpr> new_indices =
+          OffsetToIndicesForBuffer(new_buffer, new_offset);
 
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices), extent,
                                   rw_mask};
@@ -1741,6 +1869,24 @@ namespace transform {
 
 using namespace tir::transform;
 
+Array<PrimExpr> TestingExpandLayoutToBufferInputShape(const Buffer &buffer,
+                                                      const Layout &layout) {
+  return ExpandLayoutToBufferShape(buffer, layout)->InputShape();
+}
+
+Array<PrimExpr> TestingExpandLayoutToBufferOutputShape(const Buffer &buffer,
+                                                       const Layout &layout) {
+  return ExpandLayoutToBufferShape(buffer, layout)->OutputShape();
+}
+
+Array<PrimExpr> TestingMakeBufferWithLayoutStrides(const Buffer &buffer,
+                                                   const Layout &layout) {
+  Map<Var, Var> var_remap;
+  Buffer remapped = makeBufferWithLayout(
+      buffer, ExpandLayoutToBufferShape(buffer, layout), var_remap);
+  return remapped->strides;
+}
+
 tvm::transform::Pass LowerTileOp() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return LowerTileOpPass::Substitute(std::move(f));
@@ -1751,6 +1897,13 @@ tvm::transform::Pass LowerTileOp() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
+  refl::GlobalDef()
+      .def("tl.transform._TestingExpandLayoutToBufferInputShape",
+           TestingExpandLayoutToBufferInputShape)
+      .def("tl.transform._TestingExpandLayoutToBufferOutputShape",
+           TestingExpandLayoutToBufferOutputShape)
+      .def("tl.transform._TestingMakeBufferWithLayoutStrides",
+           TestingMakeBufferWithLayoutStrides);
 }
 } // namespace transform
 

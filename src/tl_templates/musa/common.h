@@ -588,6 +588,20 @@ TL_DEVICE float2 vec_max_f2(float2 a, float2 b) {
   return out;
 }
 
+TL_DEVICE tl_f2 vec_max_f2(tl_f2 a, tl_f2 b) {
+  tl_f2 out;
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+  float2 a_float2 = {a[0], a[1]};
+  float2 b_float2 = {b[0], b[1]};
+  float2 out_float2;
+  mute::max(out_float2, a_float2, b_float2);
+  out = tl_f2{out_float2.x, out_float2.y};
+#else
+  out = tl_f2{max(a[0], b[0]), max(a[1], b[1])};
+#endif
+  return out;
+}
+
 TL_DEVICE float4 vec_max_f4(float4 a, float4 b) {
   float4 out;
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
@@ -597,6 +611,21 @@ TL_DEVICE float4 vec_max_f4(float4 a, float4 b) {
   out.y = max(a.y, b.y);
   out.z = max(a.z, b.z);
   out.w = max(a.w, b.w);
+#endif
+  return out;
+}
+
+TL_DEVICE tl_f4 vec_max_f4(tl_f4 a, tl_f4 b) {
+  tl_f4 out;
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+  float4 a_float4 = {a[0], a[1], a[2], a[3]};
+  float4 b_float4 = {b[0], b[1], b[2], b[3]};
+  float4 out_float4;
+  mute::max(out_float4, a_float4, b_float4);
+  out = tl_f4{out_float4.x, out_float4.y, out_float4.z, out_float4.w};
+#else
+  out =
+      tl_f4{max(a[0], b[0]), max(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])};
 #endif
   return out;
 }
@@ -612,6 +641,20 @@ TL_DEVICE float2 vec_sum_f2(float2 a, float2 b) {
   return out;
 }
 
+TL_DEVICE tl_f2 vec_sum_f2(tl_f2 a, tl_f2 b) {
+  tl_f2 out;
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+  float2 a_float2 = {a[0], a[1]};
+  float2 b_float2 = {b[0], b[1]};
+  float2 out_float2;
+  mute::add(out_float2, a_float2, b_float2);
+  out = tl_f2{out_float2.x, out_float2.y};
+#else
+  out = tl_f2{a[0] + b[0], a[1] + b[1]};
+#endif
+  return out;
+}
+
 TL_DEVICE float4 vec_sum_f4(float4 a, float4 b) {
   float4 out;
   out.x = a.x + b.x;
@@ -621,6 +664,10 @@ TL_DEVICE float4 vec_sum_f4(float4 a, float4 b) {
   // todo: check bug
   // mute::add(out, a, b);
   return out;
+}
+
+TL_DEVICE tl_f4 vec_sum_f4(tl_f4 a, tl_f4 b) {
+  return tl_f4{a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]};
 }
 
 TL_DEVICE float2 vec_exp2_f2(float2 a) {
@@ -634,6 +681,19 @@ TL_DEVICE float2 vec_exp2_f2(float2 a) {
   return out;
 }
 
+TL_DEVICE tl_f2 vec_exp2_f2(tl_f2 a) {
+  tl_f2 out;
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+  float2 a_float2 = {a[0], a[1]};
+  float2 out_float2;
+  mute::fast_exp2(out_float2, a_float2);
+  out = tl_f2{out_float2.x, out_float2.y};
+#else
+  out = tl_f2{exp2f(a[0]), exp2f(a[1])};
+#endif
+  return out;
+}
+
 TL_DEVICE float4 vec_exp2_f4(float4 a) {
   float4 out;
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
@@ -643,6 +703,19 @@ TL_DEVICE float4 vec_exp2_f4(float4 a) {
   out.y = exp2f(a.y);
   out.z = exp2f(a.z);
   out.w = exp2f(a.w);
+#endif
+  return out;
+}
+
+TL_DEVICE tl_f4 vec_exp2_f4(tl_f4 a) {
+  tl_f4 out;
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+  float4 a_float4 = {a[0], a[1], a[2], a[3]};
+  float4 out_float4;
+  mute::fast_exp2(out_float4, a_float4);
+  out = tl_f4{out_float4.x, out_float4.y, out_float4.z, out_float4.w};
+#else
+  out = tl_f4{exp2f(a[0]), exp2f(a[1]), exp2f(a[2]), exp2f(a[3])};
 #endif
   return out;
 }

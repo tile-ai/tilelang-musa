@@ -257,6 +257,18 @@ GemmPyNode::SelectSQMMAInstShape(int block_size, Target target) const {
     return std::nullopt;
   }
 
+  if ((*type_class == SqmmaTypeClass::kFP16 ||
+       *type_class == SqmmaTypeClass::kBF16) &&
+      transA_ && warp_groups_m > 1) {
+    return std::nullopt;
+  }
+  // PH1 TF32 SQMMA is reliable for the basic tile range covered by the
+  // dedicated fp32 SQMMA tests; larger multi-inst tiles fall back to WMMA.
+  if (*type_class == SqmmaTypeClass::kTF32 &&
+      (m_ > 128 || n_ > 128 || k_ > 32)) {
+    return std::nullopt;
+  }
+
   auto select_inst_n = [](int inst_m, SqmmaTypeClass tc) -> std::vector<int> {
     if (tc == SqmmaTypeClass::kTF32) {
       if (inst_m == 128)

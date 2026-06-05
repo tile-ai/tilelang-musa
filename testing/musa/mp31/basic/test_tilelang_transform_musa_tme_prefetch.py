@@ -18,13 +18,17 @@ def _lower_tma_copy(enable_prefetch=False):
             pid_k,
         ):
             x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
-            T.copy(
+            mbar = T.alloc_barrier(32)
+            T.tma_copy(
                 x[
                     pid_m * block_m : (pid_m + 1) * block_m,
                     pid_k * block_k : (pid_k + 1) * block_k,
                 ],
                 x_shared,
+                barrier=mbar,
             )
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
 
     pass_configs = {
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,

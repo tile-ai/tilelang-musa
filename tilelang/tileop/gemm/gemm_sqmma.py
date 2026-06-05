@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .gemm_base import GemmBase
 from .inst import GemmInst
-from tilelang.layout import make_sqmma_swizzled_layout, make_ph_sqmma_fragment_c
+from tilelang.layout import Layout, make_sqmma_swizzled_layout, make_ph_sqmma_fragment_c
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import _ffi_api
 from tilelang import tvm as tvm
@@ -34,6 +34,34 @@ class GemmSQMMA(GemmBase):
             return int(value.value)
         raise ValueError(f"{name} must be a constant integer, got {value}")
 
+    @staticmethod
+    def _is_fp8_dtype(dtype) -> bool:
+        return str(dtype).startswith("float8")
+
+    @staticmethod
+    def _make_transposed_shared_operand_layout(
+        input_shape,
+        logical_rows: int,
+        logical_cols: int,
+        dtype: str,
+        k_major: bool,
+    ) -> Layout:
+        leading_shape = list(input_shape[:-2])
+        element_bits = int(tvm.DataType(dtype).bits)
+        base = _ffi_api.make_sqmma_swizzled_layout(
+            logical_rows,
+            logical_cols,
+            logical_cols,
+            element_bits,
+            k_major,
+        )
+
+        def forward_fn(*indices):
+            mapped = list(base.map_forward_index([indices[-1], indices[-2]]))
+            return list(indices[: len(leading_shape)]) + mapped
+
+        return Layout(list(input_shape), forward_fn)
+
     def _select_sqmma_inst_shape(self, block_size: int, target: Target) -> tuple[int, int, int]:
         inst_shape = _ffi_api.GemmPySelectSQMMAInstShape(self.gemm_node, int(block_size), target)
         if len(inst_shape) != 3:
@@ -57,7 +85,20 @@ class GemmSQMMA(GemmBase):
 
         a_stride = int(a_shape[-2])
         a_continuous = int(a_shape[-1])
-        a_layout = make_sqmma_swizzled_layout(self.A, continuity=a_continuous, k_major=not self.trans_A)
+        if self.trans_A and self._is_fp8_dtype(self.A.dtype):
+            a_layout = self._make_transposed_shared_operand_layout(
+                a_shape,
+                self.M,
+                self.K,
+                self.A.dtype,
+                k_major=True,
+            )
+        else:
+            a_layout = make_sqmma_swizzled_layout(
+                self.A,
+                continuity=a_continuous,
+                k_major=not self.trans_A,
+            )
         if a_stride == 32 and a_continuous == 32:
             a_bits = int(tvm.DataType(self.A.dtype).bits)
             a_repeat_factor = (32 // a_bits) if 0 < a_bits <= 32 else 1
@@ -65,8 +106,21 @@ class GemmSQMMA(GemmBase):
 
         b_stride = int(b_shape[-2])
         b_continuous = int(b_shape[-1])
-        b_layout_continuity = b_continuous if self.trans_B else sqmma_inst[1]
-        b_layout = make_sqmma_swizzled_layout(self.B, continuity=b_layout_continuity, k_major=self.trans_B)
+        if not self.trans_B and self._is_fp8_dtype(self.B.dtype):
+            b_layout = self._make_transposed_shared_operand_layout(
+                b_shape,
+                self.N,
+                self.K,
+                self.B.dtype,
+                k_major=True,
+            )
+        else:
+            b_layout_continuity = b_continuous if self.trans_B else sqmma_inst[1]
+            b_layout = make_sqmma_swizzled_layout(
+                self.B,
+                continuity=b_layout_continuity,
+                k_major=self.trans_B,
+            )
         if b_stride == 32 and b_continuous == 32:
             b_bits = int(tvm.DataType(self.B.dtype).bits)
             b_repeat_factor = (32 // b_bits) if 0 < b_bits <= 32 else 1

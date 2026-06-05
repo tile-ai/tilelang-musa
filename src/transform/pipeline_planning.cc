@@ -8,6 +8,7 @@
 
 #include "../op/builtin.h"
 #include "../op/copy.h"
+#include "../op/gemm.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
 #include "../op/utils.h"
@@ -539,6 +540,8 @@ private:
     bool cp_async_copy_stage = false;
     bool conditional_execution = false;
     bool producer_for_copy = false;
+    bool deferred_async_gemm = false;
+    bool wgmma_wait = false;
     // Commit statements have no buffer writes, but they must be scheduled as a
     // part of their cp.async producer group (after the cp.async calls).
     bool cp_async_commit_stage = false;
@@ -561,6 +564,8 @@ private:
     bool is_tma_copy() const { return tma_copy; }
     bool is_cp_async_copy_stage() const { return cp_async_copy_stage; }
     bool is_producer_for_copy() const { return producer_for_copy; }
+    bool has_deferred_async_gemm() const { return deferred_async_gemm; }
+    bool has_wgmma_wait() const { return wgmma_wait; }
     bool is_cp_async_commit_stage() const { return cp_async_commit_stage; }
     bool has_cp_async_call() const { return cp_async_call_count > 0; }
     bool has_cp_async_commit() const { return cp_async_commit_count > 0; }
@@ -640,6 +645,39 @@ private:
       return false;
     }
     return pinfo.is_cp_async_copy_stage() || pinfo.has_cp_async_call();
+  }
+
+  bool HasDeferredAsyncGemm(const Stmt &stmt) const {
+    bool found = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (found) {
+        return;
+      }
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      if (!tile_op.defined()) {
+        return;
+      }
+      if (const auto *gemm = tile_op.as<GemmNode>()) {
+        found = gemm->wgWait_ < 0;
+      }
+    });
+    return found;
+  }
+
+  bool HasWgmmaWait(const Stmt &stmt) const {
+    bool found = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (found) {
+        return;
+      }
+      const auto *call = node.as<CallNode>();
+      found = call != nullptr && call->op.same_as(tl::wait_wgmma());
+    });
+    return found;
   }
 
   class RawCPAsyncCopyEligibilityChecker : public StmtExprVisitor {
@@ -901,7 +939,18 @@ private:
                              return r->buffer == read->buffer &&
                                     MayConflict(r->region, read->region);
                            }) != pinfo.writes.end()) {
-            pinfo.last_use_stmt_index = std::max(pinfo.last_use_stmt_index, i);
+            int last_use = i;
+            if ((*pipeline_stage_infos)[i].has_deferred_async_gemm()) {
+              for (int j = i + 1;
+                   j < static_cast<int>(pipeline_stage_infos->size()); ++j) {
+                if ((*pipeline_stage_infos)[j].has_wgmma_wait()) {
+                  last_use = j;
+                  break;
+                }
+              }
+            }
+            pinfo.last_use_stmt_index =
+                std::max(pinfo.last_use_stmt_index, last_use);
           }
         }
 
@@ -1074,6 +1123,8 @@ private:
     pinfo.writes = std::move(collector.GetWrites());
     pinfo.original_stmt_index = idx;
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
+    pinfo.deferred_async_gemm = HasDeferredAsyncGemm(block->body);
+    pinfo.wgmma_wait = HasWgmmaWait(block->body);
     bool pure_copy_stage =
         collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
     pinfo.copy_stage = pure_copy_stage;
@@ -1271,7 +1322,6 @@ private:
       auto pinfo = MakePipelineStageInfo(flat_stmts[i], i, chain_builder);
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
-
     // Build a formal cp.async synchronization model in original statement
     // order:
     //   group := cp_async* then commit

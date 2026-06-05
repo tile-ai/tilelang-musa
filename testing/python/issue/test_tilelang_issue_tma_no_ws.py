@@ -78,11 +78,10 @@ def test_plain_copy_no_warp_specialized_uses_cp_async():
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_tma_lower_1d_no_warp_specialized():
-    """Regression for issue #1842: 1D TMA load fails when warp specialization is disabled.
+    """1D plain load-side T.copy should stay on cp.async when WS is disabled.
 
-    A single-dimension tensor copy (global -> shared -> global) using 1D bulk
-    TMA must compile and produce correct results when
-    ``tl.disable_warp_specialized=True``.
+    Store-side plain T.copy may still lower to TMA store, so keep the generated
+    source and runtime checks for the mixed cp.async load + TMA store path.
     """
 
     length = 7168
@@ -105,10 +104,11 @@ def test_tma_lower_1d_no_warp_specialized():
     kernel = _compile_tvm_ffi(tma_copy_1d, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
-    assert "tl::tma_load" in src
-    assert "__musa_async_bar_record(1)" in src
-    assert "__musa_async_init_arrival(1" in src
-    assert "tl::mbarrier_arrive_expect_tx(1" in src
+    assert "tl::tma_load" not in src
+    assert "tl::cp_async_gs<16>" in src
+    assert "__musa_async_bar_record(0)" in src
+    assert "__musa_async_init_arrival(" not in src
+    assert "tl::mbarrier_arrive_expect_tx(" not in src
     assert "tl::tma_store" in src
 
     t = torch.randn((length,), device="musa", dtype=torch.float32)
@@ -499,7 +499,7 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
     producer_src = src[producer_idx:consumer_idx]
     consumer_src = src[consumer_idx:]
 
-    init_pattern = r"\*\(float4\*\)\(C_local \+ \(i_\d+ \* 4\)\) = make_float4"
+    init_pattern = r"\*\(tl_f4\*\)\(C_local \+ \(i_\d+ \* 4\)\) = \(tl_f4\{"
     assert re.search(init_pattern, consumer_src)
     assert not re.search(init_pattern, prelude_src)
     assert not re.search(init_pattern, producer_src)

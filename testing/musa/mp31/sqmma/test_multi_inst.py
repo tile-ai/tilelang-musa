@@ -7,6 +7,10 @@ import tilelang.language as T
 
 tilelang.disable_cache()
 
+PH1_TF32_TOLERANCE_OVERRIDES = {
+    torch.float32: (1e-4, 1e-4),
+}
+
 
 def matmul(
     M,
@@ -199,6 +203,7 @@ def test_mm_kernel(
     rtol, atol = tilelang.testing.get_tolerance(
         elem_type,
         profile="gemm_contract",
+        overrides=PH1_TF32_TOLERANCE_OVERRIDES,
     )
     ref_out = matmul_reference(logical_A, logical_B, out_dtype=elem_type)
     C = kernel(A, B)

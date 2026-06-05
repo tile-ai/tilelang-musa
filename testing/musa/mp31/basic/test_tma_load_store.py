@@ -19,7 +19,10 @@ def tma_add_one_1d(A, dim0, dtype="float32"):
 
     with T.Kernel(1, threads=128) as _:
         tile = T.alloc_shared((dim0,), dtype)
-        T.copy(A[0], tile)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         for i in T.grid(dim0):
             tile[i] = tile[i] + 1
         T.copy(tile, C[0])
@@ -35,7 +38,10 @@ def tma_add_one_2d(A, dim0, dim1, dtype="float32"):
 
     with T.Kernel(1, threads=128) as _:
         tile = T.alloc_shared((dim0, dim1), dtype)
-        T.copy(A[0, 0], tile)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[0, 0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         for i, j in T.grid(dim0, dim1):
             tile[i, j] = tile[i, j] + 1
         T.copy(tile, C[0, 0])
@@ -51,7 +57,10 @@ def tma_add_one_3d(A, dim0, dim1, dim2, dtype="float32"):
 
     with T.Kernel(dim0, threads=128) as i:
         tile = T.alloc_shared((dim1, dim2), dtype)
-        T.copy(A[i, 0, 0], tile)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[i, 0, 0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         for j, k in T.grid(dim1, dim2):
             tile[j, k] = tile[j, k] + 1
         T.copy(tile, C[i, 0, 0])
@@ -67,7 +76,10 @@ def tma_add_one_4d(A, dim0, dim1, dim2, dim3, dtype="float32"):
 
     with T.Kernel(dim0, dim1, threads=128) as (i, j):
         tile = T.alloc_shared((dim2, dim3), dtype)
-        T.copy(A[i, j, 0, 0], tile)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[i, j, 0, 0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         for k, l in T.grid(dim2, dim3):
             tile[k, l] = tile[k, l] + 1
         T.copy(tile, C[i, j, 0, 0])
@@ -83,7 +95,10 @@ def tma_add_one_5d(A, dim0, dim1, dim2, dim3, dim4, dtype="float32"):
 
     with T.Kernel(dim0, dim1, dim2, threads=128) as (i, j, k):
         tile = T.alloc_shared((dim3, dim4), dtype)
-        T.copy(A[i, j, k, 0, 0], tile)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[i, j, k, 0, 0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         for l, m in T.grid(dim3, dim4):
             tile[l, m] = tile[l, m] + 1
         T.copy(tile, C[i, j, k, 0, 0])

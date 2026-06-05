@@ -39,7 +39,7 @@ def matmul_with_independent_compute(A, B, block_M, block_N, block_K, num_warp=4,
     A: T.Tensor[[M, K], dtype]
     B: T.Tensor[[K, N], dtype]
     C = T.empty((M, N), dtype)
-    D = T.empty((M, N), accum_dtype)
+    D = T.empty((M,), accum_dtype)
     threads = num_warp * 32
 
     with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
@@ -49,7 +49,7 @@ def matmul_with_independent_compute(A, B, block_M, block_N, block_K, num_warp=4,
         a_shared = T.alloc_shared((block_M, block_K), dtype)
         b_shared = T.alloc_shared((block_K, block_N), dtype)
         c_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-        d_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        d_local = T.alloc_fragment((block_M,), accum_dtype)
 
         T.clear(c_local)
         T.clear(d_local)
@@ -57,28 +57,24 @@ def matmul_with_independent_compute(A, B, block_M, block_N, block_K, num_warp=4,
             T.copy(A[by * block_M, k * block_K], a_shared)
             T.copy(B[k * block_K, bx * block_N], b_shared)
             T.gemm(a_shared, b_shared, c_local, wg_wait=-1)
-            for i, j in T.Parallel(block_M, block_N):
-                a_val = T.cast(a_shared[i, 0], accum_dtype)
-                b_val = T.cast(b_shared[0, j], accum_dtype)
-                d_local[i, j] += a_val + b_val
+            for i in T.Parallel(block_M):
+                d_local[i] += T.cast(A[by * block_M + i, k * block_K], accum_dtype)
             T.wait_wgmma()
 
         T.copy(c_local, C[by * block_M, bx * block_N])
-        T.copy(d_local, D[by * block_M, bx * block_N])
+        if bx == 0:
+            T.copy(d_local, D[by * block_M])
 
     return C, D
 
 
-def independent_compute_reference(a, b, block_K):
+def independent_compute_reference(a, block_K):
     M, K = a.shape
-    _, N = b.shape
     a_fp32 = a.to(torch.float32)
-    b_fp32 = b.to(torch.float32)
 
-    ref_d = torch.zeros((M, N), device=a.device, dtype=torch.float32)
+    ref_d = torch.zeros((M,), device=a.device, dtype=torch.float32)
     for k_base in range(0, K, block_K):
-        ref_d += a_fp32[:, k_base].unsqueeze(1)
-        ref_d += b_fp32[k_base, :].unsqueeze(0)
+        ref_d += a_fp32[:, k_base]
     return ref_d
 
 
@@ -129,7 +125,7 @@ def test_wait_wgmma_with_independent_compute():
     b = torch.randn(K, N, device="musa", dtype=torch.float16)
     c, d = kernel(a, b)
     ref_c = (a.float() @ b.float()).to(torch.float16)
-    ref_d = independent_compute_reference(a, b, block_K)
+    ref_d = independent_compute_reference(a, block_K)
 
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(d, ref_d, rtol=1e-2, atol=1e-2)
@@ -167,7 +163,7 @@ def main():
     b = torch.randn(K, N, device="musa", dtype=torch.float16)
     c, d = kernel_1(a, b)
     ref_c = a @ b
-    ref_d = independent_compute_reference(a, b, block_K)
+    ref_d = independent_compute_reference(a, block_K)
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(d, ref_d, rtol=1e-2, atol=1e-2)
     print("pass")

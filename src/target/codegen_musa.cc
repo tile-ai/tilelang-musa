@@ -107,13 +107,18 @@ bool UseMusaNative16BitVector(DataType t) {
 
 bool UseMusaNativeVector(DataType t) {
   return UseMusaNative16BitVector(t) ||
-         (t.is_float() && t.bits() == 32 && (t.lanes() == 2 || t.lanes() == 4));
+         (t.is_float() && t.bits() == 32 &&
+          (t.lanes() == 2 || t.lanes() == 4)) ||
+         (t.is_int() && t.bits() == 32 && (t.lanes() == 16 || t.lanes() == 32));
 }
 
 std::string GetMusaNativeVectorType(DataType t) {
   ICHECK(UseMusaNativeVector(t));
   if (t.is_float() && t.bits() == 32) {
     return "tl_f" + std::to_string(t.lanes());
+  }
+  if (t.is_int() && t.bits() == 32) {
+    return "v" + std::to_string(t.lanes()) + "i32_t";
   }
   if (t.is_float16()) {
     return "tl_h" + std::to_string(t.lanes());
@@ -126,6 +131,9 @@ std::string CastToMusaNativeVectorElem(DataType t, const std::string &value) {
   if (t.is_float() && t.bits() == 32) {
     return "static_cast<float>(" + value + ")";
   }
+  if (t.is_int() && t.bits() == 32) {
+    return "static_cast<int32_t>(" + value + ")";
+  }
   if (t.is_float16()) {
     return "make_tl_h_elem(half_t(static_cast<float>(" + value + ")))";
   }
@@ -135,6 +143,9 @@ std::string CastToMusaNativeVectorElem(DataType t, const std::string &value) {
 std::string CastFromMusaNativeVectorElem(DataType t, const std::string &value) {
   ICHECK(UseMusaNativeVector(t));
   if (t.is_float() && t.bits() == 32) {
+    return value;
+  }
+  if (t.is_int() && t.bits() == 32) {
     return value;
   }
   if (t.is_float16()) {
@@ -707,9 +718,7 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     fail = true;
   } else if (t.is_float4()) {
     enable_fp4_ = true;
-    if (t.lanes() <= 4) {
-      os << GetTileLangFP4Type(t);
-    }
+    os << GetTileLangFP4Type(t);
     return;
   } else if (t == DataType::Bool()) {
     os << "bool";
@@ -825,7 +834,9 @@ void CodeGenTileLangMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       break;
     }
     case 32: {
-      if (t.is_scalar()) {
+      if (UseMusaNativeVector(t)) {
+        os << GetMusaNativeVectorType(t);
+      } else if (t.is_scalar()) {
         os << "int";
       } else if (t.lanes() <= 4) {
         os << "int" << t.lanes();
@@ -1067,7 +1078,7 @@ void CodeGenTileLangMUSA::PrintVecElemLoad(const std::string &vec, DataType t,
   }
 
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < 256 / t.bits());
+  ICHECK(i >= 0 && i < t.lanes());
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     std::string type_name = t.is_int() ? "char" : "unsigned char";
     if (t.lanes() == 2 || t.lanes() == 3) {
@@ -1111,6 +1122,19 @@ void CodeGenTileLangMUSA::PrintVecElemLoad(const std::string &vec, DataType t,
       os << "." << access[(i % 8) / 4];
     // fp8_e5_4_t or fp8_e5_2_t
     os << "." << access[i % 4];
+  } else if (t.is_float4_e2m1fn()) {
+    os << vec;
+    if (t.lanes() >= 64)
+      os << "." << access[i / 32];
+    if (t.lanes() >= 32)
+      os << "." << access[(i % 32) / 16];
+    if (t.lanes() >= 16)
+      os << "." << access[(i % 16) / 8];
+    if (t.lanes() >= 8)
+      os << "." << access[(i % 8) / 4];
+    if (t.lanes() >= 4)
+      os << "." << access[(i % 4) / 2];
+    os << "." << access[i % 2] << "()";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -1140,7 +1164,7 @@ void CodeGenTileLangMUSA::PrintVecElemStore(const std::string &vec, DataType t,
                                             int i, const std::string &value) {
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < 256 / t.bits());
+  ICHECK(i >= 0 && i < t.lanes());
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
       stream << vec << '.' << access[i % t.lanes()] << "="
@@ -1197,6 +1221,19 @@ void CodeGenTileLangMUSA::PrintVecElemStore(const std::string &vec, DataType t,
       stream << "." << access[(i % 8) / 4];
     // fp8_e5_4_t or fp8_e5_2_t
     stream << "." << access[i % 4] << " = " << value << ";\n";
+  } else if (t.is_float4_e2m1fn()) {
+    stream << vec;
+    if (t.lanes() >= 64)
+      stream << "." << access[i / 32];
+    if (t.lanes() >= 32)
+      stream << "." << access[(i % 32) / 16];
+    if (t.lanes() >= 16)
+      stream << "." << access[(i % 16) / 8];
+    if (t.lanes() >= 8)
+      stream << "." << access[(i % 8) / 4];
+    if (t.lanes() >= 4)
+      stream << "." << access[(i % 4) / 2];
+    stream << ".set_" << access[i % 2] << "(" << value << ");\n";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -1226,8 +1263,10 @@ void CodeGenTileLangMUSA::PrintStorageSync(const CallNode *op) {
   auto args = op->args;
   const std::string &sync = args[0].as<StringImmNode>()->value;
   if (sync == "warp") {
-    // DO nothing.
+    this->PrintIndent();
+    this->stream << "__syncwarp();\n";
   } else if (sync == "shared" || sync == "shared.dyn") {
+    DrainPendingCPAsyncBeforeStorageSync();
     this->PrintIndent();
     if (args.size() == 1) {
       this->stream << "__syncthreads_lm();\n";
@@ -1244,6 +1283,7 @@ void CodeGenTileLangMUSA::PrintStorageSync(const CallNode *op) {
                  << args.size();
     }
   } else if (sync == "global") {
+    DrainPendingCPAsyncBeforeStorageSync();
     if (!need_global_barrier_) {
       need_global_barrier_ = true;
     }
@@ -1273,6 +1313,20 @@ void CodeGenTileLangMUSA::PrintStorageSync(const CallNode *op) {
     this->stream << "}\n";
     this->PrintIndent();
     this->stream << "__syncthreads_lm();\n";
+  }
+}
+
+void CodeGenTileLangMUSA::DrainPendingCPAsyncBeforeStorageSync() {
+  if (has_uncommitted_cp_async_) {
+    this->PrintIndent();
+    this->stream << "tl::cp_async_commit();\n";
+    has_uncommitted_cp_async_ = false;
+    ++pending_cp_async_groups_;
+  }
+  if (pending_cp_async_groups_ > 0) {
+    this->PrintIndent();
+    this->stream << "tl::cp_async_wait<0>();\n";
+    pending_cp_async_groups_ = 0;
   }
 }
 

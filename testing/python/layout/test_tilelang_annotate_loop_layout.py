@@ -27,8 +27,8 @@ def test_loop_layout_fragment_vec4():
     kernel = loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
 
-    # Expect vectorized copy along innermost dimension (float4)
-    assert "*(float4*)(B + ((i * 512) + (((int)threadIdx.x) * 4))) = *(float4*)(A + ((i * 512) + (((int)threadIdx.x) * 4)));" in code
+    # Expect vectorized copy along innermost dimension.
+    assert "*(tl_f4*)(B + ((i * 512) + (((int)threadIdx.x) * 4))) = *(tl_f4*)(A + ((i * 512) + (((int)threadIdx.x) * 4)));" in code
 
 
 @tilelang.testing.requires_musa
@@ -42,7 +42,7 @@ def test_loop_layout_identity():
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn)
     kernel = loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
-    assert "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
+    assert "*(tl_f4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(tl_f4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
 
 
 @tilelang.jit
@@ -69,7 +69,7 @@ def test_copy_loop_layout_annotated_replicate_vec4():
     code = kernel.get_kernel_source()
 
     assert (
-        "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
+        "*(tl_f4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(tl_f4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
         in code
     )
 
@@ -99,7 +99,7 @@ def test_annotate_replicate_loop_layout_vec4():
     kernel = replicate_loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
     assert (
-        "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
+        "*(tl_f4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(tl_f4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
         in code
     )
 

@@ -51,6 +51,17 @@ int64_t GetElementStorageBits(DataType dtype) {
   return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
 }
 
+bool IsPH1SupportedFp8(DataType dtype) {
+  return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
+         dtype.is_float8_e5m2();
+}
+
+bool UsePH1Fp8SqmmaKMajorHints(DataType a_dtype, DataType b_dtype,
+                               bool allow_sqmma) {
+  return allow_sqmma && IsPH1SupportedFp8(a_dtype) &&
+         IsPH1SupportedFp8(b_dtype);
+}
+
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
                  arith::Analyzer *analyzer) {
   if (lhs.size() != rhs.size()) {
@@ -837,16 +848,22 @@ private:
       if (const auto *gemm = infer.as<GemmNode>()) {
         auto a_layout = FindLayoutForBuffer(active_layout_map, gemm->a_);
         auto b_layout = FindLayoutForBuffer(active_layout_map, gemm->b_);
+        auto block_size = as_const_int(thread_bounds_vec_[i]->extent);
+        const bool allow_sqmma =
+            block_size != nullptr && gemm->AllowSQMMA(*block_size, target_);
+        const bool use_fp8_sqmma_k_major = UsePH1Fp8SqmmaKMajorHints(
+            gemm->a_->dtype, gemm->b_->dtype, allow_sqmma);
+        const bool a_k_major = use_fp8_sqmma_k_major ? true : !gemm->transA_;
+        const bool b_k_major = use_fp8_sqmma_k_major ? true : gemm->transB_;
         if (a_layout.has_value()) {
-          SetLayoutBoolHint(k_major_map, a_layout.value(), Bool(!gemm->transA_),
+          SetLayoutBoolHint(k_major_map, a_layout.value(), Bool(a_k_major),
                             "k_major");
         }
         if (b_layout.has_value()) {
-          SetLayoutBoolHint(k_major_map, b_layout.value(), Bool(gemm->transB_),
+          SetLayoutBoolHint(k_major_map, b_layout.value(), Bool(b_k_major),
                             "k_major");
         }
-        auto block_size = as_const_int(thread_bounds_vec_[i]->extent);
-        if (block_size == nullptr || !gemm->AllowSQMMA(*block_size, target_)) {
+        if (!allow_sqmma) {
           continue;
         }
         if (a_layout.has_value()) {
@@ -873,39 +890,43 @@ private:
       } else if (const auto *gemm_py = infer.as<GemmPyNode>()) {
         auto a_layout = FindLayoutForBuffer(active_layout_map, gemm_py->a_);
         auto b_layout = FindLayoutForBuffer(active_layout_map, gemm_py->b_);
+        auto block_size = as_const_int(thread_bounds_vec_[i]->extent);
+        const bool allow_sqmma =
+            block_size != nullptr && gemm_py->AllowSQMMA(*block_size, target_);
+        const bool use_fp8_sqmma_k_major = UsePH1Fp8SqmmaKMajorHints(
+            gemm_py->a_->dtype, gemm_py->b_->dtype, allow_sqmma);
+        const bool a_k_major = use_fp8_sqmma_k_major ? true : !gemm_py->transA_;
+        const bool b_k_major = use_fp8_sqmma_k_major ? true : gemm_py->transB_;
         if (a_layout.has_value()) {
-          SetLayoutBoolHint(k_major_map, a_layout.value(),
-                            Bool(!gemm_py->transA_), "k_major");
+          SetLayoutBoolHint(k_major_map, a_layout.value(), Bool(a_k_major),
+                            "k_major");
         }
         if (b_layout.has_value()) {
-          SetLayoutBoolHint(k_major_map, b_layout.value(),
-                            Bool(gemm_py->transB_), "k_major");
+          SetLayoutBoolHint(k_major_map, b_layout.value(), Bool(b_k_major),
+                            "k_major");
         }
-        auto block_size = as_const_int(thread_bounds_vec_[i]->extent);
-        if (block_size == nullptr) {
+        if (!allow_sqmma) {
           continue;
         }
-        if (gemm_py->AllowSQMMA(*block_size, target_)) {
-          if (a_layout.has_value()) {
-            SetLayoutBoolHint(sqmma_map, a_layout.value(), Bool(true), "sqmma");
+        if (a_layout.has_value()) {
+          SetLayoutBoolHint(sqmma_map, a_layout.value(), Bool(true), "sqmma");
+        }
+        if (b_layout.has_value()) {
+          SetLayoutBoolHint(sqmma_map, b_layout.value(), Bool(true), "sqmma");
+        }
+        auto sqmma_inst = gemm_py->SelectSQMMAInstShape(*block_size, target_);
+        if (sqmma_inst.has_value()) {
+          // For A transpose layout, split by instruction M dimension.
+          if (a_layout.has_value() && gemm_py->transA_) {
+            SetLayoutExprHint(sqmma_inst_split_map, a_layout.value(),
+                              IntImm(DataType::Int(32), (*sqmma_inst)[0]),
+                              "sqmma inst split");
           }
-          if (b_layout.has_value()) {
-            SetLayoutBoolHint(sqmma_map, b_layout.value(), Bool(true), "sqmma");
-          }
-          auto sqmma_inst = gemm_py->SelectSQMMAInstShape(*block_size, target_);
-          if (sqmma_inst.has_value()) {
-            // For A transpose layout, split by instruction M dimension.
-            if (a_layout.has_value() && gemm_py->transA_) {
-              SetLayoutExprHint(sqmma_inst_split_map, a_layout.value(),
-                                IntImm(DataType::Int(32), (*sqmma_inst)[0]),
-                                "sqmma inst split");
-            }
-            // For B non-transpose layout, split by instruction N dimension.
-            if (b_layout.has_value() && !gemm_py->transB_) {
-              SetLayoutExprHint(sqmma_inst_split_map, b_layout.value(),
-                                IntImm(DataType::Int(32), (*sqmma_inst)[1]),
-                                "sqmma inst split");
-            }
+          // For B non-transpose layout, split by instruction N dimension.
+          if (b_layout.has_value() && !gemm_py->transB_) {
+            SetLayoutExprHint(sqmma_inst_split_map, b_layout.value(),
+                              IntImm(DataType::Int(32), (*sqmma_inst)[1]),
+                              "sqmma inst split");
           }
         }
       }

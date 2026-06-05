@@ -32,6 +32,7 @@
 #include <tvm/tir/transform.h>
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -352,7 +353,7 @@ private:
 
   // Wrapper function to determine if the shared memory allocation for a
   // variable is appropriate.
-  bool IsAppropriateSharedMemory(const Var &var) {
+  bool IsAppropriateSharedMemory(const Var &var) const {
     return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
   }
   // Whether do dynamic analysis.
@@ -473,6 +474,7 @@ public:
                                               enable_aggressive_merge, verbose);
     finder(stmt);
     shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
+    CollectPH1SQMMAOperandPairs(stmt);
     // First compute liveness over the flattened schedule, then feed it into the
     // arena packer.
     this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
@@ -657,7 +659,7 @@ private:
 
   // Wrapper function to determine if the shared memory allocation for a
   // variable is appropriate.
-  bool IsAppropriateSharedMemory(const Var &var) {
+  bool IsAppropriateSharedMemory(const Var &var) const {
     return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
   }
 
@@ -674,6 +676,7 @@ private:
     int alignment{0};                        // required byte alignment.
     int start{0}; // first statement index touching the buf.
     int end{0};   // one-past-last statement index.
+    int priority{1};
     DataType size_dtype{DataType::Int(32)};
   };
 
@@ -683,6 +686,7 @@ private:
     int end{0};
     size_t size_bytes{0};
     int alignment{0};
+    int priority{1};
     const VarNode *var{nullptr};
   };
 
@@ -802,6 +806,9 @@ private:
                 if (lhs.start != rhs.start) {
                   return lhs.start < rhs.start;
                 }
+                if (lhs.priority != rhs.priority) {
+                  return lhs.priority < rhs.priority;
+                }
                 if (lhs.size_bytes != rhs.size_bytes) {
                   return lhs.size_bytes > rhs.size_bytes;
                 }
@@ -878,6 +885,130 @@ private:
       }
     });
   }
+
+  bool IsPH1SQMMAEnabled() const {
+    auto target = Target::Current();
+    if (!target.defined() || !TargetIsPH1(target)) {
+      return false;
+    }
+    auto pass_ctx = tvm::transform::PassContext::Current();
+    return !pass_ctx->GetConfig<Bool>(kDisableSQMMA, Bool(false)).value();
+  }
+
+  void CollectPH1SQMMAOperandPairs(const Stmt &stmt) {
+    ph1_sqmma_b_operands_.clear();
+    ph1_sqmma_operand_pairs_.clear();
+    if (!IsPH1SQMMAEnabled()) {
+      return;
+    }
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      if (call->op.same_as(tl::tl_gemm())) {
+        CollectLoweredPH1SQMMAOperandPair(call);
+        return;
+      }
+      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      if (!tile_op.defined()) {
+        return;
+      }
+      const auto *gemm = tile_op.as<GemmNode>();
+      if (gemm == nullptr || !IsAppropriateSharedMemory(gemm->a_->data) ||
+          !IsAppropriateSharedMemory(gemm->b_->data)) {
+        return;
+      }
+      const VarNode *a_var = gemm->a_->data.get();
+      const VarNode *b_var = gemm->b_->data.get();
+      ph1_sqmma_b_operands_.insert(b_var);
+      ph1_sqmma_operand_pairs_.push_back({a_var, b_var});
+    });
+  }
+
+  static std::string Trim(const std::string &value) {
+    size_t begin = value.find_first_not_of(" \t");
+    if (begin == std::string::npos) {
+      return "";
+    }
+    size_t end = value.find_last_not_of(" \t");
+    return value.substr(begin, end - begin + 1);
+  }
+
+  static bool IsLoweredPH1SQMMAGemmSS(const std::string &callee) {
+    constexpr const char *prefix = "tl::gemm_ss<";
+    if (callee.rfind(prefix, 0) != 0 || callee.back() != '>') {
+      return false;
+    }
+    std::string args = callee.substr(std::strlen(prefix),
+                                     callee.size() - std::strlen(prefix) - 1);
+    std::vector<std::string> fields;
+    std::stringstream ss(args);
+    std::string field;
+    while (std::getline(ss, field, ',')) {
+      fields.push_back(Trim(field));
+    }
+    // use_sqmma is the 13th template argument:
+    // M,N,K,num_warp_m,num_warp_n,transA,transB,clear,lda,ldb,offsetA,offsetB,use_sqmma
+    return fields.size() > 12 && fields[12] == "true";
+  }
+
+  const VarNode *ExtractAccessPtrBuffer(const PrimExpr &expr) const {
+    const auto *call = expr.as<CallNode>();
+    if (call == nullptr || !call->op.same_as(builtin::tvm_access_ptr()) ||
+        call->args.size() < 2) {
+      return nullptr;
+    }
+    const auto *var = call->args[1].as<VarNode>();
+    if (var == nullptr ||
+        !IsAppropriateSharedMemory(tvm::ffi::GetRef<Var>(var))) {
+      return nullptr;
+    }
+    return var;
+  }
+
+  void CollectLoweredPH1SQMMAOperandPair(const CallNode *call) {
+    if (call->args.size() < 3) {
+      return;
+    }
+    const auto *callee = call->args[0].as<StringImmNode>();
+    if (callee == nullptr || !IsLoweredPH1SQMMAGemmSS(callee->value)) {
+      return;
+    }
+    const VarNode *a_var = ExtractAccessPtrBuffer(call->args[1]);
+    const VarNode *b_var = ExtractAccessPtrBuffer(call->args[2]);
+    if (a_var == nullptr || b_var == nullptr) {
+      return;
+    }
+    ph1_sqmma_b_operands_.insert(b_var);
+    ph1_sqmma_operand_pairs_.push_back({a_var, b_var});
+  }
+
+  void ApplyPH1SQMMAOperandPriority(std::vector<BufInfo> *buf_infos) const {
+    if (ph1_sqmma_operand_pairs_.empty()) {
+      return;
+    }
+    std::unordered_map<const VarNode *, size_t> index_by_var;
+    for (size_t i = 0; i < buf_infos->size(); ++i) {
+      index_by_var[(*buf_infos)[i].var] = i;
+      if (ph1_sqmma_b_operands_.count((*buf_infos)[i].var)) {
+        (*buf_infos)[i].priority = 0;
+      }
+    }
+
+    for (const auto &[a_var, b_var] : ph1_sqmma_operand_pairs_) {
+      auto a_it = index_by_var.find(a_var);
+      auto b_it = index_by_var.find(b_var);
+      if (a_it == index_by_var.end() || b_it == index_by_var.end()) {
+        continue;
+      }
+      BufInfo &a_info = (*buf_infos)[a_it->second];
+      BufInfo &b_info = (*buf_infos)[b_it->second];
+      b_info.start = std::min(b_info.start, a_info.start);
+      b_info.end = std::max(b_info.end, a_info.start + 1);
+    }
+  }
+
   /*!
    * \brief Liveness analysis to find gen and kill point of each variable.
    * \param seq the linear pattern of storage access
@@ -1246,11 +1377,15 @@ private:
       buf_infos.push_back(std::move(info));
     }
 
+    ApplyPH1SQMMAOperandPriority(&buf_infos);
+
     // Stable order so the later passes have deterministic behaviour.
     std::sort(buf_infos.begin(), buf_infos.end(),
               [](const BufInfo &a, const BufInfo &b) {
                 if (a.start != b.start)
                   return a.start < b.start;
+                if (a.priority != b.priority)
+                  return a.priority < b.priority;
                 if (a.end != b.end)
                   return a.end < b.end;
                 return a.name < b.name;
@@ -1269,6 +1404,7 @@ private:
       interval.size_bytes = static_cast<size_t>(
           std::max<int64_t>(0, info.const_size_bytes.value()));
       interval.alignment = info.alignment;
+      interval.priority = info.priority;
       interval.var = info.var;
       intervals.push_back(interval);
     }
@@ -1411,6 +1547,9 @@ private:
   std::unordered_map<const Object *, EventEntry> event_map_;
   // The mapping of buffer bytes alignment
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
+  std::unordered_set<const VarNode *> ph1_sqmma_b_operands_;
+  std::vector<std::pair<const VarNode *, const VarNode *>>
+      ph1_sqmma_operand_pairs_;
 };
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,

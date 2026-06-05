@@ -681,10 +681,18 @@ public:
                                tfloat32_t, B_type_mute>;
   using C_type = C_type_raw;
 
+  static constexpr bool IsFp8A =
+      std::is_same<A_type_mute, mutlass::float_e4m3_t>::value ||
+      std::is_same<A_type_mute, mutlass::float_e5m2_t>::value;
+  static constexpr bool IsFp8B =
+      std::is_same<B_type_mute, mutlass::float_e4m3_t>::value ||
+      std::is_same<B_type_mute, mutlass::float_e5m2_t>::value;
+  static constexpr bool IsFp8SQMMA = IsFp8A && IsFp8B;
+
   static constexpr TCE::Major SqmmaMajorA =
-      trans_A ? TCE::Major::MN : TCE::Major::K;
+      IsFp8SQMMA ? TCE::Major::K : (trans_A ? TCE::Major::MN : TCE::Major::K);
   static constexpr TCE::Major SqmmaMajorB =
-      trans_B ? TCE::Major::K : TCE::Major::MN;
+      IsFp8SQMMA ? TCE::Major::K : (trans_B ? TCE::Major::K : TCE::Major::MN);
 
   // Tile handled by one squad warp
   using AtomShape_MNK =

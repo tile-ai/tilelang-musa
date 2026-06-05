@@ -3,7 +3,29 @@
 #include "common.h"
 #include <musa_fp4.h>
 
-using fp4_e2_t = __mt_fp4_e2m1;
+struct fp4_e2_t {
+  __mt_fp4_storage_t __x;
+
+  TL_DEVICE fp4_e2_t() = default;
+  TL_DEVICE fp4_e2_t(__mt_fp4_e2m1 x) : __x(x.__x) {}
+  TL_DEVICE fp4_e2_t(__mt_fp4_storage_t x) : __x(x) {}
+  TL_DEVICE explicit fp4_e2_t(float x) : __x(__mt_fp4_e2m1(x).__x) {}
+
+  TL_DEVICE operator __mt_fp4_e2m1() const {
+    __mt_fp4_e2m1 tmp;
+    tmp.__x = __x;
+    return tmp;
+  }
+
+  TL_DEVICE operator float() const {
+    return static_cast<float>(static_cast<__mt_fp4_e2m1>(*this));
+  }
+
+  TL_DEVICE operator half_t() const { return half_t(float(*this)); }
+  TL_DEVICE operator __half() const {
+    return static_cast<__half>(static_cast<__mt_fp4_e2m1>(*this));
+  }
+};
 
 class fp4_e2_2_t {
 public:
@@ -14,15 +36,11 @@ public:
   TL_DEVICE fp4_e2_2_t(__mt_fp4x2_e2m1 data) : __x(data.__x) {}
 
   TL_DEVICE fp4_e2_t x() const {
-    fp4_e2_t out;
-    out.__x = static_cast<__mt_fp4_storage_t>(__x & 0x0F);
-    return out;
+    return fp4_e2_t(__mt_fp4_storage_t(__x & 0x0F));
   }
 
   TL_DEVICE fp4_e2_t y() const {
-    fp4_e2_t out;
-    out.__x = static_cast<__mt_fp4_storage_t>((__x >> 4) & 0x0F);
-    return out;
+    return fp4_e2_t(__mt_fp4_storage_t((__x >> 4) & 0x0F));
   }
 
   TL_DEVICE void set_x(fp4_e2_t val) {

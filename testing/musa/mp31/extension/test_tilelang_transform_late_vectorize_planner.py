@@ -142,7 +142,7 @@ def test_broadcast_load_elementwise_store_is_still_late_vectorized():
     normalized = source.replace(" ", "")
 
     assert "tl::vec_exp2_f2" in source
-    assert "make_float2(A[0],A[0])" in normalized
+    assert "tl_f2{static_cast<float>(A[0]),static_cast<float>(A[0])}" in normalized
 
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)

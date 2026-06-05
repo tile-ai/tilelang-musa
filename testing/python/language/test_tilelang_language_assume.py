@@ -3,6 +3,10 @@ import tilelang.language as T
 import tilelang.testing
 
 
+def _has_float_vector_type(source: str, lanes: int) -> bool:
+    return f"float{lanes}" in source or f"tl_f{lanes}" in source
+
+
 def test_assume_remove_boundary_check():
     @tilelang.jit
     def kernel_with_assume():
@@ -49,7 +53,7 @@ def test_assume_enable_vectorization():
     jit_kernel = kernel_vectorize(128)
     source = jit_kernel.get_kernel_source()
 
-    assert ("float4" in source) and ("if (" not in source)
+    assert _has_float_vector_type(source, 4) and ("if (" not in source)
 
 
 def test_assume_complex_indexing():

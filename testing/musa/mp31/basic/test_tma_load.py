@@ -19,7 +19,10 @@ def tma_copy_1d(A, dim0, dtype):
 
     with T.Kernel(1, threads=128) as _:
         tile = T.alloc_shared((dim0,), dtype)
-        T.copy(A[0], tile, disable_tma=False)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         T.copy(tile, C[0], disable_tma=True)
 
     return C
@@ -33,7 +36,10 @@ def tma_copy_2d(A, dim0, dim1, dtype):
 
     with T.Kernel(1, threads=128) as _:
         tile = T.alloc_shared((dim0, dim1), dtype)
-        T.copy(A[0, 0], tile, disable_tma=False)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[0, 0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         T.copy(tile, C[0, 0], disable_tma=True)
 
     return C
@@ -47,7 +53,10 @@ def tma_copy_3d(A, dim0, dim1, dim2, dtype):
 
     with T.Kernel(1, threads=128) as _:
         tile = T.alloc_shared((dim0, dim1, dim2), dtype)
-        T.copy(A[0, 0, 0], tile, disable_tma=False)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[0, 0, 0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         T.copy(tile, C[0, 0, 0], disable_tma=True)
 
     return C
@@ -61,7 +70,10 @@ def tma_copy_4d(A, dim0, dim1, dim2, dim3, dtype):
 
     with T.Kernel(1, threads=128) as _:
         tile = T.alloc_shared((dim0, dim1, dim2, dim3), dtype)
-        T.copy(A[0, 0, 0, 0], tile, disable_tma=False)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[0, 0, 0, 0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         T.copy(tile, C[0, 0, 0, 0], disable_tma=True)
 
     return C
@@ -75,7 +87,10 @@ def tma_copy_5d(A, dim0, dim1, dim2, dim3, dim4, dtype):
 
     with T.Kernel(1, threads=128) as _:
         tile = T.alloc_shared((dim0, dim1, dim2, dim3, dim4), dtype)
-        T.copy(A[0, 0, 0, 0, 0], tile, disable_tma=False)
+        mbar = T.alloc_barrier(128)
+        T.tma_copy(A[0, 0, 0, 0, 0], tile, barrier=mbar)
+        T.barrier_arrive(mbar)
+        T.mbarrier_wait_parity(mbar, 0)
         T.copy(tile, C[0, 0, 0, 0, 0], disable_tma=True)
 
     return C

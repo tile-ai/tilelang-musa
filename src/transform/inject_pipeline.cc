@@ -8,6 +8,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/transform.h>
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -861,15 +862,11 @@ private:
     return num_versions;
   }
 
-  // MTGPU 判断当前buffer空间是否需要对齐,并返回需要对齐的字节数
-  int NeedAlignGemmABBuffer(const Buffer &buffer) {
-    Target target = Target::Current();
-    if (!target.defined()) {
-      LOG(WARNING) << "NeedAlignGemmABBuffer: Target::Current() is undefined; "
-                      "skip PH1 alignment checks.";
+  int64_t PH1GemmABStageStrideElems(const Buffer &buffer) {
+    if (!target_.defined()) {
       return 0;
     }
-    if (!TargetIsPH1(target) ||
+    if (!TargetIsPH1(target_.value()) ||
         (buffer->data->name_hint != "A_shared" &&
          buffer->data->name_hint != "B_shared") ||
         (buffer.scope() != "shared" && buffer.scope() != "shared.dyn")) {
@@ -883,7 +880,14 @@ private:
     const auto *h = shape[0].as<IntImmNode>();
     const auto *w = shape[1].as<IntImmNode>();
     if (h && w && h->value * w->value < 4096) {
-      return 4096;
+      constexpr int kStageAlignBytes = 4096;
+      int dtype_bytes = buffer->dtype.bytes();
+      int64_t tile_elems = h->value * w->value;
+      int64_t tile_bytes = tile_elems * dtype_bytes;
+      int64_t padded_bytes =
+          ((tile_bytes + kStageAlignBytes - 1) / kStageAlignBytes) *
+          kStageAlignBytes;
+      return padded_bytes / dtype_bytes;
     }
     return 0;
   }
@@ -898,9 +902,9 @@ private:
     ObjectPtr<BufferNode> new_buffer =
         tvm::ffi::make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
-    // MTGPU
-    if (int align_bytes = NeedAlignGemmABBuffer(buffer)) {
-      new_buffer->strides = {Integer(align_bytes / buffer->dtype.bytes()),
+    // Preserve PH1 shared-memory stage alignment for SQMMA A/B tiles.
+    if (int64_t stage_stride_elems = PH1GemmABStageStrideElems(buffer)) {
+      new_buffer->strides = {Integer(stage_stride_elems),
                              Integer(buffer->shape[1].as<IntImmNode>()->value),
                              Integer(1)};
       return Buffer(new_buffer);

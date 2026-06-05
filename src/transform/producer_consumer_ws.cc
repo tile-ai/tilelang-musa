@@ -661,10 +661,115 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
   return has_allowed_work && !has_disallowed;
 }
 
+static bool IsPH1SupportedFp8(DataType dtype) {
+  return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
+         dtype.is_float8_e5m2();
+}
+
+static bool IsPH1Fp8SQMMA(Target target, DataType a_dtype, DataType b_dtype,
+                          bool allow_sqmma) {
+  return TargetIsPH1(target) && allow_sqmma && IsPH1SupportedFp8(a_dtype) &&
+         IsPH1SupportedFp8(b_dtype);
+}
+
+static VarSet CollectPH1MmaTmaUnsafeDstBuffers(const Array<Stmt> &flat_stmts,
+                                               Target target,
+                                               PrimExpr thread_extent,
+                                               int num_stages) {
+  VarSet unsafe_buffers;
+  auto block_size = as_const_int(thread_extent);
+  if (block_size == nullptr) {
+    return unsafe_buffers;
+  }
+
+  auto mark_gemm_operands =
+      [&](const Buffer &a, const Buffer &b, const Buffer &c, DataType a_dtype,
+          DataType b_dtype, DataType c_dtype, int m, int n, int k, bool trans_a,
+          bool trans_b, bool allow_sqmma, bool allow_ph1_wmma) {
+        if (IsPH1Fp8SQMMA(target, a_dtype, b_dtype, allow_sqmma)) {
+          // TMA cannot transpose while filling SQMMA swizzled shared memory. If
+          // one FP8 operand needs elementwise staging, keep both operands in
+          // the consumer loop so SQMMA observes a single staging/order model
+          // for the pair.
+          if (trans_a || !trans_b) {
+            unsafe_buffers.insert(a->data);
+            unsafe_buffers.insert(b->data);
+          }
+          return;
+        }
+
+        const bool uses_ph1_tf32_wmma =
+            TargetIsPH1(target) && !allow_sqmma && allow_ph1_wmma &&
+            IsSharedBuffer(a) && IsSharedBuffer(b) &&
+            c.scope() == "local.fragment" && a_dtype == DataType::Float(32) &&
+            b_dtype == DataType::Float(32) && c_dtype == DataType::Float(32);
+        if (uses_ph1_tf32_wmma && *block_size == 128 && num_stages >= 2 &&
+            !trans_a && !trans_b) {
+          // PH1 TF32 WMMA NN shared/shared multi-warp staging is not safe as a
+          // TMA producer: the TMA-filled linear shared tiles do not satisfy the
+          // WMMA tiled shared->register retile path for this pipelined shape.
+          // Keep both operands in the consumer loop and let the normal SIMT
+          // copy path stage them coherently.
+          unsafe_buffers.insert(a->data);
+          unsafe_buffers.insert(b->data);
+        }
+
+        const bool uses_ph1_f16_wmma =
+            TargetIsPH1(target) && !allow_sqmma && allow_ph1_wmma &&
+            IsSharedBuffer(a) && IsSharedBuffer(b) &&
+            c.scope() == "local.fragment" && a_dtype == DataType::Float(16) &&
+            b_dtype == DataType::Float(16) && c_dtype == DataType::Float(32);
+        if (uses_ph1_f16_wmma && *block_size == 32 && num_stages >= 2 &&
+            trans_a && trans_b && m == 16 && n == 8 && k == 16) {
+          // PH1 F16 WMMA TT small-tile staging is not stable as a TMA producer
+          // for this single-consumer-warp pipelined shape. Keep both operands
+          // on the consumer copy path instead of splitting them into WS/TMA.
+          unsafe_buffers.insert(a->data);
+          unsafe_buffers.insert(b->data);
+        }
+      };
+
+  for (const Stmt &stmt : flat_stmts) {
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+      if (!tile_op.defined()) {
+        return;
+      }
+      if (const auto *gemm = tile_op.as<GemmNode>()) {
+        const bool allow_sqmma = gemm->AllowSQMMA(*block_size, target);
+        mark_gemm_operands(gemm->a_, gemm->b_, gemm->c_, gemm->a_->dtype,
+                           gemm->b_->dtype, gemm->c_->dtype, gemm->m_, gemm->n_,
+                           gemm->k_, gemm->transA_, gemm->transB_, allow_sqmma,
+                           !allow_sqmma &&
+                               gemm->AllowPH1Wmma(*block_size, target));
+      } else if (const auto *gemm_py = tile_op.as<GemmPyNode>()) {
+        mark_gemm_operands(gemm_py->a_, gemm_py->b_, gemm_py->c_,
+                           gemm_py->a_->dtype, gemm_py->b_->dtype,
+                           gemm_py->c_->dtype, gemm_py->m_, gemm_py->n_,
+                           gemm_py->k_, gemm_py->transA_, gemm_py->transB_,
+                           gemm_py->AllowSQMMA(*block_size, target),
+                           /*allow_ph1_wmma=*/false);
+      }
+    });
+  }
+
+  return unsafe_buffers;
+}
+
 /// Classify a tile-op copy as TMA load producer, cp.async producer, or
 /// consumer. Replicates the coarse checks from InstructionAnnotation inline so
 /// that the tiled WS pass does not depend on a prior annotation pass.
-static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
+static TileStmtKind
+ClassifyCopy(const CopyNode *copy, Target target,
+             const VarSet *tma_unsafe_dst_buffers = nullptr) {
+  if (tma_unsafe_dst_buffers != nullptr &&
+      tma_unsafe_dst_buffers->count(copy->dst->data)) {
+    return TileStmtKind::kConsumer;
+  }
   // Explicit T.tma_copy() is a load-side primitive: only treat valid
   // global->shared TMA loads as producers.  TMA stores consume previously
   // produced shared data and must stay on the consumer side to preserve
@@ -697,14 +802,15 @@ static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
 }
 
 /// Classify a single statement in the pipeline loop body.
-TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
+TileStmtKind ClassifyStmt(const Stmt &stmt, Target target,
+                          const VarSet *tma_unsafe_dst_buffers = nullptr) {
   // Tile-op Calls: classify directly via CopyNode checks.
   if (auto *eval = stmt.as<EvaluateNode>()) {
     if (auto *call = eval->value.as<CallNode>()) {
       auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
       if (tile_op.defined()) {
         if (auto *copy = tile_op.as<CopyNode>()) {
-          return ClassifyCopy(copy, target);
+          return ClassifyCopy(copy, target, tma_unsafe_dst_buffers);
         }
         // Conv2D im2col lowers to tma_load_im2col on Hopper — treat as TMA
         // producer so it goes to the producer warp group.
@@ -961,6 +1067,41 @@ AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
   return detector.Result();
 }
 
+static bool HasDeferredAsyncGemm(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (found) {
+      return;
+    }
+    const auto *call = node.as<CallNode>();
+    if (call == nullptr) {
+      return;
+    }
+    auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+    if (!tile_op.defined()) {
+      return;
+    }
+    if (const auto *gemm = tile_op.as<GemmNode>()) {
+      found = gemm->wgWait_ < 0;
+    } else if (const auto *gemm_py = tile_op.as<GemmPyNode>()) {
+      found = gemm_py->wgWait_ < 0;
+    }
+  });
+  return found;
+}
+
+static bool HasWgmmaWait(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (found) {
+      return;
+    }
+    const auto *call = node.as<CallNode>();
+    found = call != nullptr && call->op.same_as(tl::wait_wgmma());
+  });
+  return found;
+}
+
 static bool CollectPreludeStmtsToPipelineLoop(const Stmt &stmt,
                                               const ForNode *pipeline_loop,
                                               Array<Stmt> *prelude_stmts) {
@@ -1168,11 +1309,13 @@ private:
     FlattenSeqStmt(loop_body, &flat_stmts);
 
     // Classify statements into producer (TMA/SIMT copy) and consumer.
+    VarSet tma_unsafe_dst_buffers = CollectPH1MmaTmaUnsafeDstBuffers(
+        flat_stmts, target_, thread_iv_->dom->extent, num_stages);
     std::vector<TileStmtKind> kinds;
     int num_tma = 0;
     int num_simt = 0;
     for (const Stmt &s : flat_stmts) {
-      auto k = ClassifyStmt(s, target_);
+      auto k = ClassifyStmt(s, target_, &tma_unsafe_dst_buffers);
       kinds.push_back(k);
       if (k == TileStmtKind::kTmaProducer)
         ++num_tma;
@@ -1304,6 +1447,7 @@ private:
       if (write_buffer_data.defined()) {
         int first_read = -1;
         int last_access = -1;
+        int deferred_gemm_wait_pos = -1;
         for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
           BufferDataAccessInfo access = AnalyzeBufferDataAccess(
               consumer_compute_stmts[ci], write_buffer_data.value(),
@@ -1314,10 +1458,24 @@ private:
           if (access.HasAnyAccess()) {
             last_access = static_cast<int>(ci);
           }
+          if (access.read && HasDeferredAsyncGemm(consumer_compute_stmts[ci])) {
+            for (size_t wi = ci + 1; wi < consumer_compute_stmts.size(); ++wi) {
+              if (HasWgmmaWait(consumer_compute_stmts[wi])) {
+                deferred_gemm_wait_pos =
+                    std::max(deferred_gemm_wait_pos, static_cast<int>(wi));
+                break;
+              }
+            }
+          }
         }
         if (first_read >= 0) {
           wait_insert_pos[access_group_idx] = first_read;
           arrive_insert_pos[access_group_idx] = last_access + 1;
+          if (deferred_gemm_wait_pos >= 0) {
+            arrive_insert_pos[access_group_idx] =
+                std::max(arrive_insert_pos[access_group_idx],
+                         deferred_gemm_wait_pos + 1);
+          }
         } else if (last_access >= 0) {
           wait_insert_pos[access_group_idx] = 0;
           arrive_insert_pos[access_group_idx] = last_access + 1;
@@ -1330,8 +1488,7 @@ private:
     // When all pure-TMA producers wait at the same consumer position and
     // release at the same position, forward and back-pressure barriers can
     // be shared across all TMA copies, reducing from 2*G*S to 2*S barriers.
-    bool can_merge_tma_barriers = !TargetIsMusa(target_) &&
-                                  (num_producer_groups > 1) &&
+    bool can_merge_tma_barriers = (num_producer_groups > 1) &&
                                   !has_simt_producer && !has_cp_async_producer;
     if (can_merge_tma_barriers) {
       for (int g = 1; g < num_producer_groups; ++g) {

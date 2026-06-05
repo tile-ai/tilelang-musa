@@ -37,6 +37,142 @@ def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="floa
     return main
 
 
+def fp8_sqmma_small_pipelined(trans_a=False, trans_b=False):
+    """A small FP8 SQMMA kernel whose unsafe operand layouts must block TMA."""
+
+    M, N, K = 256, 256, 256
+    block_M, block_N, block_K = 16, 64, 32
+    dtype = "float8_e4m3"
+
+    if trans_a and trans_b:
+
+        @T.prim_func
+        def main(
+            A: T.Tensor((K, M), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((M, N), dtype),
+        ):
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
+                bx,
+                by,
+            ):
+                A_shared = T.alloc_shared((block_K, block_M), dtype)
+                B_shared = T.alloc_shared((block_N, block_K), dtype)
+                C_local = T.alloc_fragment((block_M, block_N), "float32")
+
+                T.clear(C_local)
+                for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
+                    T.copy(A[ko * block_K, by * block_M], A_shared)
+                    T.copy(B[bx * block_N, ko * block_K], B_shared)
+                    T.gemm(
+                        A_shared,
+                        B_shared,
+                        C_local,
+                        transpose_A=True,
+                        transpose_B=True,
+                    )
+
+                T.copy(C_local, C[by * block_M, bx * block_N])
+
+        return main
+
+    assert not trans_a and not trans_b
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
+            bx,
+            by,
+        ):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
+
+            T.clear(C_local)
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[ko * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+def tf32_wmma_nn_pipelined():
+    """A PH1 TF32 WMMA NN kernel whose shared/shared staging must block TMA."""
+
+    M, N, K = 256, 256, 256
+    block_M, block_N, block_K = 32, 32, 64
+    dtype = "float32"
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
+            bx,
+            by,
+        ):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
+
+            T.clear(C_local)
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[ko * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+def f16_wmma_tt_small_pipelined():
+    """A PH1 F16 WMMA TT small kernel whose shared/shared staging must block TMA."""
+
+    M, N, K = 256, 256, 256
+    block_M, block_N, block_K = 16, 8, 16
+    dtype = "float16"
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((K, M), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=32) as (
+            bx,
+            by,
+        ):
+            A_shared = T.alloc_shared((block_K, block_M), dtype)
+            B_shared = T.alloc_shared((block_N, block_K), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
+
+            T.clear(C_local)
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
+                T.copy(A[ko * block_K, by * block_M], A_shared)
+                T.copy(B[bx * block_N, ko * block_K], B_shared)
+                T.gemm(
+                    A_shared,
+                    B_shared,
+                    C_local,
+                    transpose_A=True,
+                    transpose_B=True,
+                )
+
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
 def matmul_windowed_pipelined(
     M,
     N,
@@ -410,6 +546,64 @@ def test_tiled_ws_incompatible_layout_blocks_ws():
 
     # WS should NOT be applied: no producer/consumer split
     assert "__launch_bounds__(256, 1)" not in src
+
+
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@pytest.mark.parametrize("trans_a, trans_b", [(False, False), (True, True)])
+def test_tiled_ws_blocks_tma_for_fp8_sqmma_mixed_staging(trans_a, trans_b):
+    """FP8 SQMMA operands that need elementwise staging must not be split by TMA WS."""
+
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(
+        fp8_sqmma_small_pipelined(trans_a, trans_b),
+        pass_configs,
+        out_idx=[2],
+    )
+    src = kernel.get_kernel_source()
+
+    assert "tl::tma_load" not in src
+    assert "__launch_bounds__(256, 1)" not in src
+
+
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+def test_tiled_ws_blocks_tma_for_ph1_tf32_wmma_nn_multi_warp():
+    """TF32 WMMA NN shared/shared staging must stay on the consumer copy path."""
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+        tilelang.PassConfigKey.TL_DISABLE_SQMMA: True,
+    }
+    kernel = _compile_tvm_ffi(
+        tf32_wmma_nn_pipelined(),
+        pass_configs,
+        out_idx=[2],
+    )
+    src = kernel.get_kernel_source()
+
+    assert "tl::tma_load" not in src
+    assert "__launch_bounds__(256, 1)" not in src
+
+
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+def test_tiled_ws_blocks_tma_for_ph1_f16_wmma_tt_small_tile():
+    """F16 WMMA TT small-tile staging must stay on the consumer copy path."""
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+        tilelang.PassConfigKey.TL_DISABLE_SQMMA: True,
+    }
+    kernel = _compile_tvm_ffi(
+        f16_wmma_tt_small_pipelined(),
+        pass_configs,
+        out_idx=[2],
+    )
+    src = kernel.get_kernel_source()
+
+    assert "tl::tma_load" not in src
+    assert "__launch_bounds__(64, 1)" not in src
 
 
 @tilelang.testing.requires_musa

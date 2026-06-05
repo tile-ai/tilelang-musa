@@ -56,13 +56,17 @@ def _make_tme_load_kernel(
 
         with T.Kernel(1, threads=128) as _:
             tile = T.alloc_shared((M, N), dtype)
-            T.copy(
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(
                 A[0:M, 0:N],
                 tile,
+                barrier=mbar,
                 eviction_policy=eviction_policy,
                 inner_cache_policy=inner_cache_policy,
                 outer_cache_policy=outer_cache_policy,
             )
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
             T.copy(tile, C[0:M, 0:N], disable_tma=True)
 
         return C

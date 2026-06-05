@@ -228,8 +228,8 @@ def test_mm_kernel(
     ref_out = matmul_reference(logical_A, logical_B, out_dtype=elem_type)
     C = kernel(A, B)
     torch.testing.assert_close(
-        C.to(torch.float32),
-        ref_out.to(torch.float32),
+        C.cpu().to(torch.float32),
+        ref_out.cpu().to(torch.float32),
         rtol=rtol,
         atol=atol,
     )

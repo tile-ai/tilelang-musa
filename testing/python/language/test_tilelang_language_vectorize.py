@@ -6,6 +6,10 @@ from tilelang.intrinsics import make_mma_swizzle_layout
 import pytest
 
 
+def _has_float_vector_type(source: str, lanes: int) -> bool:
+    return f"float{lanes}" in source or f"tl_f{lanes}" in source
+
+
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True})
 def vectorize_test(N, M, stride_A, stride_B):
     @T.prim_func
@@ -45,9 +49,9 @@ def run_vectorize(N, M, stride_A, stride_B):
         vectorize_size *= 2
 
     if vectorize_size == 4:
-        assert "float4" in code
+        assert _has_float_vector_type(code, 4)
     elif vectorize_size == 2:
-        assert "float2" in code
+        assert _has_float_vector_type(code, 2)
 
 
 def test_vectorize():
@@ -99,9 +103,9 @@ def run_vectorize_invariant_index(N, M, K):
         vectorize_size *= 2
 
     if vectorize_size == 4:
-        assert "float4" in code
+        assert _has_float_vector_type(code, 4)
     elif vectorize_size == 2:
-        assert "float2" in code
+        assert _has_float_vector_type(code, 2)
 
 
 def test_vectorize_invariant_index():
@@ -174,7 +178,7 @@ def vectorize_test_call_infinity():
 
 def test_vectorize_call_infinity():
     kernel = vectorize_test_call_infinity.compile()
-    assert "float4" in kernel.get_kernel_source()
+    assert _has_float_vector_type(kernel.get_kernel_source(), 4)
 
 
 @tilelang.jit(
@@ -193,7 +197,7 @@ def vectorize_test_call_bitwise_logical():
 def test_vectorize_call_bitwise_logical():
     kernel = vectorize_test_call_bitwise_logical.compile()
     print(kernel.get_kernel_source())
-    assert "float4" in kernel.get_kernel_source()
+    assert _has_float_vector_type(kernel.get_kernel_source(), 4)
 
 
 if __name__ == "__main__":
