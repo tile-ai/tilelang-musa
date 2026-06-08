@@ -17,6 +17,17 @@ from tvm.target import Target
 
 from tvm.base import py_str
 from tvm.contrib import utils
+from .cc import get_cplus_compiler
+
+
+def get_nvcc_subprocess_env() -> dict[str, str] | None:
+    """Return the host compiler environment required by NVCC."""
+    if os.name != "nt":
+        return None
+
+    from tilelang.contrib.msvc import get_msvc_subprocess_env
+
+    return get_msvc_subprocess_env()
 
 
 def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=None):
@@ -80,6 +91,7 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
 
     file_target = path_target if path_target else temp_target
     cmd = [get_nvcc_compiler()]
+    cmd += [f"-ccbin={get_cplus_compiler()}"]
     cmd += [f"--{target_format}", "-O3"]
     # Always include line info for better profiling and mapping
     cmd += ["-lineinfo"]
@@ -99,15 +111,12 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     cmd += ["-o", file_target]
     cmd += [temp_code]
 
-    # NOTE: ccbin option can be used to tell nvcc where to find the c++ compiler
-    # just in case it is not in the path. On Windows it is not in the path by default.
-    # However, we cannot use TVM_CXX_COMPILER_PATH because the runtime env.
-    # Because it is hard to do runtime compiler detection, we require nvcc is configured
-    # correctly by default.
-    # if cxx_compiler_path != "":
-    #    cmd += ["-ccbin", cxx_compiler_path]
+    compiler_env = get_nvcc_subprocess_env()
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if compiler_env is None:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    else:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=compiler_env)
 
     (out, _) = proc.communicate()
 
