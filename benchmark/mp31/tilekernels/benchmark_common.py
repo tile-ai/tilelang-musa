@@ -40,15 +40,19 @@ def repo_root() -> Path:
 
 
 def ensure_repo_root_on_path() -> Path:
-    root = repo_root()
+    root = repo_root().resolve()
     root_text = str(root)
-    if sys.path[0] != root_text:
-        try:
-            sys.path.remove(root_text)
-        except ValueError:
-            pass
-        sys.path.insert(0, root_text)
+    sys.path[:] = [path for path in sys.path if not _is_repo_root_path(path, root)]
+    # Keep benchmark.* importable without shadowing an installed tilelang package.
+    sys.path.append(root_text)
     return root
+
+
+def _is_repo_root_path(path: str, root: Path) -> bool:
+    try:
+        return Path(path).resolve() == root
+    except (OSError, RuntimeError, TypeError):
+        return False
 
 
 ensure_repo_root_on_path()
@@ -302,10 +306,7 @@ def check_regression(
         baseline = baselines.get(record_key(record))
         if baseline is None:
             missing += 1
-            print(
-                f"{style('[WARN]', TermStyle.bold, TermStyle.yellow)} "
-                f"missing baseline for {format_record_label(record)}"
-            )
+            print(f"{style('[WARN]', TermStyle.bold, TermStyle.yellow)} missing baseline for {format_record_label(record)}")
             continue
         ratio = record["time_us"] / baseline["time_us"]
         max_ratio = max(max_ratio, ratio)

@@ -20,15 +20,21 @@ def _ensure_repo_root_on_path() -> None:
     current = Path(__file__).resolve()
     for candidate in current.parents:
         if (candidate / ".git").exists():
-            root_text = str(candidate)
-            if sys.path[0] != root_text:
-                try:
-                    sys.path.remove(root_text)
-                except ValueError:
-                    pass
-                sys.path.insert(0, root_text)
+            root_path = candidate.resolve()
+            root_text = str(root_path)
+            sys.path[:] = [path for path in sys.path if not _is_repo_root_path(path, root_path)]
+            # Keep benchmark.* importable without shadowing an installed tilelang
+            # package with the source checkout.
+            sys.path.append(root_text)
             return
     raise RuntimeError(f"unable to determine repository root from {current}")
+
+
+def _is_repo_root_path(path: str, root: Path) -> bool:
+    try:
+        return Path(path).resolve() == root
+    except (OSError, RuntimeError, TypeError):
+        return False
 
 
 def _format_duration(seconds: float) -> str:

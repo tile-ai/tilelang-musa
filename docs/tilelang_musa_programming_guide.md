@@ -37,7 +37,7 @@ T.copy(src_global[tid], dst_shared[tid], src_robust_desc=robust_desc)
 ```python
 ## 示例 1
 barrier = T.alloc_barrier(128)
-T.copy(src[0], tile, barrier=barrier)
+T.tma_copy(src[0], tile, barrier=barrier)
 T.barrier_arrive(barrier)
 T.barrier_wait(barrier, 0)
 
@@ -46,14 +46,15 @@ with T.Kernel(T.ceildiv(N, block_n), threads=128) as bx:
     tile = T.alloc_shared((block_n,), T.float32)
     barriers = T.alloc_barrier([128, 128])
     barrier = barriers[bx % 2]
-    T.copy(src[bx * block_n], tile, barrier=barrier)
+    T.tma_copy(src[bx * block_n], tile, barrier=barrier)
     T.barrier_arrive(barrier)
     T.barrier_wait(barrier, 0)
 ```
-- 功能：`T.copy(..., barrier=barrier)` 用于显式指定 `TME copy` 使用的 `shared barrier`，把 `barrier arrive/wait` 的控制交给用户。典型流程是先用 `T.alloc_barrier(arrive_count)` 分配 `barrier`，再调用 `T.copy(src, dst_shared, barrier=barrier)` 发起 `copy`，随后用 `T.barrier_arrive(barrier)` 和 `T.barrier_wait(barrier, parity)` 完成同步。
+- 功能：`T.tma_copy(..., barrier=barrier)` 用于显式指定 `TME/TMA load` 使用的 `shared barrier`，把 `barrier arrive/wait` 的控制交给用户。典型流程是先用 `T.alloc_barrier(arrive_count)` 分配 `barrier`，再调用 `T.tma_copy(src_global, dst_shared, barrier=barrier)` 发起 `copy`，随后用 `T.barrier_arrive(barrier)` 和 `T.barrier_wait(barrier, parity)` 完成同步。
 - 注意：
-  - `barrier` 必须来自 `T.alloc_barrier(...)`，并且使用 `T.copy(..., barrier=barrier)` 后，必须由用户在消费目标 `shared buffer` 前调用对应的 `T.barrier_arrive(...)` 和 `T.barrier_wait(...)` 来完成同步。
-  - `barrier` 只在该 `T.copy` 能 lowering 成 `TME copy` 时生效；普通 `scalar copy` 或 `SIMT copy` 不会使用这个 `barrier`。
+  - `barrier` 必须来自 `T.alloc_barrier(...)`，并且使用 `T.tma_copy(..., barrier=barrier)` 后，必须由用户在消费目标 `shared buffer` 前调用对应的 `T.barrier_arrive(...)` 和 `T.barrier_wait(...)` 来完成同步。
+  - `T.tma_copy` 的 load 侧只发起 `expect_tx + tma_load`，不会像普通 `T.copy` 那样自动完成同步；`T.copy` 当前不再接受 `barrier=` 参数。
+  - `barrier` 只适用于 `global -> shared` 的 `TME/TMA load` 路径；普通 `scalar copy` 或 `SIMT copy` 应继续使用 `T.copy(...)`。
 
 ## TME cache policy hints
 ```python

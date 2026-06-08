@@ -66,15 +66,11 @@ def _build_decode_fp32_vk_kernel_factory(
     if qk_head <= 0:
         raise ValueError("qk_head must be positive.")
     if head % qk_head != 0:
-        raise ValueError(
-            f"state/value heads={head} must be divisible by q/k heads={qk_head}."
-        )
+        raise ValueError(f"state/value heads={head} must be divisible by q/k heads={qk_head}.")
     if dim_k % 32 != 0:
         raise ValueError(f"dim_k={dim_k} must be divisible by 32.")
     if dim_v != dim_k:
-        raise ValueError(
-            f"Current decode kernel expects dim_v == dim_k, got dim_v={dim_v}, dim_k={dim_k}."
-        )
+        raise ValueError(f"Current decode kernel expects dim_v == dim_k, got dim_v={dim_v}, dim_k={dim_k}.")
     if dim_v % v_tile != 0:
         raise ValueError(f"dim_v={dim_v} must be divisible by v_tile={v_tile}")
     if v_tile % 4 != 0:
@@ -93,26 +89,16 @@ def _build_decode_fp32_vk_kernel_factory(
     if num_blocks_per_state <= 0:
         raise ValueError("num_blocks_per_state must be positive.")
     if num_blocks_per_state > num_v_tiles:
-        raise ValueError(
-            f"num_blocks_per_state={num_blocks_per_state} exceeds num_v_tiles={num_v_tiles}."
-        )
+        raise ValueError(f"num_blocks_per_state={num_blocks_per_state} exceeds num_v_tiles={num_v_tiles}.")
     if num_v_tiles % num_blocks_per_state != 0:
-        raise ValueError(
-            f"num_v_tiles={num_v_tiles} must be divisible by "
-            f"num_blocks_per_state={num_blocks_per_state}."
-        )
+        raise ValueError(f"num_v_tiles={num_v_tiles} must be divisible by num_blocks_per_state={num_blocks_per_state}.")
     num_v_tiles_per_block = num_v_tiles // num_blocks_per_state
     if stage <= 0:
         raise ValueError("stage must be positive.")
     if stage > num_v_tiles_per_block:
-        raise ValueError(
-            f"stage={stage} exceeds num_v_tiles_per_block={num_v_tiles_per_block}."
-        )
+        raise ValueError(f"stage={stage} exceeds num_v_tiles_per_block={num_v_tiles_per_block}.")
     if num_v_tiles_per_block * v_tile > _KERNEL_THREADS:
-        raise ValueError(
-            f"per-block output elements={num_v_tiles_per_block * v_tile} exceeds "
-            f"kernel threads={_KERNEL_THREADS}."
-        )
+        raise ValueError(f"per-block output elements={num_v_tiles_per_block * v_tile} exceeds kernel threads={_KERNEL_THREADS}.")
     vec_size = dim_k // 32
 
     batch = T.dynamic("batch")
@@ -183,17 +169,13 @@ def _build_decode_fp32_vk_kernel_factory(
             state: T.Tensor([batch, head, dim_v, dim_k], "float32"),
             o: T.StridedTensor(o_shape, o_strides, output_dtype),
         ):
-            with T.Kernel(
-                batch * num_blocks_per_state, head, threads=_KERNEL_THREADS
-            ) as (bx, hid):
+            with T.Kernel(batch * num_blocks_per_state, head, threads=_KERNEL_THREADS) as (bx, hid):
                 bid = bx // num_blocks_per_state
                 block_inner = bx % num_blocks_per_state
                 start_v_tile = block_inner * num_v_tiles_per_block
 
                 state_load_stage = T.alloc_shared([stage, v_tile, dim_k], "float32")
-                output_tile = T.alloc_shared(
-                    [num_v_tiles_per_block * v_tile], output_dtype
-                )
+                output_tile = T.alloc_shared([num_v_tiles_per_block * v_tile], output_dtype)
                 value_tile = T.alloc_shared([dim_v], "float32")
                 state_store_tile = T.alloc_shared([v_tile, dim_k], "float32")
 
@@ -222,7 +204,7 @@ def _build_decode_fp32_vk_kernel_factory(
                 for i in T.serial(prefetch_count):
                     prologue_v_tile = start_v_tile + i
                     prologue_v_base = prologue_v_tile * v_tile
-                    T.copy(
+                    T.tma_copy(
                         state[bid, hid, prologue_v_base, 0],
                         state_load_stage[i, :, :],
                         barrier=mbars[i],
@@ -351,7 +333,7 @@ def _build_decode_fp32_vk_kernel_factory(
                     if next_local_v_tile < num_v_tiles_per_block:
                         global_next_v_tile = start_v_tile + next_local_v_tile
                         global_next_v_base = global_next_v_tile * v_tile
-                        T.copy(
+                        T.tma_copy(
                             state[bid, hid, global_next_v_base, 0],
                             state_load_stage[stage_idx_var, :, :],
                             barrier=mbars[stage_idx_var],
@@ -359,9 +341,7 @@ def _build_decode_fp32_vk_kernel_factory(
                         T.mbarrier_arrive(mbarrier=mbars[stage_idx_var])
 
                 # Epilogue: store the last updated state tile.
-                global_prev_v_base_epi = (
-                    start_v_tile + num_v_tiles_per_block - 1
-                ) * v_tile
+                global_prev_v_base_epi = (start_v_tile + num_v_tiles_per_block - 1) * v_tile
                 T.copy(
                     state_store_tile[:, :],
                     state[
