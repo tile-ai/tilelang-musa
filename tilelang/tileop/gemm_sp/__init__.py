@@ -11,7 +11,8 @@ from tilelang.ir import GemmSPWarpPolicy
 
 
 def _ensure_backend_registration(target: Target) -> None:
-    from tilelang.utils.target import target_is_cuda, target_is_musa
+    from tilelang.cuda.target import target_is_cuda
+    from tilelang.musa.target import target_is_musa
 
     if target_is_cuda(target):
         from tilelang.cuda.op import gemm_sp as _cuda_gemm_sp  # noqa: F401

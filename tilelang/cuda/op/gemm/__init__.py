@@ -5,7 +5,7 @@ from .gemm_mma import GEMM_INST_MMA, GemmMMA
 from .gemm_mma_sm70 import GemmMMASm70
 from .gemm_tcgen05 import GEMM_INST_TCGEN05, GemmTCGEN5
 from .gemm_wgmma import GEMM_INST_WGMMA, GemmWGMMA
-from tilelang.utils.target import target_is_cuda, target_is_volta
+from tilelang.cuda.target import target_is_cuda, target_is_volta
 
 
 def _match_mma(target) -> bool:

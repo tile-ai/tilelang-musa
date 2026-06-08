@@ -7,6 +7,7 @@ from .cdna import *
 from .metal import *
 from tvm.target import Target
 import torch
+from tilelang.backend.target import determine_target
 
 
 def get_arch(target: str | Target = "cuda") -> TileDevice:

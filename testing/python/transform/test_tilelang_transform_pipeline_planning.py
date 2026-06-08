@@ -1,9 +1,9 @@
 from tilelang import tvm as tvm
 import tilelang as tl
+from tilelang.backend.target import determine_target
+import tilelang.language as T
 import tilelang.testing
 import torch
-from tilelang.utils.target import determine_target
-import tilelang.language as T
 from tvm.tirx.stmt_functor import post_order_visit
 
 auto_target = tvm.target.Target(determine_target("auto"))

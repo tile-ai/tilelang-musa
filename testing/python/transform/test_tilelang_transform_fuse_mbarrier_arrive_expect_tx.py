@@ -1,10 +1,17 @@
 # ruff: noqa
 from tilelang import tvm as tvm
 import tilelang as tl
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
+import pytest
+from tilelang.cuda import _ffi_api as cuda_ffi_api
 from tvm import tirx
+
+pytestmark = pytest.mark.skipif(
+    not hasattr(cuda_ffi_api, "FuseMBarrierArriveExpectTx"),
+    reason="CUDA pipeline is not built in a MUSA-only wheel",
+)
 
 auto_target = tvm.target.Target(determine_target("auto"))
 

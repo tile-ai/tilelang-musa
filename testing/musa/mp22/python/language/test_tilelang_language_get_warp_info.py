@@ -3,7 +3,9 @@ from typing import Optional
 import tilelang.language as T
 import tilelang.testing
 import torch
-from tilelang.utils.target import check_hip_availability, determine_target, target_is_qy2
+from tilelang.backend.target import determine_target
+from tilelang.musa.target import target_is_qy2
+from tilelang.rocm.target import check_hip_availability
 from tilelang import tvm as tvm
 
 auto_target = tvm.target.Target(determine_target("auto"))

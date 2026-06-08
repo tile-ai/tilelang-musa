@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tilelang.cuda.op.gemm_sp.gemm_sp_mma import GemmSPMMA
 from tilelang.tileop.gemm_sp.registry import register_gemm_sp_impl
-from tilelang.utils.target import target_is_musa, target_is_qy2
+from tilelang.musa.target import target_is_musa, target_is_qy2
 
 
 GEMM_SP_INST_MUSA_MMA_SP = "musa.mma.sp"

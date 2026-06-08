@@ -8,6 +8,7 @@ from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipel
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
+    target_has_tma,
     should_disable_shared_memory_reuse,
     should_enable_aggressive_merge,
     should_enable_race_check,
@@ -19,7 +20,7 @@ from tilelang.transform import PassContext
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
     # Avoid importing jit.adapter.utils at module import time.
-    from tilelang.jit.adapter.utils import is_cuda_target
+    from tilelang.jit.adapter.utils import is_cuda_target, is_musa_target
 
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()

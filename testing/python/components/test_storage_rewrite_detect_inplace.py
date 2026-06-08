@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.testing
 from tilelang import language as T
-from tilelang.utils.target import check_hip_availability
+from tilelang.rocm.target import check_hip_availability
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 

@@ -5,7 +5,7 @@ from .gemm_fma import GEMM_INST_FMA, GemmFMA
 from .gemm_mma import GEMM_INST_MUSA_MMA, GemmMusaMMA
 from .gemm_sqmma import GEMM_INST_SQMMA, GemmSQMMA
 from .gemm_wmma import GEMM_INST_WMMA, GemmWMMA
-from tilelang.utils.target import target_is_musa
+from tilelang.musa.target import target_is_musa
 
 
 def _match_musa(target) -> bool:

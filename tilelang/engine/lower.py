@@ -15,7 +15,7 @@ from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, MUT
 from tilelang.transform import PassConfigKey
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
-from tilelang.utils.target import determine_target, target_get_mcpu
+from tilelang.backend.target import determine_target
 from tilelang.backend.pass_pipeline import resolve_pipeline
 
 
@@ -202,6 +202,8 @@ def tilelang_callback_musa_compile(code, target, pass_config=None):
 
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
+    from tilelang.rocm.target import target_get_mcpu
+
     arch = target_get_mcpu(target)
     hsaco = hipcc.compile_hip(
         code,
