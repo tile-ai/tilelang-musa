@@ -1,11 +1,10 @@
 /*!
- * \brief Lower eligible global->shared copies into PTX cp.async
- * \file lower_ptx_async_copy.cc
+ * \brief Inject eligible global->shared copies into PTX cp.async intrinsics.
+ * \file cuda/transform/ptx_async_copy_injector.cc
  */
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
-#include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -20,12 +19,10 @@
 #include <utility>
 #include <vector>
 
-#include "../op/builtin.h"
-#include "../op/utils.h"
-#include "backend/common/target_utils.h"
-#include "ptx_async_copy_injector.h"
+#include "cuda/transform/ptx_async_copy_injector.h"
+#include "op/builtin.h"
+#include "op/utils.h"
 #include "tir/ir/buffer_common.h"
-#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -952,55 +949,17 @@ private:
   bool uncommitted_sync_copies_{false};
 };
 
-using namespace tirx::transform;
-
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                   bool async_without_async_commit_wait) {
+                   bool async_without_async_commit_wait,
+                   bool disable_force_async_wait,
+                   bool sync_inside_conditionals) {
   PTXAsyncCopyInjector injector(enable_auto_async_copy,
                                 async_without_async_commit_wait,
-                                /*disable_force_async_wait=*/false);
+                                disable_force_async_wait,
+                                sync_inside_conditionals);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }
-
-tvm::transform::Pass LowerPTXAsyncCopy() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
-    if (!target_opt.defined()) {
-      return f;
-    }
-    Target target = target_opt.value();
-    if (!TargetIsCuda(target) && !TargetIsMusa(target)) {
-      return f;
-    }
-
-    if (!TargetHasAsyncCopy(target)) {
-      // Graceful fallback on older architectures.
-      return f;
-    }
-
-    bool enable_auto_async_copy =
-        ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-    bool disable_thread_storage_sync =
-        ctx->GetConfig<Bool>(kDisableThreadStorageSync, Bool(false)).value();
-
-    auto *n = f.CopyOnWrite();
-    PTXAsyncCopyInjector injector(enable_auto_async_copy,
-                                  /*async_without_async_commit_wait=*/false,
-                                  disable_thread_storage_sync,
-                                  /*sync_inside_conditionals=*/
-                                  TargetIsMusa(target));
-    n->body = injector.Finalize(injector(n->body));
-    return f;
-  };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerPTXAsyncCopy", {});
-}
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerPTXAsyncCopy", LowerPTXAsyncCopy);
-}
-
 } // namespace tl
 } // namespace tvm

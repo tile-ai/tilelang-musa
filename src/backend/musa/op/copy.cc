@@ -15,7 +15,7 @@
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
-#include "transform/ptx_async_copy_injector.h"
+#include "cuda/transform/ptx_async_copy_injector.h"
 
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>

@@ -176,17 +176,15 @@ file(GLOB TILE_LANG_SRCS
   src/transform/common/*.cc
   src/transform/pipeline/*.cc
   src/op/*.cc
-  src/cpu/op/*.cc
-  src/cuda/op/copy_analysis.cc
   src/backend/musa/op/copy_analysis.cc
   src/webgpu/op/*.cc
   src/backend/common/target_utils.cc
   src/backend/common/codegen/codegen_utils.cc
   src/backend/common/codegen/codegen_c_host.cc
-  src/backend/common/codegen/codegen_c.cc
-  src/backend/common/codegen/rt_mod_c.cc
+  src/backend/musa/target_utils.cc
+  src/metal/target_utils.cc
+  src/rocm/target_utils.cc
   # intrin_rule doesn't have system dependency; always compiled regardless of backend
-  src/cuda/codegen/intrin_rule_cuda.cc
   src/backend/musa/codegen/intrin_rule_musa.cc
   src/rocm/codegen/intrin_rule_hip.cc
 )
@@ -195,7 +193,6 @@ file(GLOB TILE_LANG_SRCS
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
 )
-
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -225,6 +222,7 @@ endif()
 
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/backend/musa/CMakeLists.txt")
 
