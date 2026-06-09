@@ -496,6 +496,11 @@ TL_DEVICE float2 shfl_xor_sync(unsigned mask, float2 val, int laneMask) {
   return out;
 }
 
+TL_DEVICE tl_f2 shfl_xor_sync(unsigned mask, tl_f2 val, int laneMask) {
+  return tl_f2{__shfl_xor_sync(mask, val[0], laneMask),
+               __shfl_xor_sync(mask, val[1], laneMask)};
+}
+
 TL_DEVICE float4 shfl_xor_sync(unsigned mask, float4 val, int laneMask) {
   float4 out;
   out.x = __shfl_xor_sync(mask, val.x, laneMask);
@@ -505,9 +510,28 @@ TL_DEVICE float4 shfl_xor_sync(unsigned mask, float4 val, int laneMask) {
   return out;
 }
 
+TL_DEVICE tl_f4 shfl_xor_sync(unsigned mask, tl_f4 val, int laneMask) {
+  return tl_f4{__shfl_xor_sync(mask, val[0], laneMask),
+               __shfl_xor_sync(mask, val[1], laneMask),
+               __shfl_xor_sync(mask, val[2], laneMask),
+               __shfl_xor_sync(mask, val[3], laneMask)};
+}
+
 template <typename T>
 TL_DEVICE T shfl_down_sync(unsigned mask, T val, int delta) {
   return __shfl_down_sync(mask, val, delta);
+}
+
+TL_DEVICE tl_f2 shfl_down_sync(unsigned mask, tl_f2 val, int delta) {
+  return tl_f2{__shfl_down_sync(mask, val[0], delta),
+               __shfl_down_sync(mask, val[1], delta)};
+}
+
+TL_DEVICE tl_f4 shfl_down_sync(unsigned mask, tl_f4 val, int delta) {
+  return tl_f4{__shfl_down_sync(mask, val[0], delta),
+               __shfl_down_sync(mask, val[1], delta),
+               __shfl_down_sync(mask, val[2], delta),
+               __shfl_down_sync(mask, val[3], delta)};
 }
 
 template <typename T>
@@ -515,8 +539,30 @@ TL_DEVICE T shfl_up_sync(unsigned mask, T val, int delta) {
   return __shfl_up_sync(mask, val, delta);
 }
 
+TL_DEVICE tl_f2 shfl_up_sync(unsigned mask, tl_f2 val, int delta) {
+  return tl_f2{__shfl_up_sync(mask, val[0], delta),
+               __shfl_up_sync(mask, val[1], delta)};
+}
+
+TL_DEVICE tl_f4 shfl_up_sync(unsigned mask, tl_f4 val, int delta) {
+  return tl_f4{
+      __shfl_up_sync(mask, val[0], delta), __shfl_up_sync(mask, val[1], delta),
+      __shfl_up_sync(mask, val[2], delta), __shfl_up_sync(mask, val[3], delta)};
+}
+
 template <typename T> TL_DEVICE T shfl_sync(unsigned mask, T val, int srcLane) {
   return __shfl_sync(mask, val, srcLane);
+}
+
+TL_DEVICE tl_f2 shfl_sync(unsigned mask, tl_f2 val, int srcLane) {
+  return tl_f2{__shfl_sync(mask, val[0], srcLane),
+               __shfl_sync(mask, val[1], srcLane)};
+}
+
+TL_DEVICE tl_f4 shfl_sync(unsigned mask, tl_f4 val, int srcLane) {
+  return tl_f4{
+      __shfl_sync(mask, val[0], srcLane), __shfl_sync(mask, val[1], srcLane),
+      __shfl_sync(mask, val[2], srcLane), __shfl_sync(mask, val[3], srcLane)};
 }
 
 // Specializations for mutlass::half_t
