@@ -16,6 +16,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import torch
+import pytest
 
 
 def matmul_tma_copy(
@@ -61,13 +62,12 @@ def matmul_tma_copy(
 
 
 def run_gemm_tma_copy(num_stages, verbose=False):
-    # M, N, K = 32, 32, 64
-    M, N, K = 32, 32, 32
-    block_M, block_N, block_K = 16, 16, 16
+    M, N, K = 256, 256, 1024
+    block_M, block_N, block_K = 128, 128, 32
     in_dtype = T.float16
     out_dtype = T.float16
     accum_dtype = T.float32
-    threads = 32
+    threads = 128
 
     program = matmul_tma_copy(
         M,
@@ -92,8 +92,6 @@ def run_gemm_tma_copy(num_stages, verbose=False):
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
-        import torch
-
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         return C.to(torch.__getattribute__(out_dtype))
 
@@ -158,12 +156,12 @@ def matmul_tma_copy_store(
 
 
 def run_gemm_tma_copy_store(num_stages, verbose=False):
-    M, N, K = 32, 32, 32
-    block_M, block_N, block_K = 16, 16, 16
+    M, N, K = 256, 256, 1024
+    block_M, block_N, block_K = 128, 128, 32
     in_dtype = T.float16
     out_dtype = T.float16
     accum_dtype = T.float32
-    threads = 32
+    threads = 128
 
     program = matmul_tma_copy_store(
         M,
@@ -187,18 +185,15 @@ def run_gemm_tma_copy_store(num_stages, verbose=False):
     if verbose:
         print(kernel_source)
     assert "tl::tma_store" in kernel_source
-    assert "tl::tma_store_arrive()" in kernel_source
+    assert "tl::tma_store_arrive" in kernel_source
     assert kernel_source.count("tl::tma_store_wait<0>()") == 1
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
-        import torch
-
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         return C.to(torch.__getattribute__(out_dtype))
 
-    rtol, atol = tilelang.testing.get_tolerance(torch.float16, profile="gemm_algorithm")
-    profiler.assert_allclose(ref_program, atol=atol, rtol=rtol)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)

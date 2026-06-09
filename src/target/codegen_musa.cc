@@ -1266,7 +1266,6 @@ void CodeGenTileLangMUSA::PrintStorageSync(const CallNode *op) {
     this->PrintIndent();
     this->stream << "__syncwarp();\n";
   } else if (sync == "shared" || sync == "shared.dyn") {
-    DrainPendingCPAsyncBeforeStorageSync();
     this->PrintIndent();
     if (args.size() == 1) {
       this->stream << "__syncthreads_lm();\n";
@@ -1283,7 +1282,6 @@ void CodeGenTileLangMUSA::PrintStorageSync(const CallNode *op) {
                  << args.size();
     }
   } else if (sync == "global") {
-    DrainPendingCPAsyncBeforeStorageSync();
     if (!need_global_barrier_) {
       need_global_barrier_ = true;
     }
@@ -1313,20 +1311,6 @@ void CodeGenTileLangMUSA::PrintStorageSync(const CallNode *op) {
     this->stream << "}\n";
     this->PrintIndent();
     this->stream << "__syncthreads_lm();\n";
-  }
-}
-
-void CodeGenTileLangMUSA::DrainPendingCPAsyncBeforeStorageSync() {
-  if (has_uncommitted_cp_async_) {
-    this->PrintIndent();
-    this->stream << "tl::cp_async_commit();\n";
-    has_uncommitted_cp_async_ = false;
-    ++pending_cp_async_groups_;
-  }
-  if (pending_cp_async_groups_ > 0) {
-    this->PrintIndent();
-    this->stream << "tl::cp_async_wait<0>();\n";
-    pending_cp_async_groups_ = 0;
   }
 }
 
@@ -1978,7 +1962,6 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << dst << ", " << src << ", " << robust_base << ", "
                    << robust_size << ", " << condition << ");\n";
     }
-    has_uncommitted_cp_async_ = true;
   } else if (op->op.same_as(builtin::ptx_cp_async())) {
     // Keep compatibility with both cp.async signatures:
     // - legacy: {dst, dst_offset, src, src_offset, size[, pred]}
@@ -2019,7 +2002,6 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
                      << ", " << condition << ");\n";
       }
     }
-    has_uncommitted_cp_async_ = true;
   } else if (op->op.same_as(tl::ptx_cp_async())) {
     // TileLang form keeps a logical element count. Derive the final byte width
     // from access_ptr dtype metadata so packed subbyte copies are
@@ -2037,26 +2019,12 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
                    << ", " << src << ", " << condition << ");\n";
     }
-    has_uncommitted_cp_async_ = true;
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
-    if (has_uncommitted_cp_async_) {
-      print_extern_call_stmt("tl::cp_async_commit");
-      has_uncommitted_cp_async_ = false;
-      ++pending_cp_async_groups_;
-    }
+    print_extern_call_stmt("tl::cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
-    if (pending_cp_async_groups_ > 0) {
-      int n = Downcast<IntImm>(op->args[0])->value;
-      // mcc 5.1 dependency analysis can crash on rolling wait_group(N>0)
-      // patterns in software pipelines. wait_all is more conservative and keeps
-      // the program order correct for MUSA.
-      if (n > 0) {
-        n = 0;
-      }
-      std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
-      print_extern_call_stmt(func_name, 1);
-      pending_cp_async_groups_ = std::min(pending_cp_async_groups_, n);
-    }
+    int n = Downcast<IntImm>(op->args[0])->value;
+    std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
+    print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
     this->PrintIndent();
@@ -2939,7 +2907,6 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << PrintPredicatedCpAsyncAssembly(
           dst, dst_offset, src, src_offset, size, this->PrintExpr(op->args[5]));
     }
-    has_uncommitted_cp_async_ = true;
   } else if (op->op.same_as(builtin::ptx_cp_async_bulk())) {
     need_cast_smem_ptr_to_int_ = true;
     std::string dst = this->PrintExpr(op->args[0]);
@@ -2954,18 +2921,11 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << PrintCpAsyncBulkAsm(dst, dst_offset, src, src_offset, size,
                                         barrier);
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
-    if (has_uncommitted_cp_async_) {
-      this->stream << "__asm__ __volatile__(\"cp.async.commit_group;\");\n\n";
-      has_uncommitted_cp_async_ = false;
-      ++pending_cp_async_groups_;
-    }
+    this->stream << "__asm__ __volatile__(\"cp.async.commit_group;\");\n\n";
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
-    if (pending_cp_async_groups_ > 0) {
-      int n = Downcast<IntImm>(op->args[0])->value;
-      this->stream << "__asm__ __volatile__(\"cp.async.wait_group " << n
-                   << ";\");\n\n";
-      pending_cp_async_groups_ = std::min(pending_cp_async_groups_, n);
-    }
+    int n = Downcast<IntImm>(op->args[0])->value;
+    this->stream << "__asm__ __volatile__(\"cp.async.wait_group " << n
+                 << ";\");\n\n";
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;
@@ -4601,8 +4561,6 @@ void CodeGenTileLangMUSA::AddFunction(const GlobalVar &gvar,
   // clear previous generated state.
   this->InitFuncState(f);
   tma_descriptor_args_.clear();
-  has_uncommitted_cp_async_ = false;
-  pending_cp_async_groups_ = 0;
   if (auto attr =
           f->GetAttr<Map<String, Array<PrimExpr>>>("tma_descriptor_args")) {
     for (const auto &kv : attr.value()) {
