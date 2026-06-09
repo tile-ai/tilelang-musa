@@ -3,7 +3,6 @@ include:
     ref: 'master'
     files:
       - '.base.yml'
-      - '.install-musa.yml'
 
 variables:
   MUSA_PATH: "/usr/local/musa/bin"
@@ -30,16 +29,13 @@ variables:
       DDK_VERSION: 'master'
   variables:
     MUSA_PATH: "${MUSA_PATH:-/usr/local/musa/bin}"
-    K8S_IMAGE: "sh-harbor.mthreads.com/tilelang-ci-smoke/tilelang_musa:20260518-torch-20260609"
+    K8S_IMAGE: "sh-harbor.mthreads.com/tilelang-ci-smoke/tilelang_musa:20260609-musa5.2-torch2.7.1"
     GIT_SUBMODULE_STRATEGY: none
 
 smoke-ci-test:
   extends:
     - ".gpu-tilelang_musa-base"
-    - ".install-musa"
   timeout: 120m
-  variables:
-    MUSA_MODULE: "MUSATOOLKITS,MUSARUNTIME,MTCC,MUDNN,MCCL"
   withCredentials:
     - type: git
       id: sh-code
@@ -65,5 +61,4 @@ smoke-ci-test:
     - "python3 -m pip install --force-reinstall -i https://pypi.tuna.tsinghua.edu.cn/simple dist/*.whl"
     - "python3 -c \"import tilelang; print('tilelang', tilelang.__version__, tilelang.__file__)\""
     - "python3 -m pip install -r requirements-test.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
-    - "python3 -m pip install pytest-timeout -i https://pypi.tuna.tsinghua.edu.cn/simple"
     - "bash testing/run_test.sh ci_smoke -vv -s --tb=short --durations=20 --timeout=60 --timeout-method=thread"
