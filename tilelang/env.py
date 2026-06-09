@@ -1,5 +1,6 @@
 from __future__ import annotations
 import importlib.metadata
+import math
 import sys
 import os
 import pathlib
@@ -336,6 +337,8 @@ class Environment:
     # Kernel selection options
     # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
     TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "0")
+    TILELANG_JIT_DIAGNOSTICS = EnvVar("TILELANG_JIT_DIAGNOSTICS", "0")  # enable JIT phase diagnostics
+    TILELANG_COMPILE_TIMEOUT_SECONDS = EnvVar("TILELANG_COMPILE_TIMEOUT_SECONDS", "")  # optional NVCC subprocess timeout in seconds
 
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
@@ -402,6 +405,21 @@ class Environment:
         {"1", "true", "yes", "on"} (case-insensitive).
         """
         return str(self.TILELANG_USE_GEMM_V1).lower() in ("1", "true", "yes", "on")
+
+    def is_jit_diagnostics_enabled(self) -> bool:
+        return str(self.TILELANG_JIT_DIAGNOSTICS).lower() in ("1", "true", "yes", "on")
+
+    def get_compile_timeout_seconds(self) -> float | None:
+        value = str(self.TILELANG_COMPILE_TIMEOUT_SECONDS).strip()
+        if not value:
+            return None
+        try:
+            timeout = float(value)
+        except ValueError as exc:
+            raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number") from exc
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("TILELANG_COMPILE_TIMEOUT_SECONDS must be empty or a non-negative number")
+        return timeout if timeout > 0 else None
 
     def get_default_target(self) -> str:
         """Get default compilation target from environment."""

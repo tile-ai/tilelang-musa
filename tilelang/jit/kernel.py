@@ -22,6 +22,7 @@ from tilelang.jit.adapter import (
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.backend.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
+from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
 import logging
@@ -238,7 +239,18 @@ class JITKernel(Generic[_P, _T]):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
             pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
 
-        with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), self.target:
+        func_name = tilelang_func.attrs.get("global_symbol", "<unknown>")
+        phase_context = {
+            "kernel": func_name,
+            "target": str(target),
+            "target_host": str(target_host) if target_host is not None else None,
+            "backend": execution_backend,
+        }
+        with (
+            jit_phase("lower", verbose=verbose, **phase_context),
+            tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments),
+            self.target,
+        ):
             artifact = tilelang.lower(
                 tilelang_func,
                 target=target,
@@ -249,12 +261,17 @@ class JITKernel(Generic[_P, _T]):
 
         self.artifact = artifact
 
+        def create_adapter(adapter_cls: Callable[..., BaseKernelAdapter], **kwargs: Any) -> BaseKernelAdapter:
+            with jit_phase("adapter", verbose=verbose, **phase_context):
+                return adapter_cls(**kwargs)
+
         # Create an adapter based on the specified execution backend.
         if execution_backend == "tvm_ffi":
             # Use TVMFFIKernelAdapter for interoperability with PyTorch via DLPack.
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
             assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
-            adapter = TVMFFIKernelAdapter(
+            adapter = create_adapter(
+                TVMFFIKernelAdapter,
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -268,7 +285,8 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "cython":
-            adapter = CythonKernelAdapter(
+            adapter = create_adapter(
+                CythonKernelAdapter,
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -283,7 +301,8 @@ class JITKernel(Generic[_P, _T]):
         elif execution_backend == "nvrtc":
             from tilelang.jit.adapter import NVRTCKernelAdapter
 
-            adapter = NVRTCKernelAdapter(
+            adapter = create_adapter(
+                NVRTCKernelAdapter,
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -297,7 +316,8 @@ class JITKernel(Generic[_P, _T]):
             )
         elif execution_backend == "torch":
             assert is_metal_target(target)
-            adapter = MetalKernelAdapter(
+            adapter = create_adapter(
+                MetalKernelAdapter,
                 params=artifact.params,
                 result_idx=out_idx,
                 # target=target,
@@ -311,7 +331,8 @@ class JITKernel(Generic[_P, _T]):
             )
         elif execution_backend == "cutedsl":
             assert is_cutedsl_target(target)
-            adapter = CuTeDSLKernelAdapter(
+            adapter = create_adapter(
+                CuTeDSLKernelAdapter,
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
