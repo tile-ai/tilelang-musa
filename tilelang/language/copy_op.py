@@ -9,7 +9,7 @@ from tilelang.utils.language import (
     legalize_pairwise_extents,
 )
 from tilelang.language.utils import get_extent
-from tvm import ir, tir
+from tvm import arith, ir, tir
 
 
 EvictionPolicy = Literal["evict_normal", "evict_first", "evict_last"]
@@ -39,6 +39,32 @@ def _set_tma_cache_annotations(ann: dict) -> None:
         ann["inner_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
     if "outer_cache_policy" not in ann:
         ann["outer_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
+
+
+def _check_copy_tile_not_larger_than_buffer(
+    data: BufferLikeType,
+    extents: list[tir.PrimExpr],
+    role: str,
+) -> None:
+    if not isinstance(data, (tir.Buffer, tir.BufferLoad, tir.BufferRegion)):
+        return
+
+    buffer = data if isinstance(data, tir.Buffer) else data.buffer
+    shape = list(buffer.shape)
+    extents = list(extents)
+    if len(extents) < len(shape):
+        extents = [tir.IntImm("int32", 1)] * (len(shape) - len(extents)) + extents
+    if len(extents) != len(shape):
+        return
+
+    analyzer = arith.Analyzer()
+    for dim, (extent, shape_dim) in enumerate(zip(extents, shape)):
+        if analyzer.can_prove(extent > shape_dim):
+            raise ValueError(
+                "T.copy tile extent is larger than the whole "
+                f"{role} buffer on dim {dim}: buffer `{buffer.name}` "
+                f"has shape {shape}, but copy tile extents are {extents}."
+            )
 
 
 def _normalize_copy_regions(
@@ -71,6 +97,8 @@ def _normalize_copy_regions(
     # Align and broadcast extents from the right (tail) side.
     # This is majorly for supporting some syntactic sugar, not the whole broadcasting ability of copy op.
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
+    _check_copy_tile_not_larger_than_buffer(src, src_extent, "source")
+    _check_copy_tile_not_larger_than_buffer(dst, dst_extent, "destination")
 
     # Use legalized extents for src and dst respectively.
     src = to_buffer_region(src, access_type="r", extents=src_extent)
