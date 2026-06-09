@@ -30,7 +30,7 @@ variables:
       DDK_VERSION: 'master'
   variables:
     MUSA_PATH: "${MUSA_PATH:-/usr/local/musa/bin}"
-    K8S_IMAGE: "sh-harbor.mthreads.com/tilelang-ci-smoke/tilelang_musa:20260518"
+    K8S_IMAGE: "sh-harbor.mthreads.com/tilelang-ci-smoke/tilelang_musa:20260518-torch-20260609"
     GIT_SUBMODULE_STRATEGY: none
 
 smoke-ci-test:
