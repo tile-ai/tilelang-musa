@@ -1,9 +1,6 @@
 import tilelang
 import tilelang.testing
-from tilelang import language as T
-from tilelang.rocm.target import check_hip_availability
-
-_IS_HIP_AVAILABLE = check_hip_availability()
+from tilelang import language as T, tvm
 
 
 @tilelang.jit
@@ -45,19 +42,20 @@ def _compile_kernel_with_inplace():
 
 
 def _get_device_kernel_script(detect_inplace: bool) -> str:
+    kernel = _compile_kernel_with_inplace if detect_inplace else _compile_kernel_without_inplace
+    pass_configs = {}
     if detect_inplace:
-        kernel = _compile_kernel_with_inplace()
-    else:
-        kernel = _compile_kernel_without_inplace()
-    source = kernel.get_kernel_source()
-    return source
+        pass_configs[tilelang.PassConfigKey.TL_STORAGE_REWRITE_DETECT_INPLACE] = True
+    with tvm.transform.PassContext(config=pass_configs):
+        artifact = tilelang.lower(kernel.get_tir(), target={"kind": "musa", "arch": "mp_31"})
+    return artifact.kernel_source
 
 
 def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)
 
-    pattern = "read[0] = (read[0] * 2);" if _IS_HIP_AVAILABLE else "read = (read * 2);"
+    pattern = "read = (read * 2);"
     assert script_off.count(pattern) == 0
     assert script_on.count(pattern) > 0
 
