@@ -60,7 +60,7 @@ block_threads_stages_list = [
     # (512, 64, 64, 128, 3), over shared memory
     (256, 128, 16, 128, 3),
     # (256, 128, 32, 128, 3), over shared memory
-    (256, 128, 64, 128, 3),
+    # (256, 128, 64, 128, 3), over shared memory
     # (512, 128, 16, 128, 3), over shared memory
     # (512, 128, 32, 128, 3), over shared memory
     # (512, 128, 64, 128, 3), over shared memory

@@ -39,6 +39,7 @@ def _find_ws_branch_bounds(src, producer_threads):
     return producer_idx, consumer_idx
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_plain_copy_no_warp_specialized_uses_cp_async():
     """Plain global->shared T.copy should not auto-upgrade to TMA without WS."""
 

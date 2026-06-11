@@ -2,6 +2,7 @@ import tilelang
 import torch
 from math import gcd
 from typing import Any
+import tilelang.testing
 from tilelang import language as T
 
 tilelang.disable_cache()
@@ -346,6 +347,7 @@ def _run_swiglu_apply_weight_to_fp8_case(print_summary: bool = False) -> dict[st
     return stats
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_swiglu_apply_weight_to_fp8() -> None:
     _run_swiglu_apply_weight_to_fp8_case(print_summary=False)
 

@@ -51,6 +51,7 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
 
 
 @tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_assert_matmul():
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 64, T.float8_e4m3fn, T.float32, T.float32)
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 64, T.float8_e5m2, T.float32, T.float32)

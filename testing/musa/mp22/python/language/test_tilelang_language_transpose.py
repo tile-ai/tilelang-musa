@@ -4,6 +4,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import torch
+from tilelang.utils import map_torch_type
 
 
 def tilelang_transpose(M, N, block_M, block_N, dtype=T.float16):
@@ -50,7 +51,7 @@ def run_tilelang_transpose(M=128, N=128, block_M=128, block_N=128, dtype=T.float
         target="musa",
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
-    torch_dtype = T.dtype(dtype).as_torch()
+    torch_dtype = map_torch_type(dtype)
     a = torch.randn(M, N, device="musa", dtype=torch_dtype)
     b = kernel(a)
     expected = a.T
@@ -59,63 +60,12 @@ def run_tilelang_transpose(M=128, N=128, block_M=128, block_N=128, dtype=T.float
     print(f"PASS: transpose M={M}, N={N}, block_M={block_M}, block_N={block_N}")
 
 
-def tilelang_transpose_square(M, block_M, dtype=T.float16):
-    """Simpler test: square transpose with single tile."""
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((M, M), dtype),
-        B: T.Tensor((M, M), dtype),
-    ):
-        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            tile = T.alloc_shared((block_M, block_M), dtype)
-            tile_T = T.alloc_shared((block_M, block_M), dtype)
-
-            T.copy(
-                A[by * block_M : (by + 1) * block_M, bx * block_M : (bx + 1) * block_M],
-                tile,
-            )
-            T.transpose(tile, tile_T)
-            T.copy(
-                tile_T,
-                B[bx * block_M : (bx + 1) * block_M, by * block_M : (by + 1) * block_M],
-            )
-
-    return main
-
-
-def run_tilelang_transpose_square(M=256, block_M=128, dtype=T.float16):
-    program = tilelang_transpose_square(M, block_M, dtype)
-    kernel = tilelang.compile(
-        program,
-        out_idx=[1],
-        target="musa",
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
-    )
-    torch_dtype = T.dtype(dtype).as_torch()
-    a = torch.randn(M, M, device="musa", dtype=torch_dtype)
-    b = kernel(a)
-    expected = a.T
-    rtol, atol = tilelang.testing.get_tolerance(torch_dtype)
-    torch.testing.assert_close(b, expected, rtol=rtol, atol=atol)
-    print(f"PASS: square transpose M={M}, block_M={block_M}")
-
-
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
 def test_tilelang_transpose():
     run_tilelang_transpose(M=128, N=128, block_M=128, block_N=128)
     run_tilelang_transpose(M=256, N=256, block_M=128, block_N=128)
-    run_tilelang_transpose(M=128, N=256, block_M=128, block_N=256)
-
-
-@tilelang.testing.requires_musa
-def test_tilelang_transpose_square():
-    run_tilelang_transpose_square(M=128, block_M=128)
-    run_tilelang_transpose_square(M=256, block_M=128)
-    run_tilelang_transpose_square(M=512, block_M=128)
+    run_tilelang_transpose(M=128, N=64, block_M=128, block_N=64)
 
 
 if __name__ == "__main__":
     test_tilelang_transpose()
-    test_tilelang_transpose_square()

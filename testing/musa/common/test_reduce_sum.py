@@ -1,6 +1,7 @@
 import re
 
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 
@@ -47,6 +48,7 @@ def ref_program(x):
     return torch.sum(x, dim=1)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_reduce_sum_cross_warp():
     M = 32
     N = 512

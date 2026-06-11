@@ -39,12 +39,14 @@ def _lower_tma_copy(enable_prefetch=False):
         return lower(tma_copy, target="musa", enable_device_compile=False)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_musa_tme_descriptor_load_prefetch_disabled_by_default():
     src = _lower_tma_copy().kernel_source
     assert "tl::prefetch_tma_descriptor" not in src
     assert "tl::tma_load" in src
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_musa_tme_descriptor_load_emits_prefetch_when_enabled():
     src = _lower_tma_copy(enable_prefetch=True).kernel_source
     flat_src = " ".join(src.split())

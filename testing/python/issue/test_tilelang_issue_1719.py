@@ -5,6 +5,7 @@ import tilelang.language as T
 
 
 @tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_issue_1719_layout_1():
     @tilelang.jit
     def _buggy_kernel():

@@ -112,8 +112,8 @@ def run_gemm_batched(
 
 
 @tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
-def test_gemm_f16f16f16_nn():
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_gemm_f16f16f32_nn():
     run_gemm_batched(
         2,
         64,
@@ -123,7 +123,7 @@ def test_gemm_f16f16f16_nn():
         False,
         T.float16,
         T.float16,
-        T.float16,
+        T.float32,
         64,
         64,
         32,

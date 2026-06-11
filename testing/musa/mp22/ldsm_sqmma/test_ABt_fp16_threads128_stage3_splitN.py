@@ -62,7 +62,7 @@ block_threads_stages_list = [
     # (128, 256, 32, 128, 3), over shared memory
     # (128, 256, 64, 128, 3), over shared memory
     # (128, 512, 16, 128, 3), over shared memory
-    (128, 512, 32, 128, 3),
+    # (128, 512, 32, 128, 3), over shared memory
     # (128, 512, 64, 128, 3), over shared memory
 ]
 test_params = [

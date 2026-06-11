@@ -76,8 +76,7 @@ template <typename T> TL_DEVICE unsigned long long BitCastToU64(T value) {
   return caster.bits;
 }
 
-template <typename T>
-TL_DEVICE T BitCastFromU64(unsigned long long bits) {
+template <typename T> TL_DEVICE T BitCastFromU64(unsigned long long bits) {
   static_assert(sizeof(T) == sizeof(unsigned long long));
   union {
     unsigned long long bits;
@@ -105,6 +104,7 @@ TL_DEVICE void AtomicMax(T1 &ref, T2 val, int memory_order = 0) {
     }
   } else if constexpr (std::is_same_v<RawT, half_t> ||
                        std::is_same_v<RawT, bfloat16_t>) {
+#if defined(__MUSA_ARCH__) && __MUSA_ARCH__ >= 310
     unsigned short *address_as_u16 =
         reinterpret_cast<unsigned short *>(address);
     unsigned short val_as_u16 = BitCastToU16(casted);
@@ -117,6 +117,38 @@ TL_DEVICE void AtomicMax(T1 &ref, T2 val, int memory_order = 0) {
         break;
       }
     }
+#else
+    // QY2: use 32-bit atomicCAS to wrap 16-bit value
+    unsigned int *address_as_ui;
+    if (__musa_isspacep_shared(address)) {
+      address_as_ui = (unsigned int *)__musa_ptr_gen_to_shared((void *)address);
+    } else {
+      address_as_ui = (unsigned int *)__musa_ptr_gen_to_global((void *)address);
+    }
+    // Align to 32-bit boundary
+    address_as_ui =
+        (unsigned int *)((char *)address_as_ui - ((size_t)address_as_ui & 2));
+    unsigned int old = *address_as_ui;
+    unsigned int assumed;
+    unsigned short val_as_u16 = BitCastToU16(casted);
+    do {
+      assumed = old;
+      // Extract 16-bit value based on address alignment
+      unsigned short old_u16 =
+          ((size_t)address & 2) ? (old >> 16) : (old & 0xffff);
+      // Compare using float conversion
+      if (static_cast<float>(casted) <=
+          static_cast<float>(BitCastFromU16<RawT>(old_u16))) {
+        break; // No update needed
+      }
+      // Pack new 16-bit value into 32-bit
+      unsigned int new_ui =
+          ((size_t)address & 2)
+              ? (old & 0xffff) | (static_cast<unsigned int>(val_as_u16) << 16)
+              : (old & 0xffff0000) | static_cast<unsigned int>(val_as_u16);
+      old = atomicCAS(address_as_ui, assumed, new_ui);
+    } while (assumed != old);
+#endif
   } else {
     using NT1 = typename normalize_atomic_type<RawT>::type;
     atomicMax(reinterpret_cast<NT1 *>(address), static_cast<NT1>(casted));
@@ -142,6 +174,7 @@ TL_DEVICE T1 AtomicMaxRet(T1 &ref, T2 val, int memory_order = 0) {
     return static_cast<T1>(BitCastFromI32<float>(old));
   } else if constexpr (std::is_same_v<RawT, half_t> ||
                        std::is_same_v<RawT, bfloat16_t>) {
+#if defined(__MUSA_ARCH__) && __MUSA_ARCH__ >= 310
     unsigned short *address_as_u16 =
         reinterpret_cast<unsigned short *>(address);
     unsigned short val_as_u16 = BitCastToU16(casted);
@@ -155,6 +188,35 @@ TL_DEVICE T1 AtomicMaxRet(T1 &ref, T2 val, int memory_order = 0) {
       }
     }
     return static_cast<T1>(BitCastFromU16<RawT>(old));
+#else
+    unsigned int *address_as_ui;
+    if (__musa_isspacep_shared(address)) {
+      address_as_ui = (unsigned int *)__musa_ptr_gen_to_shared((void *)address);
+    } else {
+      address_as_ui = (unsigned int *)__musa_ptr_gen_to_global((void *)address);
+    }
+    address_as_ui =
+        (unsigned int *)((char *)address_as_ui - ((size_t)address_as_ui & 2));
+    unsigned int old = *address_as_ui;
+    unsigned int assumed;
+    unsigned short val_as_u16 = BitCastToU16(casted);
+    unsigned short old_u16;
+    do {
+      assumed = old;
+      old_u16 = ((size_t)address & 2) ? (old >> 16) : (old & 0xffff);
+      if (static_cast<float>(casted) <=
+          static_cast<float>(BitCastFromU16<RawT>(old_u16))) {
+        break;
+      }
+      unsigned int new_ui =
+          ((size_t)address & 2)
+              ? (old & 0xffff) | (static_cast<unsigned int>(val_as_u16) << 16)
+              : (old & 0xffff0000) | static_cast<unsigned int>(val_as_u16);
+      old = atomicCAS(address_as_ui, assumed, new_ui);
+    } while (assumed != old);
+    old_u16 = ((size_t)address & 2) ? (old >> 16) : (old & 0xffff);
+    return static_cast<T1>(BitCastFromU16<RawT>(old_u16));
+#endif
   } else {
     using NT1 = typename normalize_atomic_type<RawT>::type;
     return static_cast<T1>(
@@ -180,6 +242,7 @@ TL_DEVICE void AtomicMin(T1 &ref, T2 val, int memory_order = 0) {
     }
   } else if constexpr (std::is_same_v<RawT, half_t> ||
                        std::is_same_v<RawT, bfloat16_t>) {
+#if defined(__MUSA_ARCH__) && __MUSA_ARCH__ >= 310
     unsigned short *address_as_u16 =
         reinterpret_cast<unsigned short *>(address);
     unsigned short val_as_u16 = BitCastToU16(casted);
@@ -192,6 +255,33 @@ TL_DEVICE void AtomicMin(T1 &ref, T2 val, int memory_order = 0) {
         break;
       }
     }
+#else
+    unsigned int *address_as_ui;
+    if (__musa_isspacep_shared(address)) {
+      address_as_ui = (unsigned int *)__musa_ptr_gen_to_shared((void *)address);
+    } else {
+      address_as_ui = (unsigned int *)__musa_ptr_gen_to_global((void *)address);
+    }
+    address_as_ui =
+        (unsigned int *)((char *)address_as_ui - ((size_t)address_as_ui & 2));
+    unsigned int old = *address_as_ui;
+    unsigned int assumed;
+    unsigned short val_as_u16 = BitCastToU16(casted);
+    do {
+      assumed = old;
+      unsigned short old_u16 =
+          ((size_t)address & 2) ? (old >> 16) : (old & 0xffff);
+      if (static_cast<float>(casted) >=
+          static_cast<float>(BitCastFromU16<RawT>(old_u16))) {
+        break;
+      }
+      unsigned int new_ui =
+          ((size_t)address & 2)
+              ? (old & 0xffff) | (static_cast<unsigned int>(val_as_u16) << 16)
+              : (old & 0xffff0000) | static_cast<unsigned int>(val_as_u16);
+      old = atomicCAS(address_as_ui, assumed, new_ui);
+    } while (assumed != old);
+#endif
   } else {
     using NT1 = typename normalize_atomic_type<RawT>::type;
     atomicMin(reinterpret_cast<NT1 *>(address), static_cast<NT1>(casted));
@@ -217,6 +307,7 @@ TL_DEVICE T1 AtomicMinRet(T1 &ref, T2 val, int memory_order = 0) {
     return static_cast<T1>(BitCastFromI32<float>(old));
   } else if constexpr (std::is_same_v<RawT, half_t> ||
                        std::is_same_v<RawT, bfloat16_t>) {
+#if defined(__MUSA_ARCH__) && __MUSA_ARCH__ >= 310
     unsigned short *address_as_u16 =
         reinterpret_cast<unsigned short *>(address);
     unsigned short val_as_u16 = BitCastToU16(casted);
@@ -230,6 +321,35 @@ TL_DEVICE T1 AtomicMinRet(T1 &ref, T2 val, int memory_order = 0) {
       }
     }
     return static_cast<T1>(BitCastFromU16<RawT>(old));
+#else
+    unsigned int *address_as_ui;
+    if (__musa_isspacep_shared(address)) {
+      address_as_ui = (unsigned int *)__musa_ptr_gen_to_shared((void *)address);
+    } else {
+      address_as_ui = (unsigned int *)__musa_ptr_gen_to_global((void *)address);
+    }
+    address_as_ui =
+        (unsigned int *)((char *)address_as_ui - ((size_t)address_as_ui & 2));
+    unsigned int old = *address_as_ui;
+    unsigned int assumed;
+    unsigned short val_as_u16 = BitCastToU16(casted);
+    unsigned short old_u16;
+    do {
+      assumed = old;
+      old_u16 = ((size_t)address & 2) ? (old >> 16) : (old & 0xffff);
+      if (static_cast<float>(casted) >=
+          static_cast<float>(BitCastFromU16<RawT>(old_u16))) {
+        break;
+      }
+      unsigned int new_ui =
+          ((size_t)address & 2)
+              ? (old & 0xffff) | (static_cast<unsigned int>(val_as_u16) << 16)
+              : (old & 0xffff0000) | static_cast<unsigned int>(val_as_u16);
+      old = atomicCAS(address_as_ui, assumed, new_ui);
+    } while (assumed != old);
+    old_u16 = ((size_t)address & 2) ? (old >> 16) : (old & 0xffff);
+    return static_cast<T1>(BitCastFromU16<RawT>(old_u16));
+#endif
   } else {
     using NT1 = typename normalize_atomic_type<RawT>::type;
     return static_cast<T1>(

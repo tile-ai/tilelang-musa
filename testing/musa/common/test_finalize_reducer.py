@@ -1,6 +1,7 @@
 import re
 
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 
@@ -40,6 +41,7 @@ def _assert_consecutive_barrier_init(source, base_id):
     assert init1 is not None, source
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_finalize_reducer_named_barrier_cross_warp():
     M = 4
     N = 128

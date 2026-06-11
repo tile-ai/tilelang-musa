@@ -1,6 +1,7 @@
 import pytest
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 
 tilelang.disable_cache()
@@ -110,6 +111,7 @@ def relevant_codegen_lines(source: str) -> list[str]:
     return [line for line in source.splitlines() if any(needle in line for needle in needles)]
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_mul_bhf_bst4_numerical():
     require_musa()
 
@@ -123,6 +125,7 @@ def test_mul_bhf_bst4_numerical():
     torch.testing.assert_close(out.float(), expected.float(), rtol=0.0, atol=0.0)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_explicit_mul_bhf_bst4_numerical():
     require_musa()
 
@@ -136,6 +139,7 @@ def test_explicit_mul_bhf_bst4_numerical():
     torch.testing.assert_close(out.float(), expected.float(), rtol=0.0, atol=0.0)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_explicit_mul_bhf_bst4_ramp_numerical():
     require_musa()
 
@@ -149,6 +153,7 @@ def test_explicit_mul_bhf_bst4_ramp_numerical():
     torch.testing.assert_close(out.float(), expected.float(), rtol=0.0, atol=0.0)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_mul_bhf_bst4_codegen_report():
     require_musa()
 
@@ -162,6 +167,7 @@ def test_mul_bhf_bst4_codegen_report():
     assert markers["tl::mul_half_float_to_bfloat16_x4"]
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_explicit_mul_bhf_bst4_codegen_report():
     require_musa()
 
@@ -175,6 +181,7 @@ def test_explicit_mul_bhf_bst4_codegen_report():
     assert markers["tl::mul_half_float_to_bfloat16_x4"]
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_explicit_mul_bhf_bst4_ramp_codegen_report():
     require_musa()
 
@@ -188,6 +195,7 @@ def test_explicit_mul_bhf_bst4_ramp_codegen_report():
     assert markers["tl::mul_half_float_to_bfloat16_x4"]
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_mul_bhf_bst4_broadcast16_codegen_report():
     require_musa()
 

@@ -369,10 +369,16 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
 // DP4A
 template <typename InDatatype, typename OutDatatype>
 TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
+  const int c_int = *((int *)c);
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
   const int a_int = *((int *)a);
   const int b_int = *((int *)b);
-  const int c_int = *((int *)c);
   *c = __dp4a(a_int, b_int, c_int);
+#else
+  const char4 a_vec = *(char4 *)a;
+  const char4 b_vec = *(char4 *)b;
+  *c = __dp4a(a_vec, b_vec, c_int);
+#endif
 }
 
 namespace tl {

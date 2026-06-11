@@ -25,6 +25,7 @@ def test_debug_print_buffer(dtype):
 
 
 @tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_debug_print_buffer_musa_fp8():
     debug_print_buffer(dtype=T.float8_e4m3fn)
     debug_print_buffer(dtype=T.float8_e5m2)
