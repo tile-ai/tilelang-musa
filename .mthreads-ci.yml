@@ -62,3 +62,6 @@ smoke-ci-test:
     - "python3 -c \"import tilelang; print('tilelang', tilelang.__version__, tilelang.__file__)\""
     - "python3 -m pip install -r requirements-test.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
     - "bash testing/run_test.sh ci_smoke -vv -s --tb=short --durations=20 --timeout=60 --timeout-method=thread"
+    - "export MUSA_HOME=$(dirname $(dirname $(readlink -f $(command -v mcc)))) && export MUSA_PATH=${MUSA_HOME} && export PATH=${MUSA_HOME}/bin:$PATH && test -d ${MUSA_HOME}/mtgpu/bitcode && echo Using MUSA_HOME=${MUSA_HOME}"
+    - "MP31_RUNNER_ARGS='--source tilekernels --allow-non-release-build' python3 -m pytest benchmark -vv -s --tb=short --durations=20"
+    - "MP31_RUNNER_ARGS='--source mate --allow-non-release-build' python3 -m pytest benchmark -vv -s --tb=short --durations=20"
