@@ -33,6 +33,7 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     from tilelang.musa import transform as musa_transform
 
     mod = tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     if should_force_let_inline():
         mod = tilelang.transform.LetInline()(mod)
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)

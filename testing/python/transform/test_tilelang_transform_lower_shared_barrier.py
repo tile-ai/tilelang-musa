@@ -4,8 +4,15 @@ import tilelang as tl
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
+import pytest
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tilelang.cuda import _ffi_api as cuda_ffi_api
 from tvm import tirx
+
+pytestmark = pytest.mark.skipif(
+    not hasattr(cuda_ffi_api, "LowerSharedBarrier"),
+    reason="CUDA pipeline is not built in a MUSA-only wheel",
+)
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -13,6 +20,7 @@ auto_target = tvm.target.Target(determine_target("auto"))
 def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = tl.cuda.transform.LowerSharedBarrier()(mod)
     return mod
 

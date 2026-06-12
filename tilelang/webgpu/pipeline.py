@@ -15,9 +15,11 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 )
 
 
-def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
+    # WebGPU is a SIMT backend: lower the launch nest to thread_extent
+    # bindings for codegen.
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
     if should_force_let_inline():
@@ -85,5 +87,4 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-for _kind in ("c", "llvm"):
-    register_pipeline(PassPipeline(_kind, CPUPassPipelineBody))
+register_pipeline(PassPipeline("webgpu", WebGPUPassPipelineBody))
