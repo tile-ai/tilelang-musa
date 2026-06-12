@@ -25,7 +25,7 @@ variables:
     submodules: false
   execution:
     nodeSelector:
-      GPU_TYPE: 'S5000'
+      GPU_CHIP: 'ph1'
       DDK_VERSION: 'master'
   variables:
     MUSA_PATH: "${MUSA_PATH:-/usr/local/musa/bin}"
