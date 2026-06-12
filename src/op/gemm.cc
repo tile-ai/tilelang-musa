@@ -59,7 +59,6 @@ void RegisterGemmImpl(GemmImpl impl) {
   ICHECK(impl.select_inst != nullptr);
   ICHECK(impl.compute_warp_partition != nullptr);
   ICHECK(impl.reuse_existing_shared_layout != nullptr);
-  ICHECK(impl.instruction_kind != nullptr);
   GemmImplRegistry().push_back(impl);
 }
 
@@ -168,11 +167,6 @@ String GemmNode::getGemmInstructionKey(int block_size, Target target) const {
   return ResolveGemmImpl(target).select_inst(*this, block_size, target);
 }
 
-String GemmNode::getGemmInstructionKind(int block_size, Target target) const {
-  const GemmImpl &impl = ResolveGemmImpl(target);
-  return impl.instruction_kind(impl.select_inst(*this, block_size, target));
-}
-
 std::optional<std::array<int, 3>>
 GemmNode::getGemmInstructionShape(int block_size, Target target,
                                   String gemm_inst) const {
@@ -182,7 +176,6 @@ GemmNode::getGemmInstructionShape(int block_size, Target target,
   }
   return impl.select_inst_shape(*this, block_size, target, gemm_inst);
 }
-
 std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
     int M, int N, int block_size, Target target, String gemm_inst) const {
   return ResolveGemmImpl(target).compute_warp_partition(*this, M, N, block_size,

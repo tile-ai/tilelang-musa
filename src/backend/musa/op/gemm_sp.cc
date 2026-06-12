@@ -165,12 +165,6 @@ struct GemmSP {
     return true;
   }
 
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kMusaMMASP) {
-      return "mma.sp";
-    }
-    return "unknown";
-  }
 };
 
 } // namespace musa
@@ -186,7 +180,6 @@ bool RegisterMUSAGemmSP() {
       musa::GemmSP::SelectInst,
       musa::GemmSP::ComputeWarpPartition,
       musa::GemmSP::ReuseExistingSharedLayout,
-      musa::GemmSP::InstructionKind,
   });
   return true;
 }

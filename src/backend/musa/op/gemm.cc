@@ -648,21 +648,6 @@ struct Gemm {
     return false;
   }
 
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kGemmInstMusaSQMMA) {
-      return "sqmma";
-    }
-    if (gemm_inst == kGemmInstMusaPH1WMMA) {
-      return "wmma";
-    }
-    if (gemm_inst == kGemmInstMusaQY2MMA || gemm_inst == kGemmInstMusaMMA) {
-      return "mma";
-    }
-    if (gemm_inst == kGemmInstMusaFMA) {
-      return "fma";
-    }
-    return "unknown";
-  }
 };
 
 } // namespace musa
@@ -678,7 +663,6 @@ bool RegisterMUSAGemm() {
       musa::Gemm::SelectInst,
       musa::Gemm::ComputeWarpPartition,
       musa::Gemm::ReuseExistingSharedLayout,
-      musa::Gemm::InstructionKind,
       musa::Gemm::SelectInstShape,
   });
   return true;

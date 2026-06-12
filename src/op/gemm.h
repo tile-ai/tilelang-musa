@@ -168,7 +168,6 @@ public:
 
   // Target-specific GEMM instruction key.
   String getGemmInstructionKey(int block_size, Target target) const;
-  String getGemmInstructionKind(int block_size, Target target) const;
   std::optional<std::array<int, 3>>
   getGemmInstructionShape(int block_size, Target target,
                           String gemm_inst) const;
@@ -190,8 +189,6 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
-
-  String (*instruction_kind)(String gemm_inst);
 
   std::optional<std::array<int, 3>> (*select_inst_shape)(
       const GemmNode &op, int block_size, Target target,
