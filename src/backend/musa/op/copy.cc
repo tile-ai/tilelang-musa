@@ -1585,11 +1585,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
-    } else if (T.AllocMBarrier) {
+    } else if (T.alloc_mbarrier) {
       // Internal mbarrier (T.copy()): allocate a single barrier slot.
       // Pipeline buffer versioning expands it per stage when needed.
       barrier_base_id =
-          T.AllocMBarrier(1, MakeCopyMBarrierName(op.src, op.dst));
+          T.alloc_mbarrier(1, MakeCopyMBarrierName(op.src, op.dst));
       PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
       mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
     }
@@ -1874,11 +1874,11 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
-    } else if (T.AllocMBarrier) {
+    } else if (T.alloc_mbarrier) {
       // Internal mbarrier (T.copy()): allocate a single barrier slot.
       // Pipeline buffer versioning expands it per stage when needed.
       barrier_base_id =
-          T.AllocMBarrier(1, MakeCopyMBarrierName(op.src, op.dst));
+          T.alloc_mbarrier(1, MakeCopyMBarrierName(op.src, op.dst));
       PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
       mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
     }

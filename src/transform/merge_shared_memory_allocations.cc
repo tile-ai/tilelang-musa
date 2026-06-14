@@ -371,8 +371,16 @@ private:
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {
 
 public:
-  static std::unordered_map<const VarNode *, int> Plan(const Stmt &stmt) {
+  // explicit_alignments carries the per-buffer requirements recorded by op
+  // lowering (kSmemAlignmentMap); the scan below adds a conservative fallback
+  // for shared vars that reach swizzle-sensitive instructions without an
+  // explicit entry.
+  static std::unordered_map<const VarNode *, int>
+  Plan(const Stmt &stmt,
+       const std::unordered_map<const VarNode *, int> &explicit_alignments) {
     SharedMemoryAlignmentPlanner planner;
+    planner.shmem_alignment_map_ = explicit_alignments;
+    planner.explicit_alignment_map_ = &explicit_alignments;
     planner(stmt);
     return planner.shmem_alignment_map_;
   }
@@ -388,13 +396,18 @@ private:
       return;
     auto scope = GetPtrStorageScope(GetRef<Var>(op));
     if (scope == "shared" || scope == "shared.dyn") {
+      // Explicit requirements from lowering are exact and take precedence over
+      // the backend fallback below.
+      if (explicit_alignment_map_->count(op))
+        return;
       auto target = Target::Current();
       ICHECK(target.defined()) << "Target is not defined";
       int alignment = TargetIsHopper(target) ? 1024 : 16;
       if (swizzle_cycle_) {
         alignment = swizzle_cycle_;
       }
-      shmem_alignment_map_[op] = alignment;
+      int &slot = shmem_alignment_map_[op];
+      slot = std::max(slot, alignment);
     }
   }
 
@@ -441,6 +454,8 @@ private:
 
   void clearSwizzleCycle_() { swizzle_cycle_ = 0; }
 
+  const std::unordered_map<const VarNode *, int> *explicit_alignment_map_{
+      nullptr};
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
 };
 
@@ -469,11 +484,14 @@ public:
    */
   void PlanReuse(const Stmt &stmt, bool is_dynamic = true,
                  bool enable_aggressive_merge = false, bool verbose = false,
-                 bool disable_reuse = false) {
+                 bool disable_reuse = false,
+                 const std::unordered_map<const VarNode *, int>
+                     &explicit_alignments = {}) {
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
-    shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
+    shmem_alignment_map_ =
+        SharedMemoryAlignmentPlanner::Plan(stmt, explicit_alignments);
     CollectPH1SQMMAOperandPairs(stmt);
     if (disable_reuse) {
       this->PlanSequentialLayout();
@@ -482,6 +500,21 @@ public:
       // the arena packer.
       this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
       this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
+    }
+    // Post-condition: every buffer with an alignment requirement must have
+    // been placed on a conforming offset. A violation here would surface as
+    // silent data corruption at runtime (TMA/MMA swizzle phase mismatch), so
+    // fail loudly at compile time instead.
+    for (const auto &[var, required] : shmem_alignment_map_) {
+      auto offset_it = buffer_byte_offsets_.find(var);
+      if (offset_it == buffer_byte_offsets_.end())
+        continue;
+      if (const auto *imm = offset_it->second.as<IntImmNode>()) {
+        ICHECK_EQ(imm->value % required, 0)
+            << "Shared memory buffer " << var->name_hint << " placed at byte "
+            << "offset " << imm->value << ", which violates its required "
+            << required << "-byte alignment (TMA/MMA swizzle constraint)";
+      }
     }
   }
 
@@ -1731,16 +1764,36 @@ private:
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
                                   int align_bytes = 16, bool verbose = false,
+                                  bool preserve_aliases = true,
                                   bool disable_reuse = false,
-                                  bool preserve_aliases = true) {
+                                  const std::unordered_map<std::string, int>
+                                      &explicit_alignments_by_name = {}) {
   AllocateCollector collector;
   collector(stmt);
+  // The kSmemAlignmentMap attribute is keyed by buffer-var name (names are
+  // stable across the pass pipeline while Var nodes may be rebuilt); resolve
+  // to the VarNodes of the collected allocations. Names of distinct shared
+  // allocations are unique within a kernel, and a collision could only
+  // over-align.
+  auto resolve =
+      [&](const std::unordered_map<const VarNode *, const AllocBufferNode *>
+              &allocs) {
+        std::unordered_map<const VarNode *, int> resolved;
+        for (const auto &[var, alloc] : allocs) {
+          auto it =
+              explicit_alignments_by_name.find(std::string(var->name_hint));
+          if (it != explicit_alignments_by_name.end()) {
+            resolved[var] = it->second;
+          }
+        }
+        return resolved;
+      };
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
                                   align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, true,
                        disable_reuse ? false : enable_aggressive_merge, false,
-                       disable_reuse);
+                       disable_reuse, resolve(collector.dyn_shmem_allocs_));
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
@@ -1748,7 +1801,7 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   verbose, align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, false,
                        disable_reuse ? false : enable_aggressive_merge, false,
-                       disable_reuse);
+                       disable_reuse, resolve(collector.static_shmem_allocs_));
     stmt = rewriter(std::move(stmt));
   }
   return stmt;
@@ -1772,11 +1825,20 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     if (auto target = f->GetAttr<Target>(tvm::attr::kTarget)) {
       preserve_aliases = target.value()->kind->name != "webgpu";
     }
+    // Per-buffer alignment requirements recorded by op lowering
+    // (swizzle-dependent TMA/MMA constraints), propagated onto the device
+    // kernel by SplitHostDevice.
+    std::unordered_map<std::string, int> explicit_alignments;
+    if (auto opt = f->GetAttr<Map<String, IntImm>>(kSmemAlignmentMap)) {
+      for (const auto &[name, align] : opt.value()) {
+        explicit_alignments[std::string(name)] = static_cast<int>(align->value);
+      }
+    }
     auto *n = f.CopyOnWrite();
     n->body = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
-        align_bytes, debug_merge_shared_memory_allocations, disable_reuse,
-        preserve_aliases);
+        align_bytes, debug_merge_shared_memory_allocations, preserve_aliases,
+        disable_reuse, explicit_alignments);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",

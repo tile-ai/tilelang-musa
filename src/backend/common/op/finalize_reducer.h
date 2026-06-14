@@ -84,17 +84,17 @@ template <typename Impl> struct FinalizeReducerLowerer {
     int sync_barrier_id = 0;
     if (use_sync_barrier) {
       auto all_threads = T.thread_bounds->extent;
-      ICHECK(T.AllocMBarrier)
+      ICHECK(T.alloc_mbarrier)
           << "finalize_reducer requires an mbarrier allocator for named "
              "barrier synchronization";
       ICHECK(T.mbarrier_buffer != nullptr);
       sync_barrier_id =
-          T.AllocMBarrier(*as_const_int(all_threads), std::nullopt);
+          T.alloc_mbarrier(*as_const_int(all_threads), std::nullopt);
       // MUSA NamedBarrier uses two phases in AllReduce: sync<0>() before the
       // workspace write and sync<1>() before the peer read. Reserve both
       // consecutive barrier IDs while passing the first one to the template.
       int sync_barrier_next_id =
-          T.AllocMBarrier(*as_const_int(all_threads), std::nullopt);
+          T.alloc_mbarrier(*as_const_int(all_threads), std::nullopt);
       ICHECK_EQ(sync_barrier_next_id, sync_barrier_id + 1)
           << "finalize_reducer requires consecutive named barrier IDs";
       sync_barrier = T.mbarrier_buffer->value();
@@ -108,7 +108,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
           op_str, reducing_threads, 1, thread_offset, T.thread_bounds->extent,
           static_cast<int>(effective_batch), workspace_stride, T.target);
       int ws_size = workspace_stride * static_cast<int>(effective_batch);
-      PrimExpr workspace = T.AddWorkspace(ws_size, buffer->dtype);
+      PrimExpr workspace = T.add_workspace(ws_size, buffer->dtype);
       Array<PrimExpr> args = {StringImm(allreduce), buffer->data};
       if (use_sync_barrier) {
         PrimExpr barrier_id = BufferLoad(
@@ -130,8 +130,8 @@ template <typename Impl> struct FinalizeReducerLowerer {
       thread_reduce_args.push_back(barrier_id);
     }
     if (reducing_threads >= 32) {
-      PrimExpr workspace =
-          T.AddWorkspace(*as_const_int(T.thread_bounds->extent), buffer->dtype);
+      PrimExpr workspace = T.add_workspace(
+          *as_const_int(T.thread_bounds->extent), buffer->dtype);
       thread_reduce_args.push_back(workspace);
     }
     auto call = Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);
