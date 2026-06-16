@@ -30,7 +30,7 @@ def _split_runner_args() -> tuple[str, bool, set[str] | None]:
     args = _raw_runner_args()
 
     source_parser = argparse.ArgumentParser(add_help=False)
-    source_parser.add_argument("--source", choices=("all", "tilekernels", "mate"), default="all")
+    source_parser.add_argument("--source", choices=("all", "tilekernels", "mate", "modelops"), default="all")
     source_args, remaining = source_parser.parse_known_args(args)
 
     regression_parser = argparse.ArgumentParser(add_help=False)
@@ -59,6 +59,11 @@ def _case_names() -> list[tuple[str, str]]:
 
         mate_case_names = regression_supported_case_names() if check_regression and selected_cases is None else default_case_names()
         cases.extend(("mate", name) for name in mate_case_names)
+
+    if source in {"all", "modelops"}:
+        from benchmark.mp31.modelops.benchmark_cases import default_case_names
+
+        cases.extend(("modelops", name) for name in default_case_names())
 
     if selected_cases is not None:
         known_cases = {case_name for _, case_name in cases}

@@ -491,7 +491,6 @@ def parse_args(
     parser.add_argument(
         "--check-regression",
         action="store_true",
-        default=True,
         help="Compare current records against the baseline file.",
     )
     parser.add_argument(

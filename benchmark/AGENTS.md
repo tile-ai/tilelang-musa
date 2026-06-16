@@ -8,9 +8,10 @@ guardrails here.
 ## Scope
 
 - The active benchmark suite lives under `benchmark/mp31`.
-- The MP31 bundle contains two independent source groups:
+- The MP31 bundle contains three independent source groups:
   - `mp31/tilekernels`: TileKernels-origin representative operator benchmarks.
   - `mp31/mate`: MATE-origin TileLang microbenchmarks with local kernel copies.
+  - `mp31/modelops`: ModelOps TileLang kernel benchmark scripts.
 - The top-level source runner is `benchmark/mp31/runner.py`.
 - Baselines are stored in `benchmark/mp31/baselines/`.
 
@@ -20,6 +21,7 @@ guardrails here.
 - `mp31/baselines/tilekernels.jsonl` contains the 15-record TileKernels
   release baseline.
 - `mp31/baselines/mate.jsonl` contains the MATE-origin release baseline.
+- `mp31/baselines/modelops.jsonl` contains the ModelOps baseline.
 - `mp31/tilekernels/benchmark_cases.py` owns the TileKernels case registry,
   per-case setup, median sampling, JSONL output, and regression checks.
 - `mp31/tilekernels/benchmark_common.py` owns shared TileKernels benchmark
@@ -34,6 +36,9 @@ guardrails here.
 - `mp31/mate/ops/*_benchmark.py` files are standalone MATE-origin entrypoints.
 - `mp31/mate/kernels` contains local TileLang kernels and minimal host helpers
   migrated from MATE.
+- `mp31/modelops/benchmark_cases.py` owns the ModelOps case registry.
+- `mp31/modelops/ops/*_benchmark.py` files are standalone ModelOps entrypoints.
+- `mp31/modelops/kernels` contains local ModelOps TileLang kernel scripts.
 
 ## Important History
 
@@ -53,6 +58,7 @@ Run from the repository root unless a script intentionally sets its own cwd.
 python benchmark/mp31/runner.py --source all
 python benchmark/mp31/runner.py --source tilekernels
 python benchmark/mp31/runner.py --source mate
+python benchmark/mp31/runner.py --source modelops
 ```
 
 The top-level runner prints one final combined `MP31 Benchmark Summary` with the
@@ -98,7 +104,7 @@ median time when `extras.bytes_rw` is present.
 ## Adding Or Changing Cases
 
 - Put TileKernels-origin work under `mp31/tilekernels`; put MATE-origin work
-  under `mp31/mate`.
+  under `mp31/mate`; put ModelOps scripts under `mp31/modelops`.
 - Register new cases in the relevant `benchmark_cases.py`.
 - Add or update standalone `*_benchmark.py` entrypoints only when a natural
   per-operator entrypoint exists.

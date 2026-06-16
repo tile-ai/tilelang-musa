@@ -89,10 +89,10 @@ def _print_summary(source_runs: list[SourceRun], elapsed_seconds: float) -> None
 def main() -> int:
     _ensure_repo_root_on_path()
 
-    parser = argparse.ArgumentParser(description="Run all MP31 benchmarks from TileKernels and MATE sources.")
+    parser = argparse.ArgumentParser(description="Run all MP31 benchmarks from TileKernels, MATE, and modelops sources.")
     parser.add_argument(
         "--source",
-        choices=("all", "tilekernels", "mate"),
+        choices=("all", "tilekernels", "mate", "modelops"),
         default="all",
         help="Benchmark source to run.",
     )
@@ -144,6 +144,25 @@ def main() -> int:
         source_runs.append(
             SourceRun(
                 name="mate",
+                records=result.records,
+                regression_stats=result.regression_stats,
+                exit_code=result.exit_code,
+            )
+        )
+
+    if args.source in {"all", "modelops"}:
+        from benchmark.mp31.modelops.benchmark_cases import default_case_names, run_cases_isolated as run_modelops_cases
+
+        result = run_modelops_cases(
+            title="ModelOps Benchmark",
+            default_case_names=default_case_names(),
+            description="Run MP31 modelops benchmarks.",
+            argv=forwarded,
+            print_final_summary=False,
+        )
+        source_runs.append(
+            SourceRun(
+                name="modelops",
                 records=result.records,
                 regression_stats=result.regression_stats,
                 exit_code=result.exit_code,

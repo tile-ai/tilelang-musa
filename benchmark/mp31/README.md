@@ -14,6 +14,7 @@ Baseline source:
 - The current `baselines/tilekernels.jsonl` and `baselines/mate.jsonl` values
   are **release** benchmark measurements from `release_v0.1.8_musa.3`,
   `c3ed1bd5272c916a042df7877cdc4b587fb1006a`.
+- `baselines/modelops.jsonl` contains the ModelOps benchmark baseline.
 - Baseline records keep the compact JSONL schema:
   `kernel`, `operation`, `params`, `time_us`, `bandwidth_gbs`, and
   `extras.bytes_rw`.
@@ -32,10 +33,14 @@ MATE-origin TileLang benchmarks are also kept in this bundle under
 TileLang-backed benchmark paths, but the runners use local kernel copies and
 host-side helpers only; they must not import the MATE repository at runtime.
 
+ModelOps TileLang kernel benchmark scripts are kept under
+`benchmark/mp31/modelops`.
+
 ## Tool Layout
 
 - `baselines/tilekernels.jsonl`: merged 15-record TileKernels baseline file.
 - `baselines/mate.jsonl`: MATE-origin benchmark baseline file.
+- `baselines/modelops.jsonl`: ModelOps baseline file.
 - `tilekernels/benchmark_common.py`, `tilekernels/benchmark_cases.py`: shared benchmark
   framework, case registry, output formatting, and regression checking.
 - `tilekernels/*_benchmark.py`: standalone per-operator benchmark entrypoints.
@@ -44,8 +49,10 @@ host-side helpers only; they must not import the MATE repository at runtime.
 - `mate/ops/*_benchmark.py`: standalone MATE-origin per-operator entrypoints.
 - `mate/kernels/`: local TileLang kernels and minimal host-side helpers
   migrated from MATE. These files intentionally avoid MATE package imports.
+- `modelops/ops/*_benchmark.py`: standalone ModelOps per-operator entrypoints.
+- `modelops/kernels/`: local ModelOps TileLang kernel benchmark scripts.
 - `runner.py`: aggregate entrypoint that can execute TileKernels, MATE-origin,
-  or both benchmark groups and print one combined summary.
+  ModelOps, or all benchmark groups and print one combined summary.
 
 ## AI Coding Guide
 
@@ -145,6 +152,14 @@ python /root/tilelang_musa/benchmark/mp31/runner.py \
   --allow-non-release-build
 ```
 
+Run only ModelOps benchmarks:
+
+```bash
+python /root/tilelang_musa/benchmark/mp31/runner.py \
+  --source modelops \
+  --allow-non-release-build
+```
+
 Run MATE-origin standalone benchmarks:
 
 ```bash
@@ -161,6 +176,19 @@ python /root/tilelang_musa/benchmark/mp31/mate/ops/sparse_mla_prefill_benchmark.
   --allow-non-release-build
 
 python /root/tilelang_musa/benchmark/mp31/mate/ops/sparse_mla_decode_benchmark.py \
+  --allow-non-release-build
+```
+
+Run ModelOps standalone benchmarks:
+
+```bash
+python /root/tilelang_musa/benchmark/mp31/modelops/ops/example_mha_fwd_bhsd_benchmark.py \
+  --allow-non-release-build
+
+python /root/tilelang_musa/benchmark/mp31/modelops/ops/sparse_mla_prefill_benchmark.py \
+  --allow-non-release-build
+
+python /root/tilelang_musa/benchmark/mp31/modelops/ops/sparse_mla_decode_benchmark.py \
   --allow-non-release-build
 ```
 
@@ -216,7 +244,8 @@ When adding more MATE-origin cases, keep these rules:
 - Do not import `mate`, `flash_mla`, `sparse_mla_test_utils`, or files from a
   checked-out MATE repository.
 - Keep source-specific code under `benchmark/mp31/mate`; keep TileKernels-origin
-  code under `benchmark/mp31/tilekernels`.
+  code under `benchmark/mp31/tilekernels`; keep ModelOps code under
+  `benchmark/mp31/modelops`.
 - Prefer direct TileLang kernel factories or TileLang interfaces. Wrapper-level
   behavior should only be reimplemented when it is required to construct the
   kernel ABI.
