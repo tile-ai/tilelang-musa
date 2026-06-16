@@ -59,6 +59,7 @@ class suppress_stdout_stderr:
 
 
 device = get_pt_device()
+_CACHE_FLUSH_ID = "tilelang::cache_flush"
 
 
 def do_bench(
@@ -71,6 +72,7 @@ def do_bench(
     fast_flush: bool = True,
     backend: Literal["event", "cupti", "cudagraph"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
+    device: int | torch.device | None = None,
 ) -> float | list[float]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
 
@@ -90,21 +92,98 @@ def do_bench(
         fast_flush: Use faster L2 cache flush with int32 vs int8 (default: True)
         backend: Profiler backend - "event" (GPU events), "cupti", or "cudagraph" (default: "event")
         return_mode: Result aggregation method - "mean", "median", "min", or "max"
+        device: Optional GPU device to benchmark on. When provided, GPU
+            events, streams, cache buffers, and synchronizations are scoped to
+            that device.
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
     """
     assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
 
+    device_idx = _normalize_gpu_device(device)
+    if device_idx is not None:
+        gpu_backend = torch.musa if IS_MUSA else torch.cuda
+        with gpu_backend.device(device_idx):
+            return _do_bench_impl(
+                fn,
+                warmup=warmup,
+                rep=rep,
+                _n_warmup=_n_warmup,
+                _n_repeat=_n_repeat,
+                quantiles=quantiles,
+                fast_flush=fast_flush,
+                backend=backend,
+                return_mode=return_mode,
+                device_idx=device_idx,
+            )
+
+    return _do_bench_impl(
+        fn,
+        warmup=warmup,
+        rep=rep,
+        _n_warmup=_n_warmup,
+        _n_repeat=_n_repeat,
+        quantiles=quantiles,
+        fast_flush=fast_flush,
+        backend=backend,
+        return_mode=return_mode,
+        device_idx=None,
+    )
+
+
+def _normalize_gpu_device(benchmark_device: int | torch.device | None) -> int | None:
+    """Return a concrete GPU device index, preserving implicit mode for None."""
+    if benchmark_device is None:
+        return None
+    if isinstance(benchmark_device, int):
+        return benchmark_device
+
+    torch_device = torch.device(benchmark_device)
+    expected_type = "musa" if IS_MUSA else "cuda"
+    if torch_device.type != expected_type:
+        raise ValueError(f"do_bench device must be a {expected_type} device, got {torch_device}")
+    if torch_device.index is None:
+        return torch.musa.current_device() if IS_MUSA else torch.cuda.current_device()
+    return torch_device.index
+
+
+def _gpu_synchronize(device_idx: int | None = None) -> None:
+    if device_idx is None:
+        synchronize()
+    elif IS_MUSA:
+        torch.musa.synchronize(device_idx)
+    else:
+        torch.cuda.synchronize(device_idx)
+
+
+def _cache_device(device_idx: int | None) -> str | torch.device:
+    if device_idx is None:
+        return device
+    return torch.device("musa" if IS_MUSA else "cuda", device_idx)
+
+
+def _do_bench_impl(
+    fn: Callable,
+    warmup: float,
+    rep: float,
+    _n_warmup: int,
+    _n_repeat: int,
+    quantiles: list[float] | None,
+    fast_flush: bool,
+    backend: Literal["event", "cupti", "cudagraph"],
+    return_mode: Literal["min", "max", "mean", "median"],
+    device_idx: int | None,
+) -> float | list[float]:
     # Initial function call and synchronization
     fn()
-    synchronize()
+    _gpu_synchronize(device_idx)
 
     # Create L2 cache flush buffer (256 MB)
     # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)
     cache_size = int(256e6 // 4) if fast_flush else int(256e6)
     cache_dtype = torch.int if fast_flush else torch.int8
-    cache = torch.empty(cache_size, dtype=cache_dtype, device=device)
+    cache = torch.empty(cache_size, dtype=cache_dtype, device=_cache_device(device_idx))
 
     # Estimate kernel runtime with 5 iterations
     start_event = GPUEvent(enable_timing=True)
@@ -128,11 +207,11 @@ def do_bench(
 
     # Benchmarking phase
     if backend == "event":
-        return _bench_with_gpu_events(fn, cache, n_repeat, quantiles, return_mode)
+        return _bench_with_gpu_events(fn, cache, n_repeat, quantiles, return_mode, device_idx)
     elif backend == "cupti":
         return _bench_with_cupti(fn, cache, n_repeat)
     elif backend == "cudagraph":
-        return _bench_with_cudagraph(fn, cache, n_repeat, quantiles, return_mode)
+        return _bench_with_cudagraph(fn, cache, n_repeat, quantiles, return_mode, device_idx)
     else:
         raise ValueError(f"Unknown profiler backend: {backend}")
 
@@ -143,6 +222,7 @@ def _bench_with_gpu_events(
     n_repeat: int,
     quantiles: list[float] | None,
     return_mode: str,
+    device_idx: int | None,
 ) -> float | list[float]:
     """Benchmark using GPU events for timing."""
     # Create timing events
@@ -157,7 +237,7 @@ def _bench_with_gpu_events(
         end_events[i].record()
 
     # Synchronize and collect timings
-    synchronize()
+    _gpu_synchronize(device_idx)
     times = torch.tensor(
         [s.elapsed_time(e) for s, e in zip(start_events, end_events)],
         dtype=torch.float,
@@ -194,22 +274,28 @@ def _bench_with_cupti(
         with profiler:
             for _ in range(2):
                 for _ in range(n_repeat):
-                    cache.zero_()
+                    with torch.profiler.record_function(_CACHE_FLUSH_ID):
+                        cache.zero_()
                     fn()
                 profiler.step()
 
-    # Calculate average kernel time, excluding cache-clearing overhead
+    # cache.zero_() and user code can share a generated kernel name, so exclude
+    # only device time attributed to the annotated cache-flush range.
+    expected_device_names = {"MUSA", "PRIVATEUSE1"} if IS_MUSA else {"CUDA"}
+
+    def is_gpu_event(event):
+        name = getattr(getattr(event, "device_type", None), "name", "")
+        return name.upper() in expected_device_names
+
     total_cuda_time = 0.0
     excluded_time = 0.0
-    excluded_kernels = ["at::native::vectorized_elementwise"]
-    if IS_MUSA:
-        # torch_musa lowers cache.zero_() to a KernelFill kernel instead of
-        # the CUDA/PyTorch vectorized_elementwise name.
-        excluded_kernels.append("KernelFill<")
 
-    for event in profiler.key_averages():
-        total_cuda_time += event.self_device_time_total
-        if any(kernel_name in event.key for kernel_name in excluded_kernels):
+    for event in profiler.events():
+        if not is_gpu_event(event):
+            continue
+        if not event.is_user_annotation:
+            total_cuda_time += event.self_device_time_total
+        elif event.key == _CACHE_FLUSH_ID:
             excluded_time += event.self_device_time_total
 
     kernel_time_us = (total_cuda_time - excluded_time) / n_repeat
@@ -222,6 +308,7 @@ def _bench_with_cudagraph(
     n_repeat: int,
     quantiles: list[float] | None,
     return_mode: str,
+    device_idx: int | None,
 ) -> float | list[float]:
     """Benchmark using CUDA graph for minimal launch overhead.
 
@@ -236,14 +323,15 @@ def _bench_with_cudagraph(
         raise ValueError("backend='cudagraph' is not supported on MUSA; use backend='event' or 'cupti'")
 
     n_retries = 10
-    with torch.cuda.stream(torch.cuda.Stream()):
+    stream = torch.cuda.Stream(device=device_idx) if device_idx is not None else torch.cuda.Stream()
+    with torch.cuda.stream(stream):
         # Construct a CUDA graph with `n_repeat` unrolled function calls to minimize host overhead.
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             for _ in range(n_repeat):
                 fn()
 
-        torch.cuda.synchronize()
+        _gpu_synchronize(device_idx)
 
         # Measure time by replaying the graph multiple times.
         # Clear cache before each replay for consistent measurements.
@@ -255,7 +343,7 @@ def _bench_with_cudagraph(
             g.replay()
             end_events[i].record()
 
-        torch.cuda.synchronize()
+        _gpu_synchronize(device_idx)
         times = torch.tensor(
             [s.elapsed_time(e) / n_repeat for s, e in zip(start_events, end_events)],
             dtype=torch.float,
