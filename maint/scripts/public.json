@@ -8,6 +8,7 @@
     "3rdparty/mutlass": "d31e365170c9f51db887306032b81cc82141489b"
   },
   "remove_paths": [
-    ".mthreads-ci.yml"
+    ".mthreads-ci.yml",
+    "AGENTS.md"
   ]
 }
