@@ -1,6 +1,7 @@
 import tilelang.language as T
 import tilelang.testing
 import tilelang
+import pytest
 import torch
 
 
@@ -39,7 +40,11 @@ def run_gemm_jit_kernel(M, N, K, block_M, block_N, block_K):
 
 
 def test_gemm_jit_kernel_zero_dim():
-    run_gemm_jit_kernel(512, 1024, 0, 128, 256, 32)
+    with pytest.raises(
+        ValueError,
+        match="T.copy tile extent is larger than the whole source buffer",
+    ):
+        run_gemm_jit_kernel(512, 1024, 0, 128, 256, 32)
 
 
 if __name__ == "__main__":
