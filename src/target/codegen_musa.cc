@@ -3917,7 +3917,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const BufferLoadNode *op,
   } else {
     bool can_vector_load = false;
     arith::PVar<PrimExpr> base;
-    if (arith::ramp(base, 1, op->dtype.lanes()).Match(index)) {
+    int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
+    if (arith::ramp(base, 1, ramp_lanes).Match(index)) {
       const RampNode *ramp = index.as<RampNode>();
       ICHECK(ramp);
       can_vector_load = true;
@@ -3929,11 +3930,6 @@ void CodeGenTileLangMUSA::VisitExpr_(const BufferLoadNode *op,
       // }
     }
 
-    if (value_dtype.is_float4_e2m1fn() && lanes != 1) {
-      // A float4_e2m1fn element has 4 bits, which is an incomplete byte.
-      // So we cannot vector load it.
-      can_vector_load = false;
-    }
     if (can_vector_load) {
       std::string ref = GetVecLoad(op->dtype, op->buffer.get(), base.Eval());
       HandleVolatileLoads(ref, op, os);
@@ -4005,8 +4001,7 @@ void CodeGenTileLangMUSA::VisitStmt_(const BufferStoreNode *op) {
   } else {
     arith::PVar<PrimExpr> base;
     int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
-    if (arith::ramp(base, 1, ramp_lanes).Match(index_expr) &&
-        !value_dtype.is_float4_e2m1fn()) {
+    if (arith::ramp(base, 1, ramp_lanes).Match(index_expr)) {
       std::string value = this->PrintExpr(op->value);
       this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);
     } else {
@@ -4018,21 +4013,6 @@ void CodeGenTileLangMUSA::VisitStmt_(const BufferStoreNode *op) {
       DataType elem_type = value_dtype.element_of();
       for (int i = 0; i < value_dtype.lanes(); ++i) {
         this->PrintIndent();
-        if (elem_type.is_float4() && elem_type.lanes() == 1) {
-          stream << "tl_fp4_packed_store(";
-          if (packed_it != fp4_packed_buffers_.end()) {
-            stream << packed_it->second;
-          } else {
-            stream << "(fp4_e2_2_t*)" << vid;
-          }
-          stream << ", ";
-          PrintVecElemLoad(index, index_expr.dtype(), i, stream);
-          stream << ", ";
-          PrintVecElemLoad(value, op->value.dtype(), i, stream);
-          stream << ");\n";
-          continue;
-        }
-
         if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
           stream << "((";
           if (buffer_var.get()->dtype.is_handle()) {
