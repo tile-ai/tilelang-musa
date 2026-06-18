@@ -134,8 +134,11 @@ template <int barrier_id> struct NamedBarrier {
 //   thread_offset - base thread index offset within the block.
 //   Barrier       - barrier policy type (SyncThreadsBarrier or
 //                   NamedBarrier<N>).
+//   batch_size    - number of values reduced in one butterfly pass.
+//   workspace_stride - distance between batch lanes in the shared workspace.
 template <class Reducer, int threads, int scale, int thread_offset = 0,
-          class Barrier = SyncThreadsBarrier>
+          class Barrier = SyncThreadsBarrier, int batch_size = 1,
+          int workspace_stride = 0>
 struct AllReduce {
   static_assert(threads % scale == 0);
   template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
@@ -143,12 +146,25 @@ struct AllReduce {
       // Recursion base case: each reduce group has exactly one thread left.
       return x;
     } else {
-      return butterfly_reduce(x, red_buf);
+      return butterfly_reduce_scalar(x, red_buf);
+    }
+  }
+
+  template <typename T>
+  static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
+    if constexpr (threads == scale) {
+      return;
+    } else {
+      butterfly_reduce_batch(x, red_buf);
     }
   }
 
 private:
-  template <typename T> static TL_DEVICE T butterfly_reduce(T x, T *red_buf) {
+  using Next = AllReduce<Reducer, threads / 2, scale, thread_offset, Barrier,
+                         batch_size, workspace_stride>;
+
+  template <typename T>
+  static TL_DEVICE T butterfly_reduce_scalar(T x, T *red_buf) {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
       Barrier::template sync<0>();
@@ -161,8 +177,36 @@ private:
     if constexpr (offset == scale) {
       return x;
     } else {
-      return AllReduce<Reducer, offset, scale, thread_offset, Barrier>::run(
-          x, red_buf);
+      return Next::run(x, red_buf);
+    }
+  }
+
+  template <typename T>
+  static TL_DEVICE void butterfly_reduce_batch(T *x, T *red_buf) {
+    constexpr int offset = threads / 2;
+    if constexpr (offset >= 32) {
+      Barrier::template sync<0>();
+#pragma unroll
+      for (int i = 0; i < batch_size; ++i) {
+        red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
+      }
+      Barrier::template sync<1>();
+#pragma unroll
+      for (int i = 0; i < batch_size; ++i) {
+        x[i] =
+            Reducer()(x[i], red_buf[((threadIdx.x - thread_offset) ^ offset) +
+                                    i * workspace_stride]);
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < batch_size; ++i) {
+        x[i] = Reducer()(x[i], tl::shfl_xor_sync(uint32_t(-1), x[i], offset));
+      }
+    }
+    if constexpr (offset == scale) {
+      return;
+    } else {
+      Next::run_batch(x, red_buf);
     }
   }
 };

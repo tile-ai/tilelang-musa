@@ -208,7 +208,13 @@ private:
         name.find("NamedBarrier<") != std::string::npos) {
       return expr;
     }
-    if (name.size() < 6 || name.substr(name.size() - 6) != ">::run") {
+    std::string suffix;
+    if (name.size() >= 12 &&
+        name.substr(name.size() - 12) == ">::run_batch") {
+      suffix = ">::run_batch";
+    } else if (name.size() >= 6 && name.substr(name.size() - 6) == ">::run") {
+      suffix = ">::run";
+    } else {
       return expr;
     }
 
@@ -225,10 +231,19 @@ private:
       return expr;
     }
 
-    size_t run_pos = name.size() - 6;
-    std::string new_name = name.substr(0, run_pos) + ", tl::NamedBarrier<" +
-                           std::to_string(barrier_id) + ">" +
-                           name.substr(run_pos);
+    std::string new_name;
+    std::string barrier_name =
+        "tl::NamedBarrier<" + std::to_string(barrier_id) + ">";
+    size_t sync_barrier_pos = name.find("tl::SyncThreadsBarrier");
+    if (sync_barrier_pos != std::string::npos) {
+      new_name = name;
+      new_name.replace(sync_barrier_pos, std::string("tl::SyncThreadsBarrier").size(),
+                       barrier_name);
+    } else {
+      size_t run_pos = name.size() - suffix.size();
+      new_name = name.substr(0, run_pos) + ", " + barrier_name +
+                 name.substr(run_pos);
+    }
     Array<PrimExpr> new_args;
     new_args.reserve(call->args.size() - 1);
     new_args.push_back(StringImm(new_name));
