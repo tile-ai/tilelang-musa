@@ -78,10 +78,11 @@ else()
 endif()
 
 # Configs
-set(TILELANG_BACKENDS CUDA MUSA)
+set(TILELANG_BACKENDS CUDA MUSA LLVM)
 
 set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
 set(TILELANG_BACKEND_DOC_MUSA "Enable MUSA backend (ON/OFF/or MUSA SDK path)")
+set(TILELANG_BACKEND_DOC_LLVM "Enable LLVM backend")
 
 # TVM's config.cmake redefines USE_* options later, so we cache the user's choice
 # (including explicit -DUSE_XXX arguments) before we include TVM and restore it
@@ -205,7 +206,13 @@ endforeach()
 
 # Only auto-select a backend when the user didn't specify one explicitly.
 if(NOT TILELANG_BACKEND_USER_SELECTED)
-  if($ENV{USE_MUSA})
+  if(DEFINED ENV{USE_LLVM})
+    if($ENV{USE_LLVM})
+      set(USE_LLVM ON)
+    else()
+      set(USE_LLVM OFF)
+    endif()
+  elseif($ENV{USE_MUSA})
     set(USE_MUSA ON)
   else()
     if($ENV{USE_CUDA})
