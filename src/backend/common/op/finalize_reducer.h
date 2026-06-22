@@ -24,10 +24,10 @@ using namespace tirx;
 using namespace ffi;
 
 template <typename Impl> struct FinalizeReducerLowerer {
-  static Stmt Lower(const FinalizeReducerOpNode &op, const LowerArgs &T,
-                    arith::Analyzer *) {
-    auto buffer = T.buffer_remap[op.reducer];
-    auto opt_layout = T.layout_map.Get(op.reducer);
+  static Stmt Lower(const FinalizeReducerOpNode &op,
+                    const LowerArgs &lower_args, arith::Analyzer *) {
+    auto buffer = lower_args.buffer_remap[op.reducer];
+    auto opt_layout = lower_args.layout_map.Get(op.reducer);
     ICHECK(opt_layout);
     ICHECK(opt_layout->as<Fragment>());
     auto layout = opt_layout->as<Fragment>().value();
@@ -40,9 +40,10 @@ template <typename Impl> struct FinalizeReducerLowerer {
     const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
     ICHECK(p_extent);
     int extent = *p_extent;
-    ICHECK(extent == 1 || extent == *as_const_int(T.thread_bounds->extent))
+    ICHECK(extent == 1 ||
+           extent == *as_const_int(lower_args.thread_bounds->extent))
         << "Illegal finalize_reducer: extent=" << extent
-        << "; T.thread_bounds=" << T.thread_bounds;
+        << "; T.thread_bounds=" << lower_args.thread_bounds;
 
     if (extent == 1) {
       return Evaluate(0);
@@ -52,7 +53,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
     auto op_str = op_names[static_cast<int>(op.op)];
 
     int reducing_threads = extent;
-    auto thread_offset = T.thread_bounds->min;
+    auto thread_offset = lower_args.thread_bounds->min;
 
     int64_t layout_batch_size = 1;
     for (int i = 0; i < layout->OutputDim(); ++i) {
@@ -77,38 +78,40 @@ template <typename Impl> struct FinalizeReducerLowerer {
     }
 
     bool use_batch =
-        effective_batch > 1 && reducing_threads > Impl::WarpSize(T.target);
+        effective_batch > 1 &&
+        reducing_threads > Impl::WarpSize(lower_args.target);
     const bool use_sync_barrier =
-        Impl::UseSyncBarrier(T.target, reducing_threads);
+        Impl::UseSyncBarrier(lower_args.target, reducing_threads);
     Buffer sync_barrier;
     int sync_barrier_id = 0;
     if (use_sync_barrier) {
-      auto all_threads = T.thread_bounds->extent;
-      ICHECK(T.alloc_mbarrier)
+      auto all_threads = lower_args.thread_bounds->extent;
+      ICHECK(lower_args.alloc_mbarrier)
           << "finalize_reducer requires an mbarrier allocator for named "
              "barrier synchronization";
-      ICHECK(T.mbarrier_buffer != nullptr);
+      ICHECK(lower_args.mbarrier_buffer != nullptr);
       sync_barrier_id =
-          T.alloc_mbarrier(*as_const_int(all_threads), std::nullopt);
+          lower_args.alloc_mbarrier(*as_const_int(all_threads), std::nullopt);
       // MUSA NamedBarrier uses two phases in AllReduce: sync<0>() before the
       // workspace write and sync<1>() before the peer read. Reserve both
       // consecutive barrier IDs while passing the first one to the template.
       int sync_barrier_next_id =
-          T.alloc_mbarrier(*as_const_int(all_threads), std::nullopt);
+          lower_args.alloc_mbarrier(*as_const_int(all_threads), std::nullopt);
       ICHECK_EQ(sync_barrier_next_id, sync_barrier_id + 1)
           << "finalize_reducer requires consecutive named barrier IDs";
-      sync_barrier = T.mbarrier_buffer->value();
+      sync_barrier = lower_args.mbarrier_buffer->value();
       ICHECK(sync_barrier.defined());
     }
 
     if (use_batch) {
       int workspace_stride =
-          static_cast<int>(*as_const_int(T.thread_bounds->extent));
+          static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
       std::string allreduce = Impl::MakeBatchAllReduce(
-          op_str, reducing_threads, 1, thread_offset, T.thread_bounds->extent,
-          static_cast<int>(effective_batch), workspace_stride, T.target);
+          op_str, reducing_threads, 1, thread_offset,
+          lower_args.thread_bounds->extent, static_cast<int>(effective_batch),
+          workspace_stride, lower_args.target);
       int ws_size = workspace_stride * static_cast<int>(effective_batch);
-      PrimExpr workspace = T.add_workspace(ws_size, buffer->dtype);
+      PrimExpr workspace = lower_args.add_workspace(ws_size, buffer->dtype);
       Array<PrimExpr> args = {StringImm(allreduce), buffer->data};
       if (use_sync_barrier) {
         PrimExpr barrier_id = BufferLoad(
@@ -119,9 +122,9 @@ template <typename Impl> struct FinalizeReducerLowerer {
       return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
     }
 
-    std::string allreduce =
-        Impl::MakeScalarAllReduce(op_str, reducing_threads, 1, thread_offset,
-                                  T.thread_bounds->extent, T.target);
+    std::string allreduce = Impl::MakeScalarAllReduce(
+        op_str, reducing_threads, 1, thread_offset,
+        lower_args.thread_bounds->extent, lower_args.target);
     Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
                                           BufferLoad(buffer, indices_0)};
     if (use_sync_barrier) {
@@ -130,8 +133,8 @@ template <typename Impl> struct FinalizeReducerLowerer {
       thread_reduce_args.push_back(barrier_id);
     }
     if (reducing_threads >= 32) {
-      PrimExpr workspace = T.add_workspace(
-          *as_const_int(T.thread_bounds->extent), buffer->dtype);
+      PrimExpr workspace = lower_args.add_workspace(
+          *as_const_int(lower_args.thread_bounds->extent), buffer->dtype);
       thread_reduce_args.push_back(workspace);
     }
     auto call = Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);
