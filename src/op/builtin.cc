@@ -16,6 +16,8 @@
 namespace tvm {
 namespace tl {
 
+using namespace tirx;
+
 TVM_REGISTER_PASS_CONFIG_OPTION(kDebugMergeSharedMemoryAllocations, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSafeMemoryLegalize, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSafeCopyPredication, Bool);

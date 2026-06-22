@@ -17,6 +17,7 @@
 namespace tvm {
 namespace tl {
 
+using namespace tirx;
 using namespace ffi;
 
 IterVar make_itervar(std::string name, PrimExpr dom) {
