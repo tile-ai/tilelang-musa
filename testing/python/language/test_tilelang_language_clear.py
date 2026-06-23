@@ -54,5 +54,28 @@ def test_matmul():
     run_matmul(1024, 1024, 1024, 128, 128, 32)
 
 
+def test_fill_int8_negative():
+    import torch
+
+    M, N = 8, 128
+
+    def program(value):
+        @T.prim_func
+        def main(out: T.Tensor((M, N), "int8")):
+            with T.Kernel(1, threads=128):
+                smem = T.alloc_shared((M, N), "int8")
+                T.fill(smem, value)
+                T.copy(smem, out)
+
+        return main
+
+    for value in (-7, -128, -1, 5):
+        kernel = tilelang.compile(program(value), out_idx=[0])
+        out = kernel()
+        torch.musa.synchronize()
+        ref = torch.full((M, N), value, dtype=torch.int8, device="musa")
+        torch.testing.assert_close(out, ref)
+
+
 if __name__ == "__main__":
     test_matmul()
