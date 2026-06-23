@@ -61,7 +61,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kEnableMusaBurst, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableMusaTmaPrefetch, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableReduceBurst, Bool);
 
-DataType cuTensorMapType() { return DataType::UInt(8, 128); }
+DataType CuTensorMapType() { return DataType::UInt(8, 128); }
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \

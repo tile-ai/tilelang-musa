@@ -23,6 +23,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ffi;
 
 // Collect barrier metadata and rewrite partial sync to internal placeholders.
 class UnifiedBarrierPrepass : public StmtExprMutator {

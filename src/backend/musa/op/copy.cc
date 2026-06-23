@@ -268,7 +268,7 @@ bool IsMatrixLinearLayout(const Layout &layout) {
   size_t ndim = layout->InputDim();
   Array<PrimExpr> matrix_shape{layout->InputShape()[ndim - 2],
                                layout->InputShape()[ndim - 1]};
-  Layout linear_layout = makeLinearLayout(matrix_shape);
+  Layout linear_layout = MakeLinearLayout(matrix_shape);
   if (ndim > 2) {
     Array<PrimExpr> leading_shape;
     for (size_t i = 0; i + 2 < ndim; ++i) {
@@ -547,9 +547,9 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op, const LayoutInferArgs &T,
     for (int num_useful_wgs = num_threads / WARPGROUP_SIZE; num_useful_wgs >= 1;
          --num_useful_wgs) {
       int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
-      Tcgen05Meta meta = getTcgen05MetaLd_32dp32b();
+      Tcgen05Meta meta = GetTcgen05MetaLd32Dp32B();
       auto [is_success, tmem_coord2frag, num_chunks_each_wg] =
-          expandTcgen05Layout(
+          ExpandTcgen05Layout(
               meta, phy_col_bounds->max_value - phy_col_bounds->min_value + 1,
               num_useful_threads, row_dom, col_dom);
       (void)num_chunks_each_wg;
@@ -559,7 +559,7 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op, const LayoutInferArgs &T,
       Fragment logical_coord2frag =
           Fragment(logical_coords, tmem_coord2frag->Forward(phy_indices),
                    tmem_coord2frag->ForwardThread(phy_indices, std::nullopt),
-                   make_itervar("rep", 1));
+                   MakeIterVar("rep", 1));
       results.Set(reg_buf,
                   logical_coord2frag->BindThreadRange(T.thread_bounds));
       break;
@@ -949,10 +949,10 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   IterVar row_var = loop_vars[loop_vars.size() - 2];
   PrimExpr local_layout_thread_map =
       FloorMod(local_layout->ForwardThread(local_indices, std::nullopt), 32);
-  PrimExpr matrix_8x8_thread_map = makeGemmFragment8x8()->ForwardThread(
+  PrimExpr matrix_8x8_thread_map = MakeGemmFragment8x8()->ForwardThread(
       {FloorMod(row_var, 8), FloorMod(col_var, 8)}, std::nullopt);
   PrimExpr matrix_8x8_thread_map_trans =
-      makeGemmFragment8x8Transposed()->ForwardThread(
+      MakeGemmFragment8x8Transposed()->ForwardThread(
           {FloorMod(row_var, 8), FloorMod(col_var, 8)}, std::nullopt);
   PrimExpr local_indices_flattened =
       local_tensor.OffsetOf(local_indices_transformed).back();
@@ -1181,7 +1181,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
     for (int num_useful_wgs = num_threads / WARPGROUP_SIZE; num_useful_wgs >= 1;
          num_useful_wgs--) {
       int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
-      auto [is_success, target_frag, num_chunks_each_wg] = expandTcgen05Layout(
+      auto [is_success, target_frag, num_chunks_each_wg] = ExpandTcgen05Layout(
           meta, tmem_phy_col_extent, num_useful_threads, row_dom, col_dom);
       if (!is_success) {
         continue;
@@ -1245,15 +1245,15 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   };
 
   if (is_ld) {
-    try_tcgen05_instruction(getTcgen05MetaLd_32dp32b());
-    try_tcgen05_instruction(getTcgen05MetaLd_32dp64b());
-    try_tcgen05_instruction(getTcgen05MetaLd_32dp128b());
-    try_tcgen05_instruction(getTcgen05MetaLd_32dp256b());
+    try_tcgen05_instruction(GetTcgen05MetaLd32Dp32B());
+    try_tcgen05_instruction(GetTcgen05MetaLd32Dp64B());
+    try_tcgen05_instruction(GetTcgen05MetaLd32Dp128B());
+    try_tcgen05_instruction(GetTcgen05MetaLd32Dp256B());
   } else {
-    try_tcgen05_instruction(getTcgen05MetaSt_32dp32b());
-    try_tcgen05_instruction(getTcgen05MetaSt_32dp64b());
-    try_tcgen05_instruction(getTcgen05MetaSt_32dp128b());
-    try_tcgen05_instruction(getTcgen05MetaSt_32dp256b());
+    try_tcgen05_instruction(GetTcgen05MetaSt32Dp32B());
+    try_tcgen05_instruction(GetTcgen05MetaSt32Dp64B());
+    try_tcgen05_instruction(GetTcgen05MetaSt32Dp128B());
+    try_tcgen05_instruction(GetTcgen05MetaSt32Dp256B());
   }
 
   ICHECK(have_succeeded) << "Failed to find a suitable instruction for tcgen05."

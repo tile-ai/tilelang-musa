@@ -44,7 +44,7 @@ bool IsPH1SupportedTf32(DataType dtype) {
 Layout MakeTransposedPH1SqmmaOperandLayout(int actual_rows, int actual_cols,
                                            int logical_rows, int logical_cols,
                                            int element_bits, bool k_inner) {
-  auto base = makeGemmABLayoutPH1(logical_rows, logical_cols, logical_cols,
+  auto base = MakeGemmABLayoutPH1(logical_rows, logical_cols, logical_cols,
                                   element_bits, k_inner);
   auto mapped = base->Forward({InputPlaceholder(1), InputPlaceholder(0)});
   return Layout(Array<PrimExpr>{Integer(actual_rows), Integer(actual_cols)},
@@ -75,7 +75,7 @@ std::pair<int, int> ComputeWarpGroupPartition(const GemmWarpPolicyNode &policy,
   m_warp = kGroup;
   n_warp = num_warps / m_warp;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
       if (M % (cand * k_m_per_warp) == 0) {
         m_warp = cand;
@@ -83,7 +83,7 @@ std::pair<int, int> ComputeWarpGroupPartition(const GemmWarpPolicyNode &policy,
         break;
       }
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     int cand_n = n_warp;
     if (N % (cand_n * k_n_per_warp) != 0) {
       int max_n = N / k_n_per_warp;
@@ -95,7 +95,7 @@ std::pair<int, int> ComputeWarpGroupPartition(const GemmWarpPolicyNode &policy,
         }
       }
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m = M / k_m_per_warp;
     int max_n = N / k_n_per_warp;
 
@@ -144,7 +144,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   ICHECK(N % k_n_per_warp == 0)
       << "N must be divisible by " << k_n_per_warp << ", but got " << N;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     m_warp = num_warps;
     n_warp = 1;
     if (M % (m_warp * k_m_per_warp) != 0) {
@@ -154,7 +154,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       if (n_warp == 0)
         n_warp = 1;
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     m_warp = 1;
     n_warp = num_warps;
     if (N % (n_warp * k_n_per_warp) != 0) {
@@ -164,7 +164,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       if (m_warp == 0)
         m_warp = 1;
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m_warps = M / k_m_per_warp;
     float ideal_ratio = N > 0 ? static_cast<float>(M) / N : 1.0f;
 
@@ -223,7 +223,7 @@ SelectSQMMAInstShape(const GemmNode &op, int block_size, Target target) {
   if (num_warps % 4 != 0) {
     return std::nullopt;
   }
-  auto warp_parts = op.policy_->computeWarpPartition(
+  auto warp_parts = op.policy_->ComputeWarpPartition(
       op.m_, op.n_, block_size, target, kGemmInstMusaSQMMA);
   int warp_m = warp_parts.first;
   int warp_n = warp_parts.second;
@@ -376,7 +376,7 @@ SelectPH1WmmaInstShape(const GemmNode &op, int block_size, Target target) {
     return std::nullopt;
   }
 
-  auto warp_parts = op.policy_->computeWarpPartition(
+  auto warp_parts = op.policy_->ComputeWarpPartition(
       op.m_, op.n_, block_size, target, kGemmInstMusaPH1WMMA);
   int warp_m = warp_parts.first;
   int warp_n = warp_parts.second;

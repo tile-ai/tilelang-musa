@@ -75,7 +75,7 @@ public:
   TileOperator Clone() const;
 
   // Target-specific GEMM instruction key.
-  String getGemmInstructionKey(int block_size, Target target) const;
+  String GetGemmInstructionKey(int block_size, Target target) const;
   bool AllowSQMMA(int block_size, Target target) const;
   bool AllowPH1Wmma(int block_size, Target target) const;
   std::optional<std::array<int, 3>> SelectSQMMAInstShape(int block_size,

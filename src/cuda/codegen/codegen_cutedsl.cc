@@ -182,7 +182,7 @@ std::string DTypeToString(DataType t) {
   if (t.is_void()) {
     return "void";
   }
-  if (t == tl::cuTensorMapType()) {
+  if (t == tl::CuTensorMapType()) {
     return "CUtensorMap";
   }
 

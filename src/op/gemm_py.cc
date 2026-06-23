@@ -143,7 +143,7 @@ bool GemmPyNode::allowWgmma(int block_size, Target target) const {
          checkWgmma();
 }
 
-String GemmPyNode::getGemmInstructionKey(int block_size, Target target) const {
+String GemmPyNode::GetGemmInstructionKey(int block_size, Target target) const {
   bool allow_sqmma = AllowSQMMA(block_size, target);
   if (allowTcgen5Mma(target)) {
     return kGemmInstCudaTCGEN05;
@@ -201,7 +201,7 @@ GemmPyNode::SelectSQMMAInstShape(int block_size, Target target) const {
   if (num_warps % 4 != 0) {
     return std::nullopt;
   }
-  auto warp_parts = policy_->computeWarpPartition(m_, n_, block_size, target,
+  auto warp_parts = policy_->ComputeWarpPartition(m_, n_, block_size, target,
                                                   kGemmInstMusaSQMMA);
   int warp_m = warp_parts.first;
   int warp_n = warp_parts.second;
@@ -356,7 +356,7 @@ GemmPyNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
     return std::nullopt;
   }
 
-  auto warp_parts = policy_->computeWarpPartition(m_, n_, block_size, target,
+  auto warp_parts = policy_->ComputeWarpPartition(m_, n_, block_size, target,
                                                   kGemmInstMusaPH1WMMA);
   int warp_m = warp_parts.first;
   int warp_n = warp_parts.second;
@@ -617,7 +617,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.GemmPyGemmInstructionKey",
                         [](GemmPy gemm_py, int block_size, Target target) {
-                          return gemm_py->getGemmInstructionKey(block_size,
+                          return gemm_py->GetGemmInstructionKey(block_size,
                                                                 target);
                         });
   refl::GlobalDef().def("tl.GemmPyAllowSQMMA",

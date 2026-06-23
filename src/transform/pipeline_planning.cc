@@ -255,7 +255,7 @@ private:
     int open_cp_async_group = -1;
     for (size_t i = 0; i < pipeline_stage_infos.size(); ++i) {
       auto &pinfo = pipeline_stage_infos[i];
-      if (pinfo.has_cp_async_call()) {
+      if (pinfo.HasCpAsyncCall()) {
         if (open_cp_async_group == -1) {
           open_cp_async_group = create_new_cp_async_group();
         }
@@ -269,7 +269,7 @@ private:
           group.written_buffers.insert(write->buffer);
         }
       }
-      if (pinfo.has_cp_async_commit()) {
+      if (pinfo.HasCpAsyncCommit()) {
         if (open_cp_async_group == -1) {
           open_cp_async_group = create_new_cp_async_group();
         }
@@ -279,7 +279,7 @@ private:
         committed_groups_in_order.push_back(open_cp_async_group);
         open_cp_async_group = -1;
       }
-      if (pinfo.has_cp_async_wait()) {
+      if (pinfo.HasCpAsyncWait()) {
         int committed_count =
             static_cast<int>(committed_groups_in_order.size());
         int retain_inflight = pinfo.cp_async_wait_has_dynamic
@@ -322,7 +322,7 @@ private:
       async_written_buffers.insert(group.written_buffers.begin(),
                                    group.written_buffers.end());
       for (int stmt_idx = 0; stmt_idx < pipeline_stmt_count; ++stmt_idx) {
-        if (pipeline_stage_infos[stmt_idx].is_first_stage()) {
+        if (pipeline_stage_infos[stmt_idx].IsFirstStage()) {
           continue;
         }
         if (stmt_reads_buffer_set(stmt_idx, group.written_buffers)) {
@@ -339,13 +339,13 @@ private:
         continue;
       }
       const auto &wait_stmt_info = pipeline_stage_infos[wait_stmt_idx];
-      if (!wait_stmt_info.has_cp_async_wait() ||
+      if (!wait_stmt_info.HasCpAsyncWait() ||
           wait_stmt_info.cp_async_wait_has_dynamic ||
           wait_stmt_info.cp_async_wait_min_inflight != 0) {
         continue;
       }
-      if (wait_stmt_info.has_cp_async_call() ||
-          wait_stmt_info.has_cp_async_commit()) {
+      if (wait_stmt_info.HasCpAsyncCall() ||
+          wait_stmt_info.HasCpAsyncCommit()) {
         continue;
       }
 
@@ -354,7 +354,7 @@ private:
       int consumer_stmt_idx = -1;
       for (int stmt_idx = search_start; stmt_idx < pipeline_stmt_count;
            ++stmt_idx) {
-        if (pipeline_stage_infos[stmt_idx].is_first_stage()) {
+        if (pipeline_stage_infos[stmt_idx].IsFirstStage()) {
           continue;
         }
         if (stmt_reads_buffer_set(stmt_idx, async_written_buffers)) {
@@ -433,8 +433,8 @@ private:
       for (int commit_stmt_idx : group.commit_stmt_indices) {
         auto &commit_info = pipeline_stage_infos[commit_stmt_idx];
         commit_info.last_use_stmt_index = group_last_use;
-        if (commit_info.has_cp_async_commit() &&
-            !commit_info.has_cp_async_call()) {
+        if (commit_info.HasCpAsyncCommit() &&
+            !commit_info.HasCpAsyncCall()) {
           commit_info.cp_async_commit_stage = true;
         }
       }
@@ -468,7 +468,7 @@ private:
       // handling
       //    because they have consumers that depend on their data
       // 2. All Producer stages for copy stages.
-      if (pinfo.is_first_stage() && pinfo.is_last_use_stmt_index_valid()) {
+      if (pinfo.IsFirstStage() && pinfo.IsLastUseStmtIndexValid()) {
         continue;
       }
 
@@ -482,7 +482,7 @@ private:
       // This ensures copy operations are placed right before their final
       // consumer for optimal pipeline efficiency
       for (auto &pinfo_1 : pipeline_stage_infos) {
-        if ((pinfo_1.is_first_stage() &&
+        if ((pinfo_1.IsFirstStage() &&
              pinfo_1.last_use_stmt_index == pinfo.original_stmt_index)) {
           pinfo_1.order = order_idx++;
           pinfo_1.stage = 0; // Copy stages are typically assigned to stage 0
@@ -503,7 +503,7 @@ private:
       int copy_order_min = pipeline_stage_infos.size();
       int non_copy_order_max = 0;
       for (auto &pinfo : pipeline_stage_infos) {
-        if (pinfo.is_first_stage()) {
+        if (pinfo.IsFirstStage()) {
           copy_stage_cnt++;
           copy_order_min = std::min(copy_order_min, pinfo.order);
         } else {
@@ -518,8 +518,8 @@ private:
       for (auto &pinfo : pipeline_stage_infos) { // move copy to the beginning
         pinfo.order =
             (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
-        if (!pinfo.is_copy_stage() && !pinfo.is_producer_for_copy() &&
-            !pinfo.is_cp_async_commit_stage())
+        if (!pinfo.IsCopyStage() && !pinfo.IsProducerForCopy() &&
+            !pinfo.IsCpAsyncCommitStage())
           pinfo.stage--;
       }
     }
@@ -549,7 +549,7 @@ private:
       }
       for (int commit_stmt_idx : group.commit_stmt_indices) {
         if (pipeline_stage_infos[commit_stmt_idx].stage == anchor_stage) {
-          if (pipeline_stage_infos[commit_stmt_idx].has_cp_async_call()) {
+          if (pipeline_stage_infos[commit_stmt_idx].HasCpAsyncCall()) {
             continue;
           }
           ICHECK_GT(pipeline_stage_infos[commit_stmt_idx].order,
@@ -587,8 +587,8 @@ private:
       }
       const auto &wait_stmt_info =
           pipeline_stage_infos[wait_dep.wait_stmt_index];
-      if (wait_stmt_info.has_cp_async_call() ||
-          wait_stmt_info.has_cp_async_commit()) {
+      if (wait_stmt_info.HasCpAsyncCall() ||
+          wait_stmt_info.HasCpAsyncCommit()) {
         continue;
       }
       if (wait_dep.required_group_ids.empty()) {
@@ -613,7 +613,7 @@ private:
         for (int stmt_idx = wait_dep.wait_stmt_index + 1;
              stmt_idx < static_cast<int>(pipeline_stage_infos.size());
              ++stmt_idx) {
-          if (pipeline_stage_infos[stmt_idx].is_first_stage()) {
+          if (pipeline_stage_infos[stmt_idx].IsFirstStage()) {
             continue;
           }
           bool dependent_read = false;
@@ -747,8 +747,8 @@ private:
         }
 
         const auto &wait_stmt_info = pipeline_stage_infos[wait_stmt_idx];
-        if (wait_stmt_info.has_cp_async_call() ||
-            wait_stmt_info.has_cp_async_commit()) {
+        if (wait_stmt_info.HasCpAsyncCall() ||
+            wait_stmt_info.HasCpAsyncCommit()) {
           continue;
         }
 
@@ -807,9 +807,9 @@ private:
             if (mid_stmt_info.reads.empty() && mid_stmt_info.writes.empty()) {
               break;
             }
-            if (mid_stmt_info.has_cp_async_call() ||
-                mid_stmt_info.has_cp_async_commit() ||
-                mid_stmt_info.has_cp_async_wait()) {
+            if (mid_stmt_info.HasCpAsyncCall() ||
+                mid_stmt_info.HasCpAsyncCommit() ||
+                mid_stmt_info.HasCpAsyncWait()) {
               break;
             }
             bool touches_waited_buffers = false;
@@ -905,9 +905,9 @@ private:
       tma_copies.reserve(pipeline_stage_infos.size());
       bool has_tma_copy = false;
       for (auto &pinfo : pipeline_stage_infos) {
-        bool is_tma_copy = pinfo.is_tma_copy();
-        has_tma_copy = has_tma_copy || is_tma_copy;
-        tma_copies.push_back(Integer(is_tma_copy ? 1 : 0));
+        bool IsTmaCopy = pinfo.IsTmaCopy();
+        has_tma_copy = has_tma_copy || IsTmaCopy;
+        tma_copies.push_back(Integer(IsTmaCopy ? 1 : 0));
       }
       if (has_tma_copy) {
         annotations.Set(kPipelineTmaCopies, Array<Integer>(tma_copies));

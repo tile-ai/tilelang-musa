@@ -300,7 +300,7 @@ Var InputPlaceholder(size_t idx) {
   return getPlaceholder(std::string{'_', char('i' + idx)});
 }
 
-Map<Var, Range> LayoutNode::getVarMap() const {
+Map<Var, Range> LayoutNode::GetVarMap() const {
   Map<Var, Range> map;
   for (size_t i = 0; i < InputDim(); i++) {
     map.Set(InputPlaceholder(i), {0, input_size_[i]});
@@ -308,8 +308,8 @@ Map<Var, Range> LayoutNode::getVarMap() const {
   return map;
 }
 
-Map<Var, Range> FragmentNode::getVarMap() const {
-  auto map = LayoutNode::getVarMap();
+Map<Var, Range> FragmentNode::GetVarMap() const {
+  auto map = LayoutNode::GetVarMap();
   map.Set(ReplicationPlaceholder(), {0, ReplicateExtent()});
   return map;
 }
@@ -351,7 +351,7 @@ void LayoutNode::RegisterReflection() {
 }
 
 void LayoutNode::UpdateAnalyzer(arith::Analyzer *analyzer) const {
-  for (const auto &[var, dom] : getVarMap()) {
+  for (const auto &[var, dom] : GetVarMap()) {
     analyzer->Bind(var, dom);
   }
 }
@@ -623,7 +623,7 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
                   << symbolic_dims;
   }
   arith::IterMapResult res =
-      arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
+      arith::DetectIterMap(forward_index_, GetVarMap(), 1, level, &analyzer);
   if (!res->errors.empty()) {
     std::ostringstream msg;
     msg << "Layout " << DebugOutput() << " has errors: " << res->errors;
@@ -799,7 +799,7 @@ FragmentNode::FragmentNode(Array<PrimExpr> input_size,
   forward_thread_ = analyzer.Simplify(forward_thread);
   if (forward_index.empty()) {
     forward_index = {
-        infer_fragment_index(getVarMap(), forward_thread_, &analyzer)};
+        infer_fragment_index(GetVarMap(), forward_thread_, &analyzer)};
   }
   forward_index_ = forward_index.Map(
       [&](const PrimExpr &e) { return analyzer.Simplify(e); });
@@ -901,7 +901,7 @@ FragmentNode::DetectInjective(bool require_padding_guard) const {
         << "NoCheck; symbolic dims: " << symbolic_dims;
   }
 
-  return arith::DetectIterMap(indices, getVarMap(), 1, level, &analyzer);
+  return arith::DetectIterMap(indices, GetVarMap(), 1, level, &analyzer);
 }
 
 PrimExpr FragmentNode::ThreadExtent() const {
@@ -955,7 +955,7 @@ FragmentNode::InverseWithLevel(bool require_padding_guard) const {
 
 Fragment FragmentNode::CondenseReplicateVar() const {
   arith::Analyzer analyzer;
-  auto input_iters = getVarMap();
+  auto input_iters = GetVarMap();
   input_iters.Set(ReplicationPlaceholder(), {0, ReplicateExtent()});
   PrimExpr new_forward_thread;
   IterVar new_thread_replicate;
@@ -1133,43 +1133,43 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Fragment fragment) { return fragment->CondenseReplicateVar(); })
       .def("tl.make_swizzled_layout",
            [](const Buffer &buffer, bool k_inner, bool allow_pad) {
-             return makeSwizzledLayout(buffer, k_inner, allow_pad);
+             return MakeSwizzledLayout(buffer, k_inner, allow_pad);
            })
       .def("tl.make_volta_swizzled_layout",
            [](const Buffer &buffer, bool is_a, bool k_inner) {
-             return makeVoltaSwizzledLayout(buffer, is_a, k_inner);
+             return MakeVoltaSwizzledLayout(buffer, is_a, k_inner);
            })
       .def("tl.make_wgmma_swizzled_layout",
            [](const Buffer &buffer, int continuity, bool k_inner) {
-             return makeWgmmaSwizzledLayout(buffer, continuity, k_inner);
+             return MakeWgmmaSwizzledLayout(buffer, continuity, k_inner);
            })
       .def("tl.make_sqmma_swizzled_layout",
            [](int stride, int mat_continuous, int continuity, int element_size,
               bool k_inner) {
-             return makeGemmABLayoutPH1(stride, mat_continuous, continuity,
+             return MakeGemmABLayoutPH1(stride, mat_continuous, continuity,
                                         element_size, k_inner);
            })
       .def("tl.make_tcgen05mma_swizzled_layout",
            [](const Buffer &buffer, int continuity, bool k_inner) {
-             return makeTcgen05mmaSwizzledLayout(buffer, continuity, k_inner);
+             return MakeTcgen05MmaSwizzledLayout(buffer, continuity, k_inner);
            })
       .def("tl.make_full_bank_swizzled_layout",
            [](const Buffer &buffer) {
-             return makeFullBankSwizzleLayout(buffer);
+             return MakeFullBankSwizzleLayout(buffer);
            })
       .def("tl.make_half_bank_swizzled_layout",
            [](const Buffer &buffer) {
-             return makeHalfBankSwizzleLayout(buffer);
+             return MakeHalfBankSwizzleLayout(buffer);
            })
       .def("tl.make_quarter_bank_swizzled_layout",
            [](const Buffer &buffer) {
-             return makeQuarterBankSwizzleLayout(buffer);
+             return MakeQuarterBankSwizzleLayout(buffer);
            })
       .def("tl.make_linear_layout",
-           [](Array<PrimExpr> shape) { return makeLinearLayout(shape); })
+           [](Array<PrimExpr> shape) { return MakeLinearLayout(shape); })
       .def("tl.make_gemm_fragment_c_linear",
            [](int block_m, int block_n, int block_size) {
-             return makeGemmFragmentCLinear(block_m, block_n, block_size);
+             return MakeGemmFragmentCLinear(block_m, block_n, block_size);
            })
       .def("tl.make_ph_sqmma_fragment_c",
            [](int block_m, int block_n, int warp_m, int warp_n,
@@ -1181,7 +1181,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
                                         static_cast<int>(inst_shape[1]->value),
                                         static_cast<int>(inst_shape[2]->value)};
-             return makePHSqmmaFragmentC(block_m, block_n, warp_m, warp_n,
+             return MakePHSqmmaFragmentC(block_m, block_n, warp_m, warp_n,
                                          element_size, inst);
            })
       .def("tl.make_ph1_wmma_fragment_c",
@@ -1194,7 +1194,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
                                         static_cast<int>(inst_shape[1]->value),
                                         static_cast<int>(inst_shape[2]->value)};
-             return makePH1WmmaCLayout(block_m, block_n, warp_m, warp_n,
+             return MakePH1WmmaCLayout(block_m, block_n, warp_m, warp_n,
                                        element_size, inst);
            })
       .def("tl.make_ph1_wmma_fragment_a",
@@ -1207,7 +1207,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
                                         static_cast<int>(inst_shape[1]->value),
                                         static_cast<int>(inst_shape[2]->value)};
-             return makePH1WmmaFragmentA(block_m, block_n, block_k, warp_m,
+             return MakePH1WmmaFragmentA(block_m, block_n, block_k, warp_m,
                                          warp_n, element_size, transposed,
                                          inst);
            })
@@ -1221,19 +1221,19 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
                                         static_cast<int>(inst_shape[1]->value),
                                         static_cast<int>(inst_shape[2]->value)};
-             return makePH1WmmaFragmentB(block_m, block_n, block_k, warp_m,
+             return MakePH1WmmaFragmentB(block_m, block_n, block_k, warp_m,
                                          warp_n, element_size, transposed,
                                          inst);
            })
       .def("tl.make_ph1_wmma_ab_layout",
            [](int mat_stride, int mat_continuous, int continuity,
               int element_size, bool k_inner) {
-             return makePH1WmmaABLayout(mat_stride, mat_continuous, continuity,
+             return MakePH1WmmaABLayout(mat_stride, mat_continuous, continuity,
                                         element_size, k_inner);
            })
-      .def("tl.make_gemm_fragment_8x8", []() { return makeGemmFragment8x8(); })
+      .def("tl.make_gemm_fragment_8x8", []() { return MakeGemmFragment8x8(); })
       .def("tl.make_gemm_fragment_8x8_transposed",
-           []() { return makeGemmFragment8x8Transposed(); })
+           []() { return MakeGemmFragment8x8Transposed(); })
       .def("tl.make_fully_replicated_layout_fragment",
            [](Array<PrimExpr> shape, PrimExpr thread_extent) {
              return Fragment::FullyReplicated(shape, thread_extent);

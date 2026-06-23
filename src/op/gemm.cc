@@ -163,12 +163,12 @@ TileOperator GemmNode::Clone() const {
   return Gemm(op);
 }
 
-String GemmNode::getGemmInstructionKey(int block_size, Target target) const {
+String GemmNode::GetGemmInstructionKey(int block_size, Target target) const {
   return ResolveGemmImpl(target).select_inst(*this, block_size, target);
 }
 
 std::optional<std::array<int, 3>>
-GemmNode::getGemmInstructionShape(int block_size, Target target,
+GemmNode::GetGemmInstructionShape(int block_size, Target target,
                                   String gemm_inst) const {
   const GemmImpl &impl = ResolveGemmImpl(target);
   if (impl.select_inst_shape == nullptr) {
@@ -176,7 +176,7 @@ GemmNode::getGemmInstructionShape(int block_size, Target target,
   }
   return impl.select_inst_shape(*this, block_size, target, gemm_inst);
 }
-std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
+std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
     int M, int N, int block_size, Target target, String gemm_inst) const {
   return ResolveGemmImpl(target).compute_warp_partition(*this, M, N, block_size,
                                                         target, gemm_inst);
@@ -241,7 +241,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
     // semantics. WGMMA/TCGEN5MMA have strict shared memory layout requirements
     // and must always set their layouts.
     auto block_size = *as_const_int(layout_args.thread_bounds->extent);
-    String gemm_inst = getGemmInstructionKey(block_size, layout_args.target);
+    String gemm_inst = GetGemmInstructionKey(block_size, layout_args.target);
     bool reuse_existing_shared_layout =
         ResolveGemmImpl(layout_args.target)
             .reuse_existing_shared_layout(gemm_inst);
@@ -310,18 +310,18 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",
                         [](GemmWarpPolicy policy, int M, int N, int block_size,
                            Target target, String gemm_inst) {
-                          policy->computeWarpPartition(M, N, block_size, target,
+                          policy->ComputeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
                         });
   refl::GlobalDef().def("tl.GemmGetGemmInstructionKey",
                         [](Gemm gemm, int block_size, Target target) {
-                          return gemm->getGemmInstructionKey(block_size,
+                          return gemm->GetGemmInstructionKey(block_size,
                                                              target);
                         });
   refl::GlobalDef().def("tl.GemmSelectSQMMAInstShape",
                         [](Gemm gemm, int block_size, Target target) {
                           Array<Integer> result;
-                          auto inst_shape = gemm->getGemmInstructionShape(
+                          auto inst_shape = gemm->GetGemmInstructionShape(
                               block_size, target, kGemmInstMusaSQMMA);
                           if (inst_shape.has_value()) {
                             result.push_back(Integer((*inst_shape)[0]));
@@ -333,7 +333,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("tl.GemmSelectPH1WmmaInstShape",
                         [](Gemm gemm, int block_size, Target target) {
                           Array<Integer> result;
-                          auto inst_shape = gemm->getGemmInstructionShape(
+                          auto inst_shape = gemm->GetGemmInstructionShape(
                               block_size, target, kGemmInstMusaPH1WMMA);
                           if (inst_shape.has_value()) {
                             result.push_back(Integer((*inst_shape)[0]));

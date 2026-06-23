@@ -482,7 +482,7 @@ bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
 
 bool IsLinearLayout(const Layout &layout) {
   return layout.defined() &&
-         StructuralEqual()(layout, makeLinearLayout(layout->InputShape()));
+         StructuralEqual()(layout, MakeLinearLayout(layout->InputShape()));
 }
 
 bool IsSharedLayoutContiguousFor1DTMA(const LayoutMap &layout_map,
@@ -490,7 +490,7 @@ bool IsSharedLayoutContiguousFor1DTMA(const LayoutMap &layout_map,
                                       arith::Analyzer *analyzer) {
   auto is_compatible = [&](const Layout &layout) {
     if (ShapesEqual(layout->InputShape(), shared_tensor->shape, analyzer)) {
-      return StructuralEqual()(layout, makeLinearLayout(shared_tensor->shape));
+      return StructuralEqual()(layout, MakeLinearLayout(shared_tensor->shape));
     }
     return IsLinearLayout(layout);
   };

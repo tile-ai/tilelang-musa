@@ -863,7 +863,7 @@ private:
         auto block_size = as_const_int(thread_bounds_vec_[i]->extent);
         std::optional<std::array<int, 3>> sqmma_inst = std::nullopt;
         if (block_size != nullptr) {
-          sqmma_inst = gemm->getGemmInstructionShape(*block_size, target_,
+          sqmma_inst = gemm->GetGemmInstructionShape(*block_size, target_,
                                                      kGemmInstMusaSQMMA);
         }
         const bool allow_sqmma = sqmma_inst.has_value();

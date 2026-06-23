@@ -235,10 +235,10 @@ static constexpr const char *kGemmInstMusaFMA = "musa.fma";
 /*!
  * \brief Get the type of the CUDA tensor map
  *
- * DataType cuTensorMapType()
+ * DataType CuTensorMapType()
  *
  */
-DataType cuTensorMapType();
+DataType CuTensorMapType();
 
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.

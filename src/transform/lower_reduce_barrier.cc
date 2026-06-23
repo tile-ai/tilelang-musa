@@ -21,6 +21,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ffi;
 
 class ReduceBarrierRewriter : public StmtExprMutator {
 public:

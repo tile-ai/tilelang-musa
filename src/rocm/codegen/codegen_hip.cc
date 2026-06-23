@@ -274,7 +274,7 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     return;
   }
 
-  if (t == tl::cuTensorMapType()) {
+  if (t == tl::CuTensorMapType()) {
     os << "CUtensorMap";
     return;
   }

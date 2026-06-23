@@ -819,11 +819,11 @@ static VarSet CollectPH1MmaTmaUnsafeDstBuffers(const Array<Stmt> &flat_stmts,
       }
       if (const auto *gemm = tile_op.as<GemmNode>()) {
         const bool allow_sqmma =
-            gemm->getGemmInstructionShape(*block_size, target,
+            gemm->GetGemmInstructionShape(*block_size, target,
                                           kGemmInstMusaSQMMA)
                 .has_value();
         const bool allow_ph1_wmma =
-            !allow_sqmma && gemm->getGemmInstructionShape(*block_size, target,
+            !allow_sqmma && gemm->GetGemmInstructionShape(*block_size, target,
                                                           kGemmInstMusaPH1WMMA)
                                 .has_value();
         mark_gemm_operands(gemm->a_, gemm->b_, gemm->c_, gemm->a_->dtype,
@@ -2912,7 +2912,7 @@ static bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
     return true;
   }
   // Identity / row-major linear → TMA without swizzle.
-  if (StructuralEqual()(layout, makeLinearLayout(buffer->shape))) {
+  if (StructuralEqual()(layout, MakeLinearLayout(buffer->shape))) {
     return true;
   }
   return false;

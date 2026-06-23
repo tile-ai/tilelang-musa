@@ -21,6 +21,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ffi;
 
 class LowerPHIntrin : public StmtExprMutator {
 private:
@@ -207,7 +208,7 @@ public:
     String name = call->args[2].as<Var>().value()->name_hint;
     int desc_index = static_cast<int>(desc_map_.size());
     Var var = Var(name + "_desc_" + std::to_string(desc_index),
-                  PointerType(PrimType(cuTensorMapType()), "grid_constant"));
+                  PointerType(PrimType(CuTensorMapType()), "grid_constant"));
     desc_map_[call_ref] = var;
     Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
     init_desc_arg_map_.Set(var, init_desc_args);

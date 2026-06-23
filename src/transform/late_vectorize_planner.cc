@@ -17,6 +17,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ffi;
 using arith::IRMutatorWithAnalyzer;
 
 class LateVectorizePlanner : public IRMutatorWithAnalyzer {
