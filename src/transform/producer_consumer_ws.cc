@@ -287,6 +287,11 @@ enum class TileStmtKind {
   kOther         // Unclassified
 };
 
+enum class ProducerGroupArrivalDomain {
+  kTmaCompletion,  // The stage barrier is released by TMA completion.
+  kProducerThreads // Producer threads release the stage barrier explicitly.
+};
+
 /// Detect if a statement is a SIMT global-to-shared memory copy.
 /// Matches any statement that writes to shared memory and reads from global
 /// memory, without reading shared or local buffers (which would indicate
@@ -928,6 +933,121 @@ private:
   mutable arith::Analyzer analyzer_;
 };
 
+class LayoutAnnotatedBufferCollector : public StmtExprVisitor {
+public:
+  static std::unordered_set<const Object *> Collect(const Block &block) {
+    LayoutAnnotatedBufferCollector collector;
+    collector.RecordBlock(block.get());
+    collector.VisitStmt(block->body);
+    return std::move(collector.layout_annotated_buffers_);
+  }
+
+private:
+  void VisitStmt_(const BlockNode *op) final {
+    RecordBlock(op);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void RecordBlock(const BlockNode *op) {
+    if (!op->annotations.count("layout_map")) {
+      return;
+    }
+    auto anno = op->annotations.Get("layout_map");
+    auto gmap = anno->as<Map<ObjectRef, ObjectRef>>();
+    if (!gmap.has_value()) {
+      return;
+    }
+    for (const auto &[key, val] : gmap.value()) {
+      (void)val;
+      if (auto buf = key.as<Buffer>(); buf.has_value()) {
+        layout_annotated_buffers_.insert(buf.value()->data.get());
+      } else if (auto var = key.as<Var>(); var.has_value()) {
+        layout_annotated_buffers_.insert(var.value().get());
+        for (const auto &buf : op->alloc_buffers) {
+          if (buf->data.same_as(var.value())) {
+            layout_annotated_buffers_.insert(buf->data.get());
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  std::unordered_set<const Object *> layout_annotated_buffers_;
+};
+
+static bool IsGlobalToSharedCopy(const CopyNode *copy) {
+  return copy->src.scope() == "global" &&
+         (copy->dst.scope() == "shared" || copy->dst.scope() == "shared.dyn");
+}
+
+static bool IsMusaTmaLoadFallbackToNormal(
+    const CopyNode *copy,
+    const std::unordered_set<const Object *> &layout_annotated_buffers,
+    arith::Analyzer *analyzer) {
+  if (!IsGlobalToSharedCopy(copy)) {
+    return false;
+  }
+  if (layout_annotated_buffers.count(copy->src->data.get()) != 0) {
+    return true;
+  }
+
+  // LowerBulkCopy requires the innermost TMA box dimension to be constant.
+  // A symbolic box falls back to normal producer-thread copy.
+  if (copy->src_range.empty()) {
+    return false;
+  }
+  PrimExpr inner_box_dim =
+      analyzer->Simplify(copy->src_range[copy->src_range.size() - 1]->extent);
+  return as_const_int(inner_box_dim) == nullptr;
+}
+
+ProducerGroupArrivalDomain InferTmaProducerArrivalDomain(
+    const Stmt &stmt, Target target, bool has_simt_producer,
+    bool has_cp_async_producer,
+    const std::unordered_set<const Object *> &layout_annotated_buffers) {
+  auto default_domain = [&]() {
+    if (!TargetIsMusa(target) && (has_simt_producer || has_cp_async_producer)) {
+      return ProducerGroupArrivalDomain::kProducerThreads;
+    }
+    return ProducerGroupArrivalDomain::kTmaCompletion;
+  };
+
+  const auto *eval = stmt.as<EvaluateNode>();
+  if (eval == nullptr) {
+    return default_domain();
+  }
+  const auto *call = eval->value.as<CallNode>();
+  if (call == nullptr) {
+    return default_domain();
+  }
+  auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+  const auto *copy = tile_op.as<CopyNode>();
+  if (copy == nullptr) {
+    return default_domain();
+  }
+  if (TargetIsMusa(target)) {
+    arith::Analyzer analyzer;
+    if (IsMusaTmaLoadFallbackToNormal(copy, layout_annotated_buffers,
+                                      &analyzer)) {
+      return ProducerGroupArrivalDomain::kProducerThreads;
+    }
+  }
+  return default_domain();
+}
+
+static bool UsesProducerThreadArrival(ProducerGroupArrivalDomain domain) {
+  return domain == ProducerGroupArrivalDomain::kProducerThreads;
+}
+
+static PrimExpr ForwardArriveCount(ProducerGroupArrivalDomain domain,
+                                   PrimExpr producer_extent) {
+  if (domain == ProducerGroupArrivalDomain::kProducerThreads) {
+    return producer_extent;
+  }
+  return IntImm(DataType::Int(32), 1);
+}
+
 class TileOpMbarPhaseAnnotator : public StmtExprMutator {
 public:
   static Stmt Annotate(const Stmt &stmt, PrimExpr phase_expr) {
@@ -1376,6 +1496,9 @@ private:
     bool has_simt_producer = false;
     bool has_cp_async_producer = false;
     int num_producer_groups = 0;
+    auto layout_annotated_buffers =
+        LayoutAnnotatedBufferCollector::Collect(orig_block);
+    std::vector<ProducerGroupArrivalDomain> producer_group_arrival_domains;
     for (auto k : kinds) {
       if (k == TileStmtKind::kTmaProducer)
         ++num_producer_groups;
@@ -1384,6 +1507,17 @@ private:
       if (k == TileStmtKind::kCpAsyncProducer)
         has_cp_async_producer = true;
     }
+    producer_group_arrival_domains.reserve(num_producer_groups);
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      if (kinds[i] != TileStmtKind::kTmaProducer) {
+        continue;
+      }
+      producer_group_arrival_domains.push_back(InferTmaProducerArrivalDomain(
+          flat_stmts[i], target_, has_simt_producer, has_cp_async_producer,
+          layout_annotated_buffers));
+    }
+    ICHECK_EQ(static_cast<int>(producer_group_arrival_domains.size()),
+              num_producer_groups);
 
     // --- Barrier allocation ---
     // Layout: [fwd_0..fwd_{G*S-1}] [bp_0..bp_{G*S-1}]
@@ -1492,6 +1626,14 @@ private:
     bool can_merge_tma_barriers = (num_producer_groups > 1) &&
                                   !has_simt_producer && !has_cp_async_producer;
     if (can_merge_tma_barriers) {
+      for (auto domain : producer_group_arrival_domains) {
+        if (UsesProducerThreadArrival(domain)) {
+          can_merge_tma_barriers = false;
+          break;
+        }
+      }
+    }
+    if (can_merge_tma_barriers) {
       for (int g = 1; g < num_producer_groups; ++g) {
         if (wait_insert_pos[g] != wait_insert_pos[0] ||
             arrive_insert_pos[g] != arrive_insert_pos[0]) {
@@ -1564,20 +1706,22 @@ private:
     }
 
     // --- Compute arrive_counts (after producer_extent is finalized) ---
-    // Forward arrive_count:
-    //   - Pure TMA (possibly merged): 1 (TMA completion)
-    //   - MUSA mixed TMA + cp.async: 1. The producer waits for cp.async before
-    //     issuing TMA, so the TMA completion is the single consumer-visible
-    //     arrival for the whole producer stage.
-    //   - Other mixed paths: producer_extent (all producer threads)
-    PrimExpr fwd_arrive_count =
-        (TargetIsMusa(target_) || can_merge_tma_barriers ||
-         (!has_simt_producer && !has_cp_async_producer))
-            ? IntImm(DataType::Int(32), 1)
-            : producer_extent;
     Array<PrimExpr> arrive_counts;
-    for (int i = 0; i < num_fwd; ++i) {
-      arrive_counts.push_back(fwd_arrive_count);
+    if (can_merge_tma_barriers) {
+      for (int i = 0; i < num_fwd; ++i) {
+        arrive_counts.push_back(IntImm(DataType::Int(32), 1));
+      }
+    } else {
+      for (int g = 0; g < num_producer_groups; ++g) {
+        // Forward arrive_count:
+        //   - TmaCompletion: one hardware TMA completion releases the stage.
+        //   - ProducerThreads: producer threads release the stage explicitly.
+        PrimExpr fwd_arrive_count = ForwardArriveCount(
+            producer_group_arrival_domains[g], producer_extent);
+        for (int s = 0; s < num_stages; ++s) {
+          arrive_counts.push_back(fwd_arrive_count);
+        }
+      }
     }
     for (int i = 0; i < num_bp; ++i) {
       arrive_counts.push_back(consumer_extent);

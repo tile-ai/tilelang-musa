@@ -21,12 +21,37 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     total_copy_bytes *= range->extent;
   }
   total_copy_bytes = analyzer->Simplify(total_copy_bytes);
+  auto lower_barriered_normal_fallback = [&]() -> Stmt {
+    bool needs_external_arrive =
+        TargetIsMusa(T.target) && is_load && GetIsTmaCopy() &&
+        annotations.Get("barrier").has_value();
+    if (!needs_external_arrive) {
+      return LowerNormalCopy(T, analyzer);
+    }
+
+    auto fallback_op = tvm::ffi::make_object<CopyNode>(*this);
+    auto fallback_annotations = fallback_op->annotations;
+    // The fallback must be complete before releasing the WS mbarrier. Avoid
+    // re-injecting a bare force_async_copy here because MUSA lacks a
+    // cp.async-mbarrier coupling instruction.
+    fallback_annotations.erase("force_async_copy");
+    fallback_annotations.erase("is_async_copy");
+    fallback_annotations.erase("force_cp_async");
+    fallback_annotations.erase(attr::kAsyncCopyNoImplicitCommitWait);
+    fallback_op->annotations = fallback_annotations;
+
+    Stmt copy = fallback_op->LowerNormalCopy(T, analyzer);
+    Stmt arrive =
+        Evaluate(Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
+                      {GetTmaBarrier()}));
+    return SeqStmt({copy, arrive});
+  };
   // TMA bulk copy cannot support a non-swizzled global layout, will be fallback
   // to normal copy
   if (T.layout_map.count(global_tensor)) {
     LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
                     "layout, fallback to normal copy.";
-    return LowerNormalCopy(T, analyzer);
+    return lower_barriered_normal_fallback();
   }
 
   // linear layout must be computed before remapping
@@ -114,7 +139,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       if (stride->value % 16 != 0 || stride->value >= (1ULL << 40)) {
         LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
                      << desc.global_stride[i] << ", fallback to normal copy.";
-        return LowerNormalCopy(T, analyzer);
+        return lower_barriered_normal_fallback();
       }
     }
   }
@@ -196,7 +221,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       LOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
                    << "dimension " << shared_layout->InputDim()
                    << ", fallback to normal copy.";
-      return LowerNormalCopy(T, analyzer);
+      return lower_barriered_normal_fallback();
     }
     const int ndim = static_cast<int>(shared_layout->InputDim());
     auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
@@ -219,12 +244,12 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       LOG(WARNING) << "Bulk copy cannot support a padded layout for src: "
                    << src->name << ", dst: " << dst->name
                    << ", fallback to normal copy";
-      return LowerNormalCopy(T, analyzer);
+      return lower_barriered_normal_fallback();
     } else {
       LOG(WARNING) << "Came across unsupported swizzle layout for src: "
                    << src->name << ", dst: " << dst->name
                    << ", fallback to normal copy";
-      return LowerNormalCopy(T, analyzer);
+      return lower_barriered_normal_fallback();
     }
   }
 
@@ -330,7 +355,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     LOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
                  << " can only be a constant integer for TMA bulk copy, "
                     "fallback to normal copy";
-    return LowerNormalCopy(T, analyzer);
+    return lower_barriered_normal_fallback();
   }
   int instruction_dim = *inner_box_dim;
   if (!TargetIsMusa(T.target)) {
@@ -370,7 +395,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
         LOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
                         "with inner_box_dim_ > "
                      << check.max_dim << ", will be fallback to normal copy";
-        return LowerNormalCopy(T, analyzer);
+        return lower_barriered_normal_fallback();
       }
     }
   }
