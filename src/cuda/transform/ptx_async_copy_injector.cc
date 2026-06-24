@@ -88,7 +88,6 @@ public:
     }
     return StmtMutator::VisitStmt_(op);
   }
-
   Stmt VisitStmt_(const ForNode *op) final {
     // Track nested vectorized loop extents so we can decide whether an
     // element-wise copy has a legal final cp.async width after later loop
@@ -357,7 +356,7 @@ public:
 
 private:
   bool UseExplicitAsyncSemantics() const {
-    return async_without_async_commit_wait_ || explicit_async_scope_depth_ > 0;
+    return async_without_async_commit_wait_;
   }
 
   // A copy candidate represented after flattening source/destination indexing.
@@ -960,6 +959,12 @@ InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
                                 sync_inside_conditionals);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
+}
+
+PTXAsyncCopyInjectResult
+InjectPTXAsyncCopy(const Stmt &body, bool async_without_async_commit_wait) {
+  return InjectPTXAsyncCopy(body, /*enable_auto_async_copy=*/true,
+                            async_without_async_commit_wait);
 }
 } // namespace tl
 } // namespace tvm

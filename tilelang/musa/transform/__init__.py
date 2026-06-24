@@ -23,6 +23,11 @@ def LowerLDGSTG():
     return _ffi_api.LowerLDGSTG()  # type: ignore
 
 
+def LowerAsyncCopy():
+    """Lower MUSA global-to-shared copies into async-copy intrinsics."""
+    return _ffi_api.LowerMUSAAsyncCopy()  # type: ignore
+
+
 def LowerSharedBarrier():
     """Lower shared barriers using MUSA barrier semantics."""
     return _ffi_api.LowerSharedBarrier()  # type: ignore
@@ -55,6 +60,7 @@ __all__ = [
     "FuseMBarrierArriveExpectTx",
     "InjectFenceProxy",
     "LowerLDGSTG",
+    "LowerAsyncCopy",
     "LowerSharedBarrier",
     "LowerSharedTmem",
     "LowerPHIntrin",

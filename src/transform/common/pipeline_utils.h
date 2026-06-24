@@ -26,9 +26,6 @@ using namespace tirx;
 // Pipeline annotation attribute keys
 // ---------------------------------------------------------------------------
 
-/*! Marks the enclosing scope with the pipeline stage count. */
-static constexpr const char *kPipelineContextNumStages =
-    "tl.pipeline_context_num_stages";
 /*! Multi-version buffer: stage count for buffer expansion. */
 static constexpr const char *kPipelineMVBContextNumStages =
     "tl.pipeline_mvb_num_stages";
@@ -38,6 +35,7 @@ static constexpr const char *kPipelineMVBStageExpr =
 /*! Multi-version buffer: per-statement parity expression. */
 static constexpr const char *kPipelineMVBParityExpr =
     "tl.pipeline_mvb_parity_expr";
+
 /*! Per-statement TMA copy flag (1 = TMA eligible, 0 = not). */
 static constexpr const char *kPipelineTmaCopies =
     "software_pipeline_tma_copies";

@@ -14,13 +14,18 @@ struct PTXAsyncCopyInjectResult {
  *
  * This is the statement-level entrypoint used by other transforms to apply the
  * same rewrite as CUDA PTX async-copy passes, but scoped to a region (e.g.,
- * a lowered parallel loop) rather than the whole PrimFunc.
+ * a lowered parallel loop) rather than the whole PrimFunc. Callers decide
+ * whether a region should use async-copy lowering before invoking this helper.
  */
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const tvm::tirx::Stmt &body, bool enable_auto_async_copy,
-                   bool async_without_async_commit_wait = false,
+                   bool async_without_async_commit_wait,
                    bool disable_force_async_wait = false,
                    bool sync_inside_conditionals = false);
+
+PTXAsyncCopyInjectResult
+InjectPTXAsyncCopy(const tvm::tirx::Stmt &body,
+                   bool async_without_async_commit_wait = false);
 
 } // namespace tl
 } // namespace tvm

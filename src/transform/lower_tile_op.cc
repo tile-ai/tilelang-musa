@@ -27,6 +27,7 @@
 #include "../op/utils.h"
 #include "cpu/target_utils.h"
 #include "cuda/target_utils.h"
+#include "backend/common/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -1647,9 +1648,6 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == kPipelineContextNumStages) {
-      return VisitStmt(op->body);
-    }
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
@@ -1935,17 +1933,31 @@ private:
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
     // `tir.ptx_cp_async`.
-    if (TargetCudaHasAsyncCopy(target_)) {
+    if ((TargetIsCuda(target_) || TargetIsMusa(target_)) &&
+        TargetHasAsyncCopy(target_)) {
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
-      bool enable_auto_async_copy =
+      bool auto_async_copy_enabled =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-      bool should_enable_async_copy =
+      bool should_inject_async_copy =
           parallel_prefer_async ||
-          (enable_auto_async_copy && parallel_async_without_async_commit_wait);
-      auto inject_result =
-          InjectPTXAsyncCopy(lowered, should_enable_async_copy,
-                             parallel_async_without_async_commit_wait);
-      lowered = inject_result.stmt;
+          (auto_async_copy_enabled && parallel_async_without_async_commit_wait);
+      if (should_inject_async_copy) {
+        PTXAsyncCopyInjectResult inject_result;
+        if (TargetIsMusa(target_)) {
+          bool disable_thread_storage_sync =
+              ctx->GetConfig<Bool>(kDisableThreadStorageSync, Bool(false))
+                  .value();
+          inject_result = InjectPTXAsyncCopy(
+              lowered, /*enable_auto_async_copy=*/true,
+              parallel_async_without_async_commit_wait,
+              disable_thread_storage_sync,
+              /*sync_inside_conditionals=*/true);
+        } else {
+          inject_result = InjectPTXAsyncCopy(
+              lowered, parallel_async_without_async_commit_wait);
+        }
+        lowered = inject_result.stmt;
+      }
     }
     return lowered;
   }

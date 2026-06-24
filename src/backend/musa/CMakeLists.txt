@@ -58,6 +58,7 @@ file(GLOB TILE_LANG_MUSA_SRCS
   src/backend/musa/codegen/codegen_musa.cc
   src/backend/musa/codegen/rt_mod_musa.cc
   src/backend/musa/op/*.cc
+  src/backend/musa/transform/*.cc
 )
 
 list(REMOVE_ITEM TILE_LANG_MUSA_SRCS

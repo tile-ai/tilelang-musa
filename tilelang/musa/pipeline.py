@@ -109,7 +109,7 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     if mcc.is_ph1(target):
         mod = tilelang.transform.UnifiedBarrier()(mod)
-    mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
+    mod = musa_transform.LowerAsyncCopy()(mod)
     mod = tilelang.transform.MergeAsyncCopy()(mod)
     mod = tilelang.transform.LowerAccessPtr()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
