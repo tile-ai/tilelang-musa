@@ -91,13 +91,11 @@ TL_DEVICE uint32_t elect_one_sync() { return (threadIdx.x % 32) == 0; }
 TL_DEVICE uint32_t elect_one_sync() { return (threadIdx.x % 128) == 0; }
 #endif
 
-/// Returns a warp-uniform value indicating the canonical warp index of the
-/// calling threads. Threads within the warp must be converged.
-TL_DEVICE
-int canonical_warp_idx_sync() {
+/// Returns the canonical warp index of the calling thread.
+TL_DEVICE int canonical_warp_idx() {
 #if defined(__MUSA_ARCH__)
 #if (__MUSA_ARCH__ >= 310)
-  return __shfl_sync(0xffffffff, threadIdx.x / NumThreadsPerWarp, 0);
+  return threadIdx.x / NumThreadsPerWarp;
 #else
   return threadIdx.x / NumThreadsPerWarpBeforeMP31;
 #endif // #if (__MUSA_ARCH__ >= 310)
@@ -113,20 +111,24 @@ int canonical_warp_idx_sync() {
 template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
   if constexpr (thread_extent == 0) {
     // Elect exactly one thread in the whole block (warp-0 leader).
-    return canonical_warp_idx_sync() == 0 && elect_one_sync();
+    return elect_one_sync() && canonical_warp_idx() == 0;
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 310)
+  } else if constexpr (thread_extent == 32) {
+    return elect_one_sync();
+#else
+  } else if constexpr (thread_extent == 128) {
+    return elect_one_sync();
+#endif
   } else {
     // Elect one representative per logical thread group.
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 310)
     constexpr int kWarpsPerGroup = (thread_extent + 31) / 32;
-    return __shfl_sync(0xffffffff, (threadIdx.x / 32) % kWarpsPerGroup, 0) ==
-               0 &&
-           elect_one_sync();
 #else
     constexpr int kWarpsPerGroup = (thread_extent + 127) / 128;
-    return __shfl_sync(0xffffffff, (threadIdx.x / 128) % kWarpsPerGroup, 0) ==
-               0 &&
-           elect_one_sync();
 #endif
+    static_assert(kWarpsPerGroup > 0);
+    return elect_one_sync() &&
+           canonical_warp_idx() % kWarpsPerGroup == 0;
   }
 }
 
