@@ -463,6 +463,11 @@ def LowerDeviceStorageAccessInfo():
     return _ffi_api.LowerDeviceStorageAccessInfo()  # type: ignore
 
 
+def ThreadRangeConstProp():
+    """Constant propagation for simple threadIdx range guarded expressions."""
+    return _ffi_api.ThreadRangeConstProp()  # type: ignore
+
+
 def ConfigIndexBitwidth():
     """Config index bitwidth.
 

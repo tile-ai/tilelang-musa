@@ -226,6 +226,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
+    if target.kind.name == "musa":
+        device_mod = tilelang.transform.ThreadRangeConstProp()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
@@ -249,6 +251,8 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
+    if target.kind.name == "musa":
+        device_mod = tilelang.transform.ThreadRangeConstProp()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
