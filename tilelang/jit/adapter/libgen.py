@@ -11,10 +11,10 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import (
+    format_target_code_for_gencode,
     get_cuda_library_dirs,
     get_nvcc_compiler,
-    get_target_arch,
-    get_target_compute_version,
+    get_target_arch_and_code,
 )
 from tilelang.contrib.mcc import get_mcc_compiler, get_musa_arch, get_musa_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
@@ -78,7 +78,6 @@ class LibraryGenerator:
             from tilelang.env import CUTLASS_INCLUDE_DIR
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
-            target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
 
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
@@ -86,6 +85,11 @@ class LibraryGenerator:
                 ptxas_usage_level = int(ptxas_usage_level)
             verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
             cuda_library_flags = [f"-L{lib_dir}" for lib_dir in get_cuda_library_dirs()]
+            target_arch, target_code = get_target_arch_and_code(target)
+            arch_flags = [f"-arch=sm_{target_arch}"]
+            gencode_code = format_target_code_for_gencode(target_code)
+            if gencode_code is not None:
+                arch_flags = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
 
             command = [
                 get_nvcc_compiler(),
@@ -100,8 +104,7 @@ class LibraryGenerator:
                 src.name,
                 *cuda_library_flags,
                 "-lcuda",
-                "-gencode",
-                f"arch=compute_{target_arch},code=sm_{target_arch}",
+                *arch_flags,
             ]
             if enable_fast_math:
                 command += ["--use_fast_math"]
