@@ -16,8 +16,8 @@ tilelang.testing.set_random_seed()
 def _make_input(M, N, dtype):
     torch_dtype = getattr(torch, dtype)
     if torch_dtype in (torch.int32, torch.int64):
-        return torch.randint(-100, 100, (M, N), dtype=torch_dtype).cuda()
-    return torch.randn(M, N, dtype=torch_dtype).cuda()
+        return torch.randint(-100, 100, (M, N), dtype=torch_dtype, device="musa")
+    return torch.randn(M, N, dtype=torch_dtype, device="musa")
 
 
 def _ref(A, op):
@@ -96,7 +96,7 @@ REDUCE_CASES = [
 def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
     import re
 
-    @tilelang.jit(out_idx=-1)
+    @tilelang.jit(out_idx=-1, target="musa")
     def kernel(M, N, dtype, op, src_scope, dst_scope, threads, batch):
         @T.prim_func
         def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M,), dtype)):
@@ -151,7 +151,7 @@ REDUCE_CLEAR_CASES = [
     ids=[f"{op}-{dtype}-{M}x{N}-{src_scope[0]}2{dst_scope[0]}" for op, dtype, M, N, src_scope, dst_scope in REDUCE_CLEAR_CASES],
 )
 def test_reduce_clear(op, dtype, M, N, src_scope, dst_scope):
-    @tilelang.jit(out_idx=-1)
+    @tilelang.jit(out_idx=-1, target="musa")
     def kernel(M, N, dtype, op, src_scope, dst_scope):
         @T.prim_func
         def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M,), dtype)):
@@ -176,7 +176,7 @@ def test_reduce_clear(op, dtype, M, N, src_scope, dst_scope):
         return main
 
     torch_dtype = getattr(torch, dtype)
-    A = torch.randn(M, N, dtype=torch_dtype).cuda()
+    A = torch.randn(M, N, dtype=torch_dtype, device="musa")
     B = kernel(M, N, dtype, op, src_scope, dst_scope)(A)
     if op == "sum":
         ref = A.sum(dim=1) + 1
@@ -240,6 +240,7 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
     src = tl.compile(
         _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
         out_idx=-1,
+        target="musa",
         pass_configs=_COMPILE_FLAGS,
     ).get_kernel_source()
 
@@ -258,10 +259,11 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
 )
 def test_finalize_reducer_correctness(op, dtype, block_M, block_N, batch):
     """Numerical correctness (batch=1 scalar path; batch>1 blocked by fragment layout bug)."""
-    A = torch.randn(block_M, block_N, dtype=getattr(torch, dtype)).cuda()
+    A = torch.randn(block_M, block_N, dtype=getattr(torch, dtype), device="musa")
     B = tl.compile(
         _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
         out_idx=-1,
+        target="musa",
         pass_configs=_COMPILE_FLAGS,
     )(A)
     torch.testing.assert_close(B, _ref(A, op), atol=1e-2, rtol=1e-2)
@@ -304,7 +306,7 @@ def test_finalize_reducer_invalid_batch(batch, exc_type, match):
     with pytest.raises(exc_type, match=match):
         # batch<1 raises at prim_func definition time; others at compile time
         k = make_kernel()
-        tl.compile(k, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+        tl.compile(k, out_idx=-1, target="musa", pass_configs=_COMPILE_FLAGS)
 
 
 if __name__ == "__main__":

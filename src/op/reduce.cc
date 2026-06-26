@@ -267,10 +267,10 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  */
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16()) &&
-      !TargetIsCuda(T.target)) {
+      !TargetIsCuda(T.target) && !TargetIsMusa(T.target)) {
     LOG(FATAL) << "ReduceOp: nan_propagate=True for fp16/bf16 max/min/absmax "
-                  "is only supported on CUDA targets (requires "
-                  "__hmax_nan/__hmin_nan intrinsics). Target was: "
+                  "is only supported on CUDA/MUSA targets (requires "
+                  "__hmax_nan/__hmin_nan-compatible intrinsics). Target was: "
                << T.target->str();
   }
   auto get_buffer = [&](const Buffer &buf) {
