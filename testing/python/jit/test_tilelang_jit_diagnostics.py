@@ -210,6 +210,28 @@ def test_cuda_compile_callback_uses_fatbin_for_multiple_target_code(monkeypatch)
     assert captured["arch"] == ["-gencode", "arch=compute_100f,code=[sm_100a,sm_103a]"]
 
 
+def test_musa_compile_callback_honors_tilelang_verbose(monkeypatch):
+    import importlib
+
+    from tilelang.env import env
+
+    lower = importlib.import_module("tilelang.engine.lower")
+    captured = {}
+
+    def fake_compile_musa(code, target_format, arch, options=None, path_target=None, verbose=False):
+        captured["verbose"] = verbose
+        return bytearray(b"fake-musa-binary")
+
+    monkeypatch.setattr(env, "TILELANG_DEFAULT_VERBOSE", "1")
+    monkeypatch.setattr(lower.mcc, "get_musa_compute_version", lambda target=None: "3.1")
+    monkeypatch.setattr(lower.mcc, "get_musa_arch", lambda compute_version: "31")
+    monkeypatch.setattr(lower.mcc, "compile_musa", fake_compile_musa)
+
+    lower.tilelang_callback_musa_compile("__global__ void kernel() {}", object())
+
+    assert captured["verbose"] is True
+
+
 @pytest.mark.skipif(not _HAS_CUDA_PIPELINE_FFI, reason="CUDA pipeline is not built in a MUSA-only wheel")
 def test_jit_compile_reports_timeout_for_hanging_nvcc(monkeypatch, tmp_path, caplog, capture_tilelang_logs):
     import tilelang

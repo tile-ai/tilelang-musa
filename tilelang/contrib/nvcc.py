@@ -18,6 +18,7 @@ from tvm.target import Target
 
 from tvm.base import py_str
 from tvm.contrib import utils
+from tilelang import logger
 from .cc import get_cplus_compiler
 
 
@@ -189,7 +190,8 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         print(f"compile_cuda command: {' '.join(cmd)}")
 
     if verbose:
-        print(py_str(out))
+        logger.info("NVCC compilation command: %s", " ".join(cmd))
+        logger.info("PTXAS verbose output:\n%s", py_str(out))
 
     if proc.returncode != 0:
         msg = f"{code}\nCompilation error:\n{py_str(out)}\nCommand: {' '.join(cmd)}\n"
