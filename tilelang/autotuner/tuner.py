@@ -161,6 +161,39 @@ class AutoTuner:
     def cache_dir(self) -> Path:
         return self._get_cache_dir()
 
+    def _target_kind(self) -> str:
+        target = self.compile_args.target
+        return target.kind.name if isinstance(target, Target) else str(target)
+
+    @staticmethod
+    def _is_torch_device_available(device_kind: str) -> bool:
+        if device_kind == "cuda":
+            return torch.cuda.is_available()
+        if device_kind == "musa" and hasattr(torch, "musa"):
+            return torch.musa.is_available()
+        return False
+
+    @staticmethod
+    def _current_torch_device(device_kind: str) -> int:
+        if device_kind == "cuda" and torch.cuda.is_available():
+            return torch.cuda.current_device()
+        if device_kind == "musa" and hasattr(torch, "musa") and torch.musa.is_available():
+            return torch.musa.current_device()
+        return 0
+
+    @staticmethod
+    def _set_torch_device(device_kind: str, device: int) -> None:
+        if device_kind == "cuda":
+            torch.cuda.set_device(device)
+        elif device_kind == "musa" and hasattr(torch, "musa"):
+            torch.musa.set_device(device)
+
+    def _torch_device_kind(self) -> str:
+        target_kind = self._target_kind()
+        if target_kind in ("cuda", "musa"):
+            return target_kind
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
         """Create an AutoTuner instance from a kernel function.
@@ -177,7 +210,7 @@ class AutoTuner:
     def set_compile_args(
         self,
         out_idx: list[int] | int | None = None,
-        target: Literal["auto", "cuda", "hip", "metal"] | None = None,
+        target: Literal["auto", "cuda", "musa", "hip", "metal"] | None = None,
         execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
         target_host: str | Target | None = None,
         verbose: bool | None = None,
@@ -272,17 +305,18 @@ class AutoTuner:
                 logger.warning("`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context.")
             frozen_inputs = list(captured_inputs)
             cached_tensors_by_device = {}
+            device_kind = self._torch_device_kind()
 
             def supply_prog(device, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
                 if not isinstance(device, (int, str, torch.device)):
-                    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+                    device = self._current_torch_device(device_kind) if self._is_torch_device_available(device_kind) else "cpu"
                 if device not in _cached_tensors_by_device:
                     if isinstance(device, torch.device):
                         target_device = device
                     elif isinstance(device, str):
                         target_device = torch.device(device)
                     else:
-                        target_device = torch.device(f"cuda:{device}") if torch.cuda.is_available() else torch.device("cpu")
+                        target_device = torch.device(f"{device_kind}:{device}") if self._is_torch_device_available(device_kind) else torch.device("cpu")
                     _cached_tensors_by_device[device] = [
                         tensor.to(device=target_device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
                     ]
@@ -427,26 +461,27 @@ class AutoTuner:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures: list[concurrent.futures.Future] = []
         future_to_unit: dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]] = {}
+        device_kind = self._torch_device_kind()
 
-        def cuda_device_wrapper(func: Callable[..., Any], device: int):
+        def device_wrapper(func: Callable[..., Any], device: int):
             def inner(**config_arg):
-                torch.cuda.set_device(device)
+                self._set_torch_device(device_kind, device)
                 return func(**config_arg)
 
             return inner
 
         def get_compile_func():
             compile_impl = compile_func
-            if torch.cuda.is_available():
-                device = torch.cuda.current_device()
-                compile_impl = cuda_device_wrapper(compile_func, device)
+            if self._is_torch_device_available(device_kind):
+                device = self._current_torch_device(device_kind)
+                compile_impl = device_wrapper(compile_func, device)
             return compile_impl
 
         def get_elaborate_func():
             elaborate_impl = elaborate_func
-            if torch.cuda.is_available():
-                device = torch.cuda.current_device()
-                elaborate_impl = cuda_device_wrapper(elaborate_func, device)
+            if self._is_torch_device_available(device_kind):
+                device = self._current_torch_device(device_kind)
+                elaborate_impl = device_wrapper(elaborate_func, device)
             return elaborate_impl
 
         def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
@@ -495,11 +530,11 @@ class AutoTuner:
         timeout: int,
         worker_state: _BenchmarkWorkerState,
     ) -> None:
-        if target_kind == "cuda":
+        if target_kind in ("cuda", "musa"):
             try:
-                torch.cuda.set_device(worker_device)
+                self._set_torch_device(target_kind, worker_device)
             except Exception:
-                logger.warning("Failed to bind benchmark worker to cuda:%s", worker_device)
+                logger.warning("Failed to bind benchmark worker to %s:%s", target_kind, worker_device)
                 logger.debug("Error: %s", traceback.format_exc())
 
         start_event.wait()
@@ -679,7 +714,7 @@ class AutoTuner:
         benchmark_devices: list[int] | None,
         target_kind: str,
     ) -> tuple[bool, list[int]]:
-        current_device = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        current_device = self._current_torch_device(target_kind)
         single_device = [current_device]
 
         if not benchmark_multi_gpu:
@@ -687,7 +722,8 @@ class AutoTuner:
 
         if target_kind != "cuda":
             logger.warning(
-                "Multi-GPU benchmark requested but target is '%s'. Falling back to single-device benchmark on cuda:%s.",
+                "Multi-GPU benchmark requested but target is '%s'. Falling back to single-device benchmark on %s:%s.",
+                target_kind,
                 target_kind,
                 current_device,
             )
@@ -731,7 +767,8 @@ class AutoTuner:
 
         if not valid_devices:
             logger.warning(
-                "No valid benchmark devices resolved for multi-GPU benchmark. Falling back to single-device benchmark on cuda:%s.",
+                "No valid benchmark devices resolved for multi-GPU benchmark. Falling back to single-device benchmark on %s:%s.",
+                target_kind,
                 current_device,
             )
             return False, single_device
