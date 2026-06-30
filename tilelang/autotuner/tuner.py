@@ -192,7 +192,11 @@ class AutoTuner:
         target_kind = self._target_kind()
         if target_kind in ("cuda", "musa"):
             return target_kind
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch, "musa") and torch.musa.is_available():
+            return "musa"
+        return "cpu"
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
