@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from .gemm_base import GemmBase
-from .inst import GemmInst
 from tilelang.layout import Layout, make_sqmma_swizzled_layout, make_ph_sqmma_fragment_c
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import _ffi_api
@@ -11,6 +10,9 @@ from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
+
+
+GEMM_INST_SQMMA = "musa.sqmma"
 
 
 class GemmSQMMA(GemmBase):
@@ -72,7 +74,7 @@ class GemmSQMMA(GemmBase):
         if not self.is_gemm_ss():
             raise ValueError(f"Unsupported gemm combination for sqmma, A: {self.A.scope()}, B: {self.B.scope()}")
 
-        warp_m, warp_n = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.SQMMA)
+        warp_m, warp_n = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_SQMMA)
         sqmma_inst = self._select_sqmma_inst_shape(int(thread_nums), target)
 
         c_bits = int(tvm.DataType(self.C.dtype).bits)
@@ -132,7 +134,12 @@ class GemmSQMMA(GemmBase):
             self.B: b_layout,
         }
 
-    def _build_op_instance(self, warp_m: int, warp_n: int) -> str:
+    def _build_op_instance(
+        self,
+        warp_m: int,
+        warp_n: int,
+        inst_shape: tuple[int, int, int],
+    ) -> str:
         op_name = ""
         if is_fragment(self.A):
             if not self.trans_A:
@@ -158,7 +165,7 @@ class GemmSQMMA(GemmBase):
             f"{int(bool(self.trans_A))}, {int(bool(self.trans_B))}, {int(clear_accum_bool)}, "
             f"{stride_a}, {stride_b}, "
             f"{offset_a}, {offset_b}, "
-            "true"
+            f"true, {inst_shape[0]}, {inst_shape[1]}, {inst_shape[2]}"
         )
 
         if wg_wait != 0:
@@ -166,11 +173,19 @@ class GemmSQMMA(GemmBase):
         op_instance += ">"
         return op_instance
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
-        del layout_map, thread_var
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
+        del layout_map, thread_var, mbar_phase_expr
         block_size = int(thread_bounds.extent)
-        warp_m, warp_n = self.policy.compute_warp_partition(self.M, self.N, block_size, target, GemmInst.SQMMA)
-        op_instance = self._build_op_instance(warp_m, warp_n)
+        warp_m, warp_n = self.policy.compute_warp_partition(self.M, self.N, block_size, target, GEMM_INST_SQMMA)
+        inst_shape = self._select_sqmma_inst_shape(block_size, target)
+        op_instance = self._build_op_instance(warp_m, warp_n, inst_shape)
 
         if not is_fragment(self.C):
             raise ValueError("GemmSQMMA only supports C in local.fragment scope")
@@ -192,6 +207,7 @@ class GemmSQMMA(GemmBase):
                     A_ptr,
                     B_ptr,
                     C_ptr,
+                    thread_bounds.min,
                 )
             )
 

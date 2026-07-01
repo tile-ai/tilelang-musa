@@ -19,6 +19,9 @@
  *   - "tcgen5mma"  : Blackwell TCGEN5 MMA
  *   - "mma"        : Volta/Ampere tensor-core MMA
  *   - "mfma"       : AMD CDNA matrix fused multiply-add
+ *   - "sqmma"      : MUSA PH1 SQMMA
+ *   - "wmma"       : MUSA PH1 WMMA
+ *   - "fma"        : MUSA scalar FMA
  *   - "scalar"     : scalar fallback
  *
  * Because this pass runs before layout inference it intentionally uses only
@@ -84,21 +87,7 @@ std::string ClassifyCopy(const CopyNode *copy, Target target, bool in_pipeline,
 // ---------------------------------------------------------------------------
 
 std::string ClassifyGemm(const GemmNode *gemm, int block_size, Target target) {
-  GemmInst inst = gemm->getGemmInst(block_size, target);
-  switch (inst) {
-  case GemmInst::kWGMMA:
-    return "wgmma";
-  case GemmInst::kTCGEN5MMA:
-    return "tcgen5mma";
-  case GemmInst::kMMA:
-    return "mma";
-  case GemmInst::kMFMA:
-    return "mfma";
-  case GemmInst::kScalar:
-    return "scalar";
-  default:
-    return "unknown";
-  }
+  return gemm->getGemmInstructionKind(block_size, target);
 }
 
 // ---------------------------------------------------------------------------

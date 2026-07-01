@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 from .gemm_base import GemmBase
-from .inst import GemmInst
 from tilelang.layout import make_gemm_fragment_c_linear, make_linear_layout
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.target import Target
@@ -9,10 +10,13 @@ from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
 
+GEMM_INST_FMA = "musa.fma"
+
+
 class GemmFMA(GemmBase):
     def infer_layout(self, target: Target, thread_nums: int):
         # Keep the warp partition query in sync with C++ GemmWarpPolicy.
-        self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.FMA)
+        self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_FMA)
 
         if not self.is_gemm_ss():
             raise ValueError(f"Unsupported gemm combination for fma, A: {self.A.scope()}, B: {self.B.scope()}")
@@ -33,7 +37,15 @@ class GemmFMA(GemmBase):
             self.B: make_linear_layout([b_stride, b_continuous]),
         }
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
+        del mbar_phase_expr
         del layout_map  # FMA lowering does not need layout remap input.
         thread_nums = thread_bounds.extent
         accum_dtype = self.accum_dtype

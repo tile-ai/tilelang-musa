@@ -117,20 +117,22 @@ TileOperator GemmSPPyNode::Clone() const {
   return GemmSPPy(op);
 }
 
-GemmInst GemmSPPyNode::GetGemmInst(int block_size, Target target) const {
+String GemmSPPyNode::GetGemmInstructionKey(int block_size,
+                                           Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
   bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
                      (num_warps % 4 == 0) && CheckWGMMA();
   if (allow_wgmma) {
-    return GemmInst::kWGMMA;
+    return kGemmInstCudaWGMMA;
   } else if (TargetIsCDNA(target)) {
-    return GemmInst::kMFMA;
+    return kGemmInstROCmMFMA;
   } else if (TargetIsCuda(target)) {
-    return GemmInst::kMMA;
+    return kGemmInstCudaMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
   }
+  return kGemmInstCudaMMA;
 }
 
 /**

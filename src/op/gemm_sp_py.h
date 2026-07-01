@@ -76,7 +76,7 @@ public:
 
 private:
   // Target GEMM instruction
-  GemmInst GetGemmInst(int block_size, Target target) const;
+  String GetGemmInstructionKey(int block_size, Target target) const;
 
   mutable bool completed_ = false;
 };

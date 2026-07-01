@@ -274,6 +274,97 @@ def make_ph_sqmma_fragment_c(
     )
 
 
+def _normalize_ph1_wmma_inst_shape(inst_shape: tuple[int, int, int] | list[int]) -> list[int]:
+    if len(inst_shape) != 3:
+        raise ValueError(f"inst_shape must be [M, N, K], got {inst_shape}")
+    return [int(inst_shape[0]), int(inst_shape[1]), int(inst_shape[2])]
+
+
+def make_ph1_wmma_fragment_c(
+    block_m: int,
+    block_n: int,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    inst_shape: tuple[int, int, int] | list[int],
+):
+    """Create the PH1 WMMA accumulator fragment layout."""
+    return _ffi_api.make_ph1_wmma_fragment_c(
+        int(block_m),
+        int(block_n),
+        int(warp_m),
+        int(warp_n),
+        int(element_size),
+        _normalize_ph1_wmma_inst_shape(inst_shape),
+    )
+
+
+def make_ph1_wmma_fragment_a(
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    transposed: bool,
+    inst_shape: tuple[int, int, int] | list[int],
+):
+    """Create the PH1 WMMA register-fragment layout for operand A."""
+    return _ffi_api.make_ph1_wmma_fragment_a(
+        int(block_m),
+        int(block_n),
+        int(block_k),
+        int(warp_m),
+        int(warp_n),
+        int(element_size),
+        bool(transposed),
+        _normalize_ph1_wmma_inst_shape(inst_shape),
+    )
+
+
+def make_ph1_wmma_fragment_b(
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    transposed: bool,
+    inst_shape: tuple[int, int, int] | list[int],
+):
+    """Create the PH1 WMMA register-fragment layout for operand B."""
+    return _ffi_api.make_ph1_wmma_fragment_b(
+        int(block_m),
+        int(block_n),
+        int(block_k),
+        int(warp_m),
+        int(warp_n),
+        int(element_size),
+        bool(transposed),
+        _normalize_ph1_wmma_inst_shape(inst_shape),
+    )
+
+
+def make_ph1_wmma_ab_layout(
+    shape: tuple[int, int] | list[int],
+    continuity: int,
+    element_size: int,
+    k_inner: bool,
+):
+    """Create the PH1 WMMA shared-memory layout for an A or B operand."""
+    if len(shape) < 2:
+        raise ValueError(f"PH1 WMMA shared layout expects at least 2 dimensions, got {shape}")
+    leading_shape = list(shape[:-2])
+    layout = _ffi_api.make_ph1_wmma_ab_layout(
+        int(shape[-2]),
+        int(shape[-1]),
+        int(continuity),
+        int(element_size),
+        bool(k_inner),
+    )
+    return layout.expand(leading_shape)
+
+
 def make_gemm_fragment_8x8():
     """
     Create a standard 8x8 GEMM fragment layout for ldmatrix/stmatrix.

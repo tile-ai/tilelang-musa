@@ -12,8 +12,10 @@
 #include <tvm/tir/utils.h>
 
 #include <algorithm>
+#include <array>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 
@@ -849,8 +851,12 @@ private:
         auto a_layout = FindLayoutForBuffer(active_layout_map, gemm->a_);
         auto b_layout = FindLayoutForBuffer(active_layout_map, gemm->b_);
         auto block_size = as_const_int(thread_bounds_vec_[i]->extent);
-        const bool allow_sqmma =
-            block_size != nullptr && gemm->AllowSQMMA(*block_size, target_);
+        std::optional<std::array<int, 3>> sqmma_inst = std::nullopt;
+        if (block_size != nullptr) {
+          sqmma_inst = gemm->getGemmInstructionShape(*block_size, target_,
+                                                     kGemmInstMusaSQMMA);
+        }
+        const bool allow_sqmma = sqmma_inst.has_value();
         const bool use_fp8_sqmma_k_major = UsePH1Fp8SqmmaKMajorHints(
             gemm->a_->dtype, gemm->b_->dtype, allow_sqmma);
         const bool a_k_major = use_fp8_sqmma_k_major ? true : !gemm->transA_;
@@ -872,7 +878,6 @@ private:
         if (b_layout.has_value()) {
           SetLayoutBoolHint(sqmma_map, b_layout.value(), Bool(true), "sqmma");
         }
-        auto sqmma_inst = gemm->SelectSQMMAInstShape(*block_size, target_);
         if (sqmma_inst.has_value()) {
           // For A transpose layout, split by instruction M dimension.
           if (a_layout.has_value() && gemm->transA_) {

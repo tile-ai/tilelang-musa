@@ -169,6 +169,7 @@ file(GLOB TILE_LANG_SRCS
   src/transform/common/*.cc
   src/op/*.cc
   src/backend/cpu/op/*.cc
+  src/backend/rocm/op/*.cc
   src/backend/cuda/op/copy_analysis.cc
   src/backend/musa/op/copy_analysis.cc
   src/backend/metal/op/*.cc

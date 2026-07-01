@@ -800,19 +800,25 @@ static VarSet CollectPH1MmaTmaUnsafeDstBuffers(const Array<Stmt> &flat_stmts,
         return;
       }
       if (const auto *gemm = tile_op.as<GemmNode>()) {
-        const bool allow_sqmma = gemm->AllowSQMMA(*block_size, target);
+        const bool allow_sqmma =
+            gemm->getGemmInstructionShape(*block_size, target,
+                                          kGemmInstMusaSQMMA)
+                .has_value();
+        const bool allow_ph1_wmma =
+            !allow_sqmma && gemm->getGemmInstructionShape(*block_size, target,
+                                                          kGemmInstMusaPH1WMMA)
+                                .has_value();
         mark_gemm_operands(gemm->a_, gemm->b_, gemm->c_, gemm->a_->dtype,
                            gemm->b_->dtype, gemm->c_->dtype, gemm->m_, gemm->n_,
                            gemm->k_, gemm->transA_, gemm->transB_, allow_sqmma,
-                           !allow_sqmma &&
-                               gemm->AllowPH1Wmma(*block_size, target));
+                           allow_ph1_wmma);
       } else if (const auto *gemm_py = tile_op.as<GemmPyNode>()) {
-        mark_gemm_operands(gemm_py->a_, gemm_py->b_, gemm_py->c_,
-                           gemm_py->a_->dtype, gemm_py->b_->dtype,
-                           gemm_py->c_->dtype, gemm_py->m_, gemm_py->n_,
-                           gemm_py->k_, gemm_py->transA_, gemm_py->transB_,
-                           gemm_py->AllowSQMMA(*block_size, target),
-                           /*allow_ph1_wmma=*/false);
+        const bool allow_sqmma = gemm_py->AllowSQMMA(*block_size, target);
+        mark_gemm_operands(
+            gemm_py->a_, gemm_py->b_, gemm_py->c_, gemm_py->a_->dtype,
+            gemm_py->b_->dtype, gemm_py->c_->dtype, gemm_py->m_, gemm_py->n_,
+            gemm_py->k_, gemm_py->transA_, gemm_py->transB_, allow_sqmma,
+            !allow_sqmma && gemm_py->AllowPH1Wmma(*block_size, target));
       }
     });
   }

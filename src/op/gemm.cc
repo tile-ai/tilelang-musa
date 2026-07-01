@@ -5,12 +5,11 @@
 
 #include "gemm.h"
 
+#include "../backend/musa/op/gemm.h"
 #include "builtin.h"
-#include <cstdlib>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/transform.h>
 #include <vector>
 
 #include "../target/utils.h"
@@ -24,29 +23,41 @@ using namespace tir;
 
 namespace {
 
-bool IsPH1SupportedFp8(DataType dtype) {
-  // PH1 MUSA FP8 tensor-core paths support E4M3, E4M3FN, and E5M2.
-  // FNUZ variants are intentionally excluded.
-  return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
-         dtype.is_float8_e5m2();
+std::vector<GemmImpl> &GemmImplRegistry() {
+  static std::vector<GemmImpl> registry;
+  return registry;
 }
 
-Layout MakeTransposedPH1SqmmaOperandLayout(int actual_rows, int actual_cols,
-                                           int logical_rows, int logical_cols,
-                                           int element_bits, bool k_inner) {
-  auto base = makeGemmABLayoutPH1(logical_rows, logical_cols, logical_cols,
-                                  element_bits, k_inner);
-  auto mapped = base->Forward({InputPlaceholder(1), InputPlaceholder(0)});
-  return Layout(Array<PrimExpr>{Integer(actual_rows), Integer(actual_cols)},
-                mapped);
-}
-
-std::string EnvString(const char *name) {
-  const char *value = std::getenv(name);
-  return value == nullptr ? std::string() : std::string(value);
+const GemmImpl &ResolveGemmImpl(Target target) {
+  const auto &registry = GemmImplRegistry();
+  const GemmImpl *matched_impl = nullptr;
+  for (const GemmImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.gemm found multiple target-specific implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.gemm requires a target-specific implementation, but no gemm "
+         "implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
 }
 
 } // namespace
+
+void RegisterGemmImpl(GemmImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.select_inst != nullptr);
+  ICHECK(impl.compute_warp_partition != nullptr);
+  ICHECK(impl.reuse_existing_shared_layout != nullptr);
+  ICHECK(impl.instruction_kind != nullptr);
+  GemmImplRegistry().push_back(impl);
+}
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -164,694 +175,30 @@ TileOperator GemmNode::Clone() const {
   return Gemm(op);
 }
 
-bool GemmNode::allowTcgen5Mma(Target target) const {
-  return TargetIsSm100(target) &&
-         ((IsSharedBuffer(a_) || a_.scope() == "shared.tmem") &&
-          IsSharedBuffer(b_) && c_.scope() == "shared.tmem") &&
-         GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype).first;
+String GemmNode::getGemmInstructionKey(int block_size, Target target) const {
+  return ResolveGemmImpl(target).select_inst(*this, block_size, target);
 }
 
-bool GemmNode::allowWgmma(int block_size, Target target) const {
-  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-
-  int warp_size = TargetGetWarpSize(target);
-  int num_warps = block_size / warp_size;
-  return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
-         TargetIsHopper(target) && (this->m_ >= 64) && (num_warps % 4 == 0) &&
-         checkWgmma();
+String GemmNode::getGemmInstructionKind(int block_size, Target target) const {
+  const GemmImpl &impl = ResolveGemmImpl(target);
+  return impl.instruction_kind(impl.select_inst(*this, block_size, target));
 }
 
 std::optional<std::array<int, 3>>
-GemmNode::SelectSQMMAInstShape(int block_size, Target target) const {
-  if (!TargetIsPH1(target)) {
+GemmNode::getGemmInstructionShape(int block_size, Target target,
+                                  String gemm_inst) const {
+  const GemmImpl &impl = ResolveGemmImpl(target);
+  if (impl.select_inst_shape == nullptr) {
     return std::nullopt;
   }
-  if (a_.scope() != "shared.dyn" && a_.scope() != "shared") {
-    return std::nullopt;
-  }
-  if (b_.scope() != "shared.dyn" && b_.scope() != "shared") {
-    return std::nullopt;
-  }
-  if (c_.scope() != "local.fragment") {
-    return std::nullopt;
-  }
-  int warp_size = TargetGetWarpSize(target);
-  if (block_size % warp_size != 0) {
-    return std::nullopt;
-  }
-  int num_warps = block_size / warp_size;
-  if (num_warps % 4 != 0) {
-    return std::nullopt;
-  }
-  auto warp_parts = policy_->computeWarpPartition(m_, n_, block_size, target,
-                                                  GemmInst::kSQMMA);
-  int warp_m = warp_parts.first;
-  int warp_n = warp_parts.second;
-  if (warp_m <= 0 || warp_n <= 0) {
-    return std::nullopt;
-  }
-  if (warp_m % 4 != 0) {
-    return std::nullopt;
-  }
-  int warp_groups_m = warp_m / 4;
-  if (warp_groups_m <= 0) {
-    return std::nullopt;
-  }
-  if (m_ % (warp_m * 4) != 0) {
-    return std::nullopt;
-  }
-  if (n_ % (warp_n * 8) != 0) {
-    return std::nullopt;
-  }
-  int64_t atom_m = m_ / warp_groups_m;
-  int64_t atom_n = n_ / warp_n;
-
-  const auto &a_dtype = a_->dtype;
-  const auto &b_dtype = b_->dtype;
-  const auto &c_dtype = c_->dtype;
-  const bool major_a_is_k = !transA_;
-  const bool major_b_is_k = transB_;
-
-  enum class SqmmaTypeClass : uint8_t {
-    kInt8,
-    kUInt8,
-    kFP16,
-    kBF16,
-    kTF32,
-    kFP8
-  };
-  std::optional<SqmmaTypeClass> type_class = std::nullopt;
-
-  if (a_dtype == DataType::Float(16) && b_dtype == DataType::Float(16) &&
-      c_dtype == DataType::Float(32)) {
-    type_class = SqmmaTypeClass::kFP16;
-  } else if (a_dtype == DataType::BFloat(16) &&
-             b_dtype == DataType::BFloat(16) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = SqmmaTypeClass::kBF16;
-  } else if (a_dtype == DataType::Float(32) && b_dtype == DataType::Float(32) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = SqmmaTypeClass::kTF32;
-  } else if (IsPH1SupportedFp8(a_dtype) && IsPH1SupportedFp8(b_dtype) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = SqmmaTypeClass::kFP8;
-  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Int(8) &&
-             c_dtype == DataType::Int(32)) {
-    type_class = SqmmaTypeClass::kInt8;
-  } else if (a_dtype == DataType::UInt(8) && b_dtype == DataType::UInt(8) &&
-             c_dtype == DataType::UInt(32)) {
-    type_class = SqmmaTypeClass::kUInt8;
-  } else {
-    return std::nullopt;
-  }
-
-  if ((*type_class == SqmmaTypeClass::kFP16 ||
-       *type_class == SqmmaTypeClass::kBF16) &&
-      transA_ && warp_groups_m > 1) {
-    return std::nullopt;
-  }
-  // PH1 TF32 SQMMA is reliable for the basic tile range covered by the
-  // dedicated fp32 SQMMA tests; larger multi-inst tiles fall back to WMMA.
-  if (*type_class == SqmmaTypeClass::kTF32 &&
-      (m_ > 128 || n_ > 128 || k_ > 32)) {
-    return std::nullopt;
-  }
-
-  auto select_inst_n = [](int inst_m, SqmmaTypeClass tc) -> std::vector<int> {
-    if (tc == SqmmaTypeClass::kTF32) {
-      if (inst_m == 128)
-        return {128, 64};
-      if (inst_m == 64)
-        return {64, 32, 16};
-      if (inst_m == 32)
-        return {64, 32};
-      if (inst_m == 16)
-        return {64};
-      return {};
-    }
-    if (inst_m == 128)
-      return {128, 64, 32};
-    if (inst_m == 64)
-      return {128, 64, 32, 16};
-    if (inst_m == 32)
-      return {128, 64, 32};
-    if (inst_m == 16)
-      return {64};
-    return {};
-  };
-
-  std::vector<int> inst_k_candidates;
-  if (*type_class == SqmmaTypeClass::kFP16 ||
-      *type_class == SqmmaTypeClass::kBF16) {
-    inst_k_candidates = {64, 32, 16};
-  } else if (*type_class == SqmmaTypeClass::kTF32) {
-    inst_k_candidates = {32, 16, 8};
-  } else {
-    inst_k_candidates = {128, 64, 32};
-  }
-
-  for (int inst_m : {128, 64, 32, 16}) {
-    if (atom_m % inst_m != 0)
-      continue;
-    if (*type_class == SqmmaTypeClass::kTF32 && inst_m == 128 &&
-        (!major_a_is_k || !major_b_is_k)) {
-      continue;
-    }
-    for (int inst_n : select_inst_n(inst_m, *type_class)) {
-      if (atom_n % inst_n != 0)
-        continue;
-      for (int inst_k : inst_k_candidates) {
-        if (k_ % inst_k == 0) {
-          return std::array<int, 3>{inst_m, inst_n, inst_k};
-        }
-      }
-    }
-  }
-
-  return std::nullopt;
-}
-
-std::optional<std::array<int, 3>>
-GemmNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
-  if (!TargetIsPH1(target)) {
-    return std::nullopt;
-  }
-  const bool a_is_shared = a_.scope() == "shared.dyn" || a_.scope() == "shared";
-  const bool b_is_shared = b_.scope() == "shared.dyn" || b_.scope() == "shared";
-  const bool a_is_fragment = IsFragmentBuffer(a_);
-  const bool b_is_fragment = IsFragmentBuffer(b_);
-  if (!((a_is_shared && b_is_shared) || (a_is_fragment && b_is_fragment))) {
-    return std::nullopt;
-  }
-  if (c_.scope() != "local.fragment") {
-    return std::nullopt;
-  }
-
-  int warp_size = TargetGetWarpSize(target);
-  if (block_size % warp_size != 0) {
-    return std::nullopt;
-  }
-
-  if (m_ % 4 != 0 || n_ % 8 != 0) {
-    return std::nullopt;
-  }
-
-  auto warp_parts = policy_->computeWarpPartition(m_, n_, block_size, target,
-                                                  GemmInst::kPH1WMMA);
-  int warp_m = warp_parts.first;
-  int warp_n = warp_parts.second;
-  if (warp_m <= 0 || warp_n <= 0) {
-    return std::nullopt;
-  }
-  if (m_ % warp_m != 0 || n_ % warp_n != 0) {
-    return std::nullopt;
-  }
-
-  int warp_tile_m = m_ / warp_m;
-  int warp_tile_n = n_ / warp_n;
-
-  const auto &a_dtype = a_->dtype;
-  const auto &b_dtype = b_->dtype;
-  const auto &c_dtype = c_->dtype;
-
-  enum class Ph1WmmaTypeClass : uint8_t {
-    kF16F16F32,
-    kBF16BF16F32,
-    kTF32TF32F32,
-    kS8S8S32,
-    kU8U8U32,
-    kF16S8F32,
-    kBF16S8F32,
-    kS8F16F32,
-    kS8BF16F32,
-    kFP8F32,
-  };
-  std::optional<Ph1WmmaTypeClass> type_class = std::nullopt;
-
-  if (a_dtype == DataType::Float(16) && b_dtype == DataType::Float(16) &&
-      c_dtype == DataType::Float(32)) {
-    type_class = Ph1WmmaTypeClass::kF16F16F32;
-  } else if (a_dtype == DataType::BFloat(16) &&
-             b_dtype == DataType::BFloat(16) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = Ph1WmmaTypeClass::kBF16BF16F32;
-  } else if (a_dtype == DataType::Float(32) && b_dtype == DataType::Float(32) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = Ph1WmmaTypeClass::kTF32TF32F32;
-  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Int(8) &&
-             c_dtype == DataType::Int(32)) {
-    type_class = Ph1WmmaTypeClass::kS8S8S32;
-  } else if (a_dtype == DataType::UInt(8) && b_dtype == DataType::UInt(8) &&
-             c_dtype == DataType::UInt(32)) {
-    type_class = Ph1WmmaTypeClass::kU8U8U32;
-  } else if (a_dtype == DataType::Float(16) && b_dtype == DataType::Int(8) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = Ph1WmmaTypeClass::kF16S8F32;
-  } else if (a_dtype == DataType::BFloat(16) && b_dtype == DataType::Int(8) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = Ph1WmmaTypeClass::kBF16S8F32;
-  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Float(16) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = Ph1WmmaTypeClass::kS8F16F32;
-  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::BFloat(16) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = Ph1WmmaTypeClass::kS8BF16F32;
-  } else if (IsPH1SupportedFp8(a_dtype) && IsPH1SupportedFp8(b_dtype) &&
-             c_dtype == DataType::Float(32)) {
-    type_class = Ph1WmmaTypeClass::kFP8F32;
-  } else {
-    return std::nullopt;
-  }
-
-  auto select_inst = [&](const std::vector<std::array<int, 3>> &candidates)
-      -> std::optional<std::array<int, 3>> {
-    for (const auto &inst : candidates) {
-      if (warp_tile_m % inst[0] == 0 && warp_tile_n % inst[1] == 0 &&
-          k_ % inst[2] == 0) {
-        return inst;
-      }
-    }
-    return std::nullopt;
-  };
-
-  if (*type_class == Ph1WmmaTypeClass::kF16F16F32 ||
-      *type_class == Ph1WmmaTypeClass::kBF16BF16F32) {
-    return select_inst(
-        {{16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}, {16, 8, 8}});
-  }
-  if (*type_class == Ph1WmmaTypeClass::kTF32TF32F32) {
-    return select_inst({{16, 16, 16}, {16, 8, 8}, {16, 8, 4}});
-  }
-  if (*type_class == Ph1WmmaTypeClass::kS8S8S32 ||
-      *type_class == Ph1WmmaTypeClass::kU8U8U32 ||
-      *type_class == Ph1WmmaTypeClass::kFP8F32) {
-    return select_inst(
-        {{16, 16, 64}, {16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}});
-  }
-  return select_inst({{16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}});
-}
-
-bool GemmNode::AllowSQMMA(int block_size, Target target) const {
-  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-  if (ctxt->GetConfig(kDisableSQMMA, Optional<Bool>()).value_or(false)) {
-    return false;
-  }
-  return SelectSQMMAInstShape(block_size, target).has_value();
-}
-
-bool GemmNode::AllowPH1Wmma(int block_size, Target target) const {
-  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-  if (ctxt->GetConfig(kDisablePH1WMMA, Optional<Bool>()).value_or(false)) {
-    return false;
-  }
-  return SelectPH1WmmaInstShape(block_size, target).has_value();
-}
-
-std::optional<std::array<int, 3>>
-GemmNode::SelectQY2MmaInstShape(int block_size, Target target) const {
-  if (!TargetIsQY2(target)) {
-    return std::nullopt;
-  }
-  const bool a_is_shared = a_.scope() == "shared.dyn" || a_.scope() == "shared";
-  const bool b_is_shared = b_.scope() == "shared.dyn" || b_.scope() == "shared";
-  const bool a_is_fragment = IsFragmentBuffer(a_);
-  const bool b_is_fragment = IsFragmentBuffer(b_);
-  if (!((a_is_shared && b_is_shared) || a_is_fragment || b_is_fragment)) {
-    return std::nullopt;
-  }
-  if (c_.scope() != "local.fragment") {
-    return std::nullopt;
-  }
-  const bool is_f16_mma = a_->dtype == DataType::Float(16) &&
-                          b_->dtype == DataType::Float(16) &&
-                          c_->dtype == DataType::Float(32);
-  const bool is_bf16_mma = a_->dtype == DataType::BFloat(16) &&
-                           b_->dtype == DataType::BFloat(16) &&
-                           c_->dtype == DataType::Float(32);
-  enum class Qy2MmaTypeClass : uint8_t {
-    kF16F16F32,
-    kBF16BF16F32,
-  };
-  std::optional<Qy2MmaTypeClass> type_class = std::nullopt;
-  if (is_f16_mma) {
-    type_class = Qy2MmaTypeClass::kF16F16F32;
-  } else if (is_bf16_mma) {
-    type_class = Qy2MmaTypeClass::kBF16BF16F32;
-  } else {
-    return std::nullopt;
-  }
-  if (k_ % 16 != 0) {
-    return std::nullopt;
-  }
-  auto select_inst = [&](const std::vector<std::array<int, 3>> &candidates)
-      -> std::optional<std::array<int, 3>> {
-    for (const auto &inst : candidates) {
-      if (m_ % inst[0] == 0 && n_ % inst[1] == 0 && k_ % inst[2] == 0) {
-        return inst;
-      }
-    }
-    return std::nullopt;
-  };
-  auto select_qy2_inst = [&](const std::vector<std::array<int, 3>> &candidates)
-      -> std::optional<std::array<int, 3>> {
-    switch (*type_class) {
-    case Qy2MmaTypeClass::kF16F16F32:
-    case Qy2MmaTypeClass::kBF16BF16F32:
-      return select_inst(candidates);
-    }
-    return std::nullopt;
-  };
-
-  const std::string qy2_shape = EnvString("TILELANG_MUSA_MP22_MMA_SHAPE");
-  if (qy2_shape == "m8n32k16") {
-    int warp_size = TargetGetWarpSize(target);
-    if (block_size % warp_size != 0) {
-      return std::nullopt;
-    }
-    return select_qy2_inst({{8, 32, 16}});
-  }
-  if (qy2_shape == "m32n32k16") {
-    return std::nullopt;
-  }
-  if (qy2_shape != "m16n16k16" && m_ % 32 == 0 && n_ % 32 == 0) {
-    return std::nullopt;
-  }
-  int warp_size = TargetGetWarpSize(target);
-  if (block_size % warp_size != 0) {
-    return std::nullopt;
-  }
-  return select_qy2_inst({{16, 16, 16}});
-}
-
-GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
-  if (allowTcgen5Mma(target)) {
-    return GemmInst::kTCGEN5MMA;
-  } else if (allowWgmma(block_size, target)) {
-    return GemmInst::kWGMMA;
-  } else if (TargetIsCDNA(target)) {
-    return GemmInst::kMFMA;
-  } else if (TargetIsQY2(target)) {
-    auto qy2_inst_shape = SelectQY2MmaInstShape(block_size, target);
-    if (qy2_inst_shape.has_value()) {
-      return GemmInst::kQY2MMA;
-    }
-    return GemmInst::kMMA;
-  } else if (TargetIsCuda(target)) {
-    return GemmInst::kMMA;
-  } else if (TargetIsPH1(target)) {
-    if (AllowSQMMA(block_size, target)) {
-      return GemmInst::kSQMMA;
-    }
-    if (AllowPH1Wmma(block_size, target)) {
-      return GemmInst::kPH1WMMA;
-    }
-    return GemmInst::kFMA;
-  } else if (TargetIsCPU(target)) {
-    return GemmInst::kScalar;
-  } else {
-    ICHECK(0) << "Unsupported target for gemm: " << target;
-    return GemmInst::kMMA;
-  }
+  return impl.select_inst_shape(*this, block_size, target, gemm_inst);
 }
 
 std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
-    int M, int N, int block_size, Target target, GemmInst gemm_inst,
+    int M, int N, int block_size, Target target, String gemm_inst,
     std::optional<std::array<int, 3>> mma_inst_shape) const {
-  int num_warps = block_size / TargetGetWarpSize(target);
-  if (gemm_inst == GemmInst::kTCGEN5MMA) {
-    this->m_warp = 1;
-    this->n_warp = num_warps;
-    return {1, num_warps}; // TCGEN5MMA doesn't care about warp partitioning
-  }
-
-  int m_warp = 1, n_warp = 1;
-  int kMPerWarp = 16; // Rows processed by a single warp
-  int kNPerWarp = 8;  // Columns processed by a single warp
-  if (TargetIsVolta(target)) {
-    kNPerWarp = 16;
-  } else if (TargetIsQY2(target)) {
-    if (gemm_inst == GemmInst::kQY2MMA) {
-      ICHECK(mma_inst_shape.has_value())
-          << "QY2 extended MMA warp partition requires an MMA instruction "
-             "shape.";
-      kMPerWarp = (*mma_inst_shape)[0];
-      kNPerWarp = (*mma_inst_shape)[1];
-    } else {
-      kMPerWarp = 32;
-      kNPerWarp = 32;
-    }
-  } else if (TargetIsCDNA(target)) {
-    kNPerWarp = 16;
-  } else if (TargetIsPH1(target)) {
-    if (gemm_inst == GemmInst::kFMA) {
-      kMPerWarp = 1;
-      kNPerWarp = 1;
-    } else if (gemm_inst == GemmInst::kPH1WMMA) {
-      kMPerWarp = 8;
-      kNPerWarp = 8;
-    } else {
-      kMPerWarp = 4;
-      kNPerWarp = 8;
-    }
-  }
-  ICHECK(M % kMPerWarp == 0)
-      << "M must be divisible by " << kMPerWarp << ", but got " << M;
-  ICHECK(N % kNPerWarp == 0)
-      << "N must be divisible by " << kNPerWarp << ", but got " << N;
-
-  if (gemm_inst == GemmInst::kWGMMA || gemm_inst == GemmInst::kSQMMA) {
-    ICHECK(num_warps % 4 == 0) << "Warp-Group MMA requires 128×k threads.";
-
-    constexpr int kGroup = 4; // Number of warps in a warp-group
-
-    m_warp = kGroup; // Initially, only one warp-group on M dimension
-    n_warp = num_warps / m_warp; // Rest all on N dimension
-
-    if (this->isFullRow()) {
-      // Try to put as many warp-groups as possible on M dimension
-      // (decreasing multiples of 4, ensuring divisibility by M)
-      for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
-        if (M % (cand * kMPerWarp) == 0) {
-          m_warp = cand;
-          n_warp = num_warps / m_warp;
-          break;
-        }
-      }
-    } else if (this->isFullCol()) {
-      // Try to use warps on N dimension; if N is not divisible, split excess
-      // groups to M
-      int cand_n = n_warp;                 // Initially assume all on N
-      if (N % (cand_n * kNPerWarp) != 0) { // N direction division fails
-        int max_n = N / kNPerWarp;
-        // Find a feasible n_warp from max possible downwards, ensuring
-        // num_warps/n_warp is multiple of 4
-        for (int n = std::min(cand_n, max_n); n >= 1; --n) {
-          if (num_warps % n == 0 && (num_warps / n) % kGroup == 0) {
-            n_warp = n;
-            m_warp = num_warps / n_warp;
-            break;
-          }
-        }
-      }
-    } else if (this->isSquare()) {
-      // Exhaustive search, but m must be multiple of 4
-      int max_m = M / kMPerWarp;
-      int max_n = N / kNPerWarp;
-
-      float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
-
-      float best_score = std::numeric_limits<float>::max();
-      int best_m = kGroup, best_n = n_warp;
-
-      for (int m = kGroup; m <= num_warps && m <= max_m; m += kGroup) {
-        if (num_warps % m != 0)
-          continue;
-        int n = num_warps / m;
-        if (n > max_n)
-          continue;
-
-        float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
-        float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
-        float score = std::abs(m_per_warp / n_per_warp - ideal);
-
-        if (score < best_score) {
-          best_score = score;
-          best_m = m;
-          best_n = n;
-        }
-      }
-      m_warp = best_m;
-      n_warp = best_n;
-    } else {
-      ICHECK(0) << "Unknown GemmWarpPolicy";
-    }
-
-    ICHECK(m_warp * n_warp == num_warps)
-        << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
-        << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
-
-    // Store the computed values in the object's member variables
-    this->m_warp = m_warp;
-    this->n_warp = n_warp;
-
-    return {m_warp, n_warp};
-  }
-
-  if (this->isFullRow()) {
-    // Try to partition M first
-    m_warp = num_warps;
-    n_warp = 1;
-
-    // If M cannot be evenly divided by m_warp*16, try to split remaining warps
-    // to N
-    if (M % (m_warp * kMPerWarp) != 0) {
-      // Calculate how many warps we can use for M
-      int max_m_warps = M / kMPerWarp;
-      m_warp = max_m_warps;
-      // Use remaining warps for N
-      n_warp = num_warps / m_warp;
-      if (n_warp == 0)
-        n_warp = 1;
-    }
-  } else if (this->isFullCol()) {
-    // Try to partition N first
-    m_warp = 1;
-    n_warp = num_warps;
-
-    // If N cannot be evenly divided by n_warp*8, try to split remaining warps
-    // to M
-    if (N % (n_warp * kNPerWarp) != 0) {
-      // Calculate how many warps we can use for N
-      int max_n_warps = N / kNPerWarp;
-      n_warp = max_n_warps;
-      // Use remaining warps for M
-      m_warp = num_warps / n_warp;
-      if (m_warp == 0)
-        m_warp = 1;
-    }
-  } else if (this->isSquare()) {
-    // First calculate the maximum possible warps for each dimension
-    int max_m_warps =
-        M / kMPerWarp; // Each warp needs at least 16 elements in M
-
-    // Calculate the ideal ratio of M/N warps based on the matrix dimensions
-    float ideal_ratio = 1.0f;
-    if (N > 0) {
-      ideal_ratio = static_cast<float>(M) / N;
-    }
-
-    // Try to find the best balanced partition
-    int best_m = 1;
-    int best_n = 1;
-    float best_balance = std::numeric_limits<float>::max();
-    // Try all possible combinations that satisfy the constraints
-    for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
-      int n = num_warps / m;
-
-      // Calculate how balanced this partition is
-      float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
-      float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
-      // m_per_warp and n_per_warp must be greater than 1
-      if (m_per_warp < 1 || n_per_warp < 1)
-        continue;
-      // m * n must equal num_warps
-      if (m * n != num_warps)
-        continue;
-
-      float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
-
-      if (balance < best_balance) {
-        best_balance = balance;
-        best_m = m;
-        best_n = n;
-      }
-    }
-
-    m_warp = best_m;
-    n_warp = best_n;
-  } else {
-    ICHECK(0) << "Unknown GemmWarpPolicy";
-  }
-  ICHECK(m_warp * n_warp == num_warps)
-      << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
-      << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
-
-  // Store the computed values in the object's member variables
-  this->m_warp = m_warp;
-  this->n_warp = n_warp;
-
-  return {m_warp, n_warp};
-}
-
-/**
- * @brief Checks whether WGMMA (warp-group MMA) can be used for this GEMM.
- *
- * Evaluates device-memory placement, data-type combinations, transpose flags,
- * and K divisibility constraints required for the Hopper WGMMA code path.
- *
- * The check returns true only when:
- * - B resides in shared memory ("shared" or "shared.dyn"); and
- * - (C, A, B) dtypes match one of the supported combinations below and K
- *   satisfies the required alignment; and
- * - for combinations that require specific orientations, A is not transposed
- *   and B is transposed.
- *
- * Supported combinations and constraints:
- * - C=float16:
- *   - A=float16, B=float16: K % 16 == 0
- *   - Various float8 mixes (e4m3/e5m2): require (!trans_A && trans_B) and K %
- * 32 == 0
- * - C=float32:
- *   - A=float16, B=float16: K % 16 == 0
- *   - A=bfloat16, B=bfloat16: K % 16 == 0
- *   - A=float32, B=float32: require (!trans_A && trans_B) and K % 8 == 0
- *   - Various float8 mixes: require (!trans_A && trans_B) and K % 32 == 0
- * - C=int32:
- *   - 8-bit integer combinations (Int8/UInt8): require (!trans_A && trans_B)
- * and K % 32 == 0
- *
- * @return true if WGMMA is supported for the current buffers, dtypes, and
- *         transpose/shape constraints; false otherwise.
- */
-bool GemmNode::checkWgmma() const {
-  if (b_.scope() != "shared.dyn" && b_.scope() != "shared") {
-    return false;
-  }
-
-  if (c_->dtype == DataType::Float(16)) {
-    if (a_->dtype == DataType::Float(16) && b_->dtype == DataType::Float(16))
-      return k_ % 16 == 0;
-    else if (a_->dtype.is_float8() && b_->dtype.is_float8())
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else
-      return false;
-  } else if (c_->dtype == DataType::Float(32)) {
-    if (a_->dtype == DataType::Float(16) && b_->dtype == DataType::Float(16))
-      return k_ % 16 == 0;
-    else if (a_->dtype == DataType::BFloat(16) &&
-             b_->dtype == DataType::BFloat(16))
-      return k_ % 16 == 0;
-    else if (a_->dtype == DataType::Float(32) &&
-             b_->dtype == DataType::Float(32))
-      return (!transA_) && transB_ && k_ % 8 == 0;
-    else if (a_->dtype.is_float8() && b_->dtype.is_float8())
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else
-      return false;
-  } else if (c_->dtype == DataType::Int(32)) {
-    if (a_->dtype == DataType::Int(8) && b_->dtype == DataType::Int(8))
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype == DataType::Int(8) && b_->dtype == DataType::UInt(8))
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype == DataType::UInt(8) && b_->dtype == DataType::Int(8))
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype == DataType::UInt(8) && b_->dtype == DataType::UInt(8))
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else
-      return false;
-  } else {
-    return false;
-  }
+  return ResolveGemmImpl(target).compute_warp_partition(
+      *this, M, N, block_size, target, gemm_inst, mma_inst_shape);
 }
 
 /**
@@ -896,8 +243,8 @@ static int GetArchInt(Target target) {
  */
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
-  GemmInst gemm_inst = getGemmInst(block_size, T.target);
-  if (TargetIsCPU(T.target) && gemm_inst == GemmInst::kScalar) {
+  String gemm_inst = getGemmInstructionKey(block_size, T.target);
+  if (TargetIsCPU(T.target) && gemm_inst == kGemmInstCPUScalar) {
     auto clear_accum_bool = clearAccum_.as<Bool>();
     ICHECK(clear_accum_bool.has_value())
         << "clear_accum must be a constant Bool type, got " << clearAccum_;
@@ -943,8 +290,9 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   std::optional<std::array<int, 3>> qy2_mma_inst = std::nullopt;
-  if (TargetIsQY2(T.target) && gemm_inst == GemmInst::kQY2MMA) {
-    qy2_mma_inst = SelectQY2MmaInstShape(block_size, T.target);
+  if (TargetIsQY2(T.target) && gemm_inst == kGemmInstMusaQY2MMA) {
+    qy2_mma_inst =
+        getGemmInstructionShape(block_size, T.target, kGemmInstMusaQY2MMA);
     ICHECK(qy2_mma_inst.has_value())
         << "QY2 extended MMA is selected but no valid MMA instruction is "
            "found.";
@@ -954,18 +302,17 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       m_, n_, block_size, T.target, gemm_inst, qy2_mma_inst);
   std::optional<std::array<int, 3>> ph1_mma_inst = std::nullopt;
   if (TargetIsPH1(T.target) &&
-      (gemm_inst == GemmInst::kSQMMA || gemm_inst == GemmInst::kPH1WMMA)) {
-    ph1_mma_inst = gemm_inst == GemmInst::kSQMMA
-                       ? SelectSQMMAInstShape(block_size, T.target)
-                       : SelectPH1WmmaInstShape(block_size, T.target);
+      (gemm_inst == kGemmInstMusaSQMMA || gemm_inst == kGemmInstMusaPH1WMMA)) {
+    ph1_mma_inst = getGemmInstructionShape(block_size, T.target, gemm_inst);
     ICHECK(ph1_mma_inst.has_value())
-        << (gemm_inst == GemmInst::kSQMMA ? "PH1 SQMMA is selected but no "
-                                            "valid SQMMA instruction is found."
-                                          : "PH1 WMMA is selected but no valid "
-                                            "WMMA instruction is found.");
+        << (gemm_inst == kGemmInstMusaSQMMA
+                ? "PH1 SQMMA is selected but no "
+                  "valid SQMMA instruction is found."
+                : "PH1 WMMA is selected but no valid "
+                  "WMMA instruction is found.");
   }
 
-  if (TargetIsPH1(T.target) && gemm_inst == GemmInst::kFMA) {
+  if (TargetIsPH1(T.target) && gemm_inst == kGemmInstMusaFMA) {
     auto A_buffer = a_;
     auto B_buffer = b_;
     auto C_buffer = c_;
@@ -1038,7 +385,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   std::stringstream ss;
   std::string op_name;
 
-  if (gemm_inst == GemmInst::kTCGEN5MMA) {
+  if (gemm_inst == kGemmInstCudaTCGEN05) {
     auto [can_use_tcgen5mma, meta] =
         GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype);
     ICHECK(can_use_tcgen5mma);
@@ -1114,7 +461,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (IsFragmentBuffer(a_)) {
     if (IsFragmentBuffer(b_)) {
-      ICHECK(TargetIsPH1(T.target) && gemm_inst == GemmInst::kPH1WMMA ||
+      ICHECK(TargetIsPH1(T.target) && gemm_inst == kGemmInstMusaPH1WMMA ||
              TargetIsQY2(T.target))
           << "gemm_rr is currently only implemented for PH1 WMMA and QY2.";
       op_name = "tl::gemm_rr";
@@ -1144,25 +491,25 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     // for cdna gemm, we need to specify kPack
     ss << ", " << kPack_;
   } else if (TargetIsHopper(T.target)) {
-    ss << ", " << (gemm_inst == GemmInst::kWGMMA ? "true" : "false");
+    ss << ", " << (gemm_inst == kGemmInstCudaWGMMA ? "true" : "false");
   } else if (TargetIsPH1(T.target)) {
-    if (gemm_inst == GemmInst::kSQMMA) {
+    if (gemm_inst == kGemmInstMusaSQMMA) {
       ss << ", true";
       ss << ", " << (*ph1_mma_inst)[0] << ", " << (*ph1_mma_inst)[1] << ", "
          << (*ph1_mma_inst)[2];
-    } else if (gemm_inst == GemmInst::kPH1WMMA) {
+    } else if (gemm_inst == kGemmInstMusaPH1WMMA) {
       ss << ", false";
       ss << ", " << (*ph1_mma_inst)[0] << ", " << (*ph1_mma_inst)[1] << ", "
          << (*ph1_mma_inst)[2];
     } else {
-      ICHECK(gemm_inst == GemmInst::kSQMMA || gemm_inst == GemmInst::kPH1WMMA)
+      ICHECK(gemm_inst == kGemmInstMusaSQMMA ||
+             gemm_inst == kGemmInstMusaPH1WMMA)
           << "Unexpected PH1 GEMM instruction kind in templated lowering: "
-          << static_cast<int>(gemm_inst);
+          << gemm_inst;
     }
-  } else if (TargetIsQY2(T.target) && gemm_inst == GemmInst::kQY2MMA) {
+  } else if (TargetIsQY2(T.target) && gemm_inst == kGemmInstMusaQY2MMA) {
     ICHECK(qy2_mma_inst.has_value())
-        << "QY2 extended MMA instruction shape is required for "
-        << GemmInstToString(gemm_inst);
+        << "QY2 extended MMA instruction shape is required for " << gemm_inst;
     ss << ", " << (*qy2_mma_inst)[0] << ", " << (*qy2_mma_inst)[1] << ", "
        << (*qy2_mma_inst)[2];
   }
@@ -1186,8 +533,8 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     gemm_args.push_back(T.thread_bounds->min);
   }
   auto new_call = Call(DataType::Handle(), tl::tl_gemm(), gemm_args);
-  return AttrStmt(Integer(0), tl::kGemmInst,
-                  Integer(static_cast<int>(gemm_inst)), Evaluate(new_call));
+  return AttrStmt(Integer(0), tl::kGemmInst, StringImm(gemm_inst),
+                  Evaluate(new_call));
 }
 
 /**
@@ -1216,14 +563,15 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   LayoutMap results;
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
-  GemmInst gemm_inst = getGemmInst(block_size, T.target);
-  if (TargetIsCPU(T.target) && gemm_inst == GemmInst::kScalar) {
+  String gemm_inst = getGemmInstructionKey(block_size, T.target);
+  if (TargetIsCPU(T.target) && gemm_inst == kGemmInstCPUScalar) {
     completed_ = true;
     return {};
   }
   std::optional<std::array<int, 3>> qy2_mma_inst = std::nullopt;
-  if (TargetIsQY2(T.target) && gemm_inst == GemmInst::kQY2MMA) {
-    qy2_mma_inst = SelectQY2MmaInstShape(block_size, T.target);
+  if (TargetIsQY2(T.target) && gemm_inst == kGemmInstMusaQY2MMA) {
+    qy2_mma_inst =
+        getGemmInstructionShape(block_size, T.target, kGemmInstMusaQY2MMA);
     ICHECK(qy2_mma_inst.has_value())
         << "QY2 extended MMA is selected but no valid MMA instruction is "
            "found.";
@@ -1260,7 +608,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
              TargetIsSM120(T.target) ||
-             (TargetIsSm100(T.target) && gemm_inst == GemmInst::kMMA)) {
+             (TargetIsSm100(T.target) && gemm_inst == kGemmInstCudaMMA)) {
     ICHECK(IsFragmentBuffer(c_))
         << "MMA only supports C in local.fragment scope, got " << c_.scope();
 
@@ -1298,9 +646,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     }
   } else if (TargetIsHopper(T.target)) {
     ICHECK(IsFragmentBuffer(c_))
-        << (gemm_inst == GemmInst::kWGMMA ? "WGMMA " : "MMA ")
+        << (gemm_inst == kGemmInstCudaWGMMA ? "WGMMA " : "MMA ")
         << "only supports C in local.fragment scope, got " << c_.scope();
-    auto fragment = gemm_inst == GemmInst::kWGMMA
+    auto fragment = gemm_inst == kGemmInstCudaWGMMA
                         ? makeGemmFragmentCHopper(m_, n_, m_ / warp_m,
                                                   n_ / warp_n, c_->dtype.bits())
                         : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
@@ -1313,7 +661,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t continuity =
           transA_ ? 4 * mat_continuous / warp_m : mat_continuous;
       auto ABLayout =
-          gemm_inst == GemmInst::kWGMMA
+          gemm_inst == kGemmInstCudaWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
                                        a_->dtype.bits(), !transA_)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
@@ -1332,7 +680,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
           transB_ ? mat_continuous : mat_continuous / warp_n;
 
       auto ABLayout =
-          gemm_inst == GemmInst::kWGMMA
+          gemm_inst == kGemmInstCudaWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
                                        b_->dtype.bits(), transB_)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
@@ -1344,11 +692,12 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       results.Set(b_, fragment->BindThreadRange(thread_range));
     }
   } else if (TargetIsPH1(T.target)) {
-    if (gemm_inst == GemmInst::kSQMMA) {
+    if (gemm_inst == kGemmInstMusaSQMMA) {
       ICHECK(a_.scope() == "shared" || a_.scope() == "shared.dyn");
       ICHECK(b_.scope() == "shared" || b_.scope() == "shared.dyn");
       ICHECK(c_.scope() == "local.fragment");
-      auto sqmma_inst = SelectSQMMAInstShape(block_size, T.target);
+      auto sqmma_inst =
+          getGemmInstructionShape(block_size, T.target, kGemmInstMusaSQMMA);
       ICHECK(sqmma_inst.has_value())
           << "SQMMA is selected but no valid SQMMA instruction is found.";
       auto fragment = makePHSqmmaFragmentC(m_, n_, warp_m, warp_n,
@@ -1359,10 +708,10 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t a_mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t a_mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
       const int64_t a_continuity = a_mat_continuous;
-      const bool a_is_fp8 = IsPH1SupportedFp8(a_->dtype);
+      const bool a_is_fp8 = musa::IsPH1SupportedFp8(a_->dtype);
       auto ALayout =
           (transA_ && a_is_fp8)
-              ? MakeTransposedPH1SqmmaOperandLayout(
+              ? musa::MakeTransposedPH1SqmmaOperandLayout(
                     a_mat_stride, a_mat_continuous, m_, k_, a_->dtype.bits(),
                     /*k_inner=*/true)
               : makeGemmABLayoutPH1(a_mat_stride, a_mat_continuous,
@@ -1387,10 +736,10 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       if (!transB_) {
         b_continuity = (*sqmma_inst)[1];
       }
-      const bool b_is_fp8 = IsPH1SupportedFp8(b_->dtype);
+      const bool b_is_fp8 = musa::IsPH1SupportedFp8(b_->dtype);
       auto BLayout =
           (!transB_ && b_is_fp8)
-              ? MakeTransposedPH1SqmmaOperandLayout(
+              ? musa::MakeTransposedPH1SqmmaOperandLayout(
                     b_mat_stride, b_mat_continuous, n_, k_, b_->dtype.bits(),
                     /*k_inner=*/true)
               : makeGemmABLayoutPH1(b_mat_stride, b_mat_continuous,
@@ -1405,7 +754,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       } else {
         results.Set(b_, BLayout);
       }
-    } else if (gemm_inst == GemmInst::kPH1WMMA) {
+    } else if (gemm_inst == kGemmInstMusaPH1WMMA) {
       const bool a_is_shared =
           a_.scope() == "shared" || a_.scope() == "shared.dyn";
       const bool b_is_shared =
@@ -1418,7 +767,8 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
           << a_.scope() << ", B=" << b_.scope();
       ICHECK(c_.scope() == "local.fragment")
           << "PH1 WMMA requires C in local.fragment scope, got " << c_.scope();
-      auto wmma_inst = SelectPH1WmmaInstShape(block_size, T.target);
+      auto wmma_inst =
+          getGemmInstructionShape(block_size, T.target, kGemmInstMusaPH1WMMA);
       ICHECK(wmma_inst.has_value())
           << "PH1 WMMA is selected but no valid WMMA instruction is found.";
 
@@ -1524,7 +874,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     } else {
       ICHECK(0);
     }
-  } else if (gemm_inst == GemmInst::kTCGEN5MMA) {
+  } else if (gemm_inst == kGemmInstCudaTCGEN05) {
     ICHECK(c_.scope() == "shared.tmem")
         << "TCGEN5MMA only supports C in shared.tmem scope, got " << c_.scope();
     ICHECK(IsSharedBuffer(a_))
@@ -1642,7 +992,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",
                         [](GemmWarpPolicy policy, int M, int N, int block_size,
-                           Target target, GemmInst gemm_inst) {
+                           Target target, String gemm_inst) {
                           policy->computeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
                         });

@@ -16,6 +16,10 @@ from .swizzle import (
     make_linear_layout,  # noqa: F401
     make_gemm_fragment_c_linear,  # noqa: F401
     make_ph_sqmma_fragment_c,  # noqa: F401
+    make_ph1_wmma_fragment_c,  # noqa: F401
+    make_ph1_wmma_fragment_a,  # noqa: F401
+    make_ph1_wmma_fragment_b,  # noqa: F401
+    make_ph1_wmma_ab_layout,  # noqa: F401
     make_gemm_fragment_8x8,  # noqa: F401
     make_gemm_fragment_8x8_transposed,  # noqa: F401
     make_fully_replicated_layout_fragment,  # noqa: F401

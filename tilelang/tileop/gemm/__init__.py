@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from tilelang import tvm as tvm
 from tvm import tir
 from tvm.target import Target
@@ -5,17 +7,9 @@ from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
-from .inst import GemmInst
 from .gemm_mma import GemmMMA
-from .gemm_mma_sm70 import GemmMMASm70
-from .gemm_wgmma import GemmWGMMA
-from .gemm_tcgen05 import GemmTCGEN5
-from .gemm_mfma import GemmMFMA
-from .gemm_fma import GemmFMA
-from .gemm_sqmma import GemmSQMMA
-from .gemm_scalar import GemmScalar
+from tilelang.backend.gemm import resolve_gemm_impl
 from tilelang import _ffi_api
-from tilelang.utils.target import target_is_volta
 
 
 @tvm_ffi.register_global_func("tl.gemm_py.infer_layout")
@@ -25,9 +19,16 @@ def gemm_py_infer_layout(gemm_py: GemmMMA, target: Target, thread_bounds: Range)
 
 
 @tvm_ffi.register_global_func("tl.gemm_py.lower")
-def gemm_py_lower(gemm_py: GemmMMA, layout_map, target: Target, thread_bounds: Range, thread_var: tir.Var):
+def gemm_py_lower(
+    gemm_py: GemmMMA,
+    layout_map,
+    target: Target,
+    thread_bounds: Range,
+    thread_var: tir.Var,
+    mbar_phase_expr: tir.PrimExpr,
+):
     # We pass thread_bounds rather than thread_extents because tcgen5mma need to check this
-    stmt = gemm_py.lower(layout_map, target, thread_bounds, thread_var)
+    stmt = gemm_py.lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
     return stmt
 
 
@@ -118,15 +119,22 @@ class GemmPy(Node, Scriptable):
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).infer_layout(target, thread_nums)
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         """Lower the GEMM operation to TIR statements based on target architecture."""
         thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
-        return impl_class(self).lower(layout_map, target, thread_bounds, thread_var)
+        return impl_class(self).lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
 
-    def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
-        """Select the appropriate GEMM instruction based on target and thread configuration.
+    def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
+        """Select the appropriate GEMM instruction key based on target and thread configuration.
 
         The selection logic follows this priority:
         1. TCGEN5MMA for Blackwell architecture
@@ -140,39 +148,22 @@ class GemmPy(Node, Scriptable):
             target: Target architecture
 
         Returns:
-            GemmInst: The selected GEMM instruction type
+            The selected backend-specific GEMM instruction key.
         """
-        return GemmInst(_ffi_api.GemmPyGemmInst(self, int(thread_nums), target))
+        return str(_ffi_api.GemmPyGemmInstructionKey(self, int(thread_nums), target))
 
-    def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
-        """Get the appropriate implementation class for the given GEMM instruction.
+    def _get_implementation_class(self, gemm_inst: str, target: Target):
+        """Get the appropriate implementation class for the given GEMM instruction key.
 
         Args:
-            gemm_inst: The selected GEMM instruction type
+            gemm_inst: The selected backend-specific GEMM instruction key
             target: Target architecture
 
         Returns:
-            The implementation class for the instruction type
+            The implementation class for the instruction key
 
         Raises:
-            NotImplementedError: If the instruction type is not supported
-            ValueError: If the instruction type is unknown
+            NotImplementedError: If the instruction key is not supported
+            ValueError: If the instruction key is unknown
         """
-        if gemm_inst.is_mma():
-            if target_is_volta(target):
-                return GemmMMASm70
-            return GemmMMA
-        elif gemm_inst.is_wgmma():
-            return GemmWGMMA
-        elif gemm_inst.is_tcgen5mma():
-            return GemmTCGEN5
-        elif gemm_inst.is_mfma():
-            return GemmMFMA
-        elif gemm_inst.is_fma():
-            return GemmFMA
-        elif gemm_inst.is_sqmma():
-            return GemmSQMMA
-        elif gemm_inst.is_scalar():
-            return GemmScalar
-        else:
-            raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")
+        return resolve_gemm_impl(gemm_inst, target)

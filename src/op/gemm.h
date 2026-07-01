@@ -9,6 +9,7 @@
 
 #include <array>
 #include <optional>
+#include <utility>
 
 #include "operator.h"
 
@@ -41,44 +42,16 @@ inline const char *GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
   }
 }
 
-// Target GEMM instruction
-enum class GemmInst : uint8_t {
-  kMMA,
-  kWGMMA,
-  kTCGEN5MMA,
-  kMFMA,
-  kFMA,
-  kSQMMA,
-  kPH1WMMA,
-  kQY2MMA,
-  kScalar,
-};
-
-/// Convert GemmInst enum to string for debugging
-inline const char *GemmInstToString(GemmInst inst) {
-  switch (inst) {
-  case GemmInst::kMMA:
-    return "MMA";
-  case GemmInst::kWGMMA:
-    return "WGMMA";
-  case GemmInst::kTCGEN5MMA:
-    return "TCGEN5MMA";
-  case GemmInst::kMFMA:
-    return "MFMA";
-  case GemmInst::kFMA:
-    return "FMA";
-  case GemmInst::kSQMMA:
-    return "SQMMA";
-  case GemmInst::kPH1WMMA:
-    return "PH1WMMA";
-  case GemmInst::kQY2MMA:
-    return "QY2MMA";
-  case GemmInst::kScalar:
-    return "Scalar";
-  default:
-    return "Unknown";
-  }
-}
+inline constexpr const char *kGemmInstCudaMMA = "cuda.mma";
+inline constexpr const char *kGemmInstCudaWGMMA = "cuda.wgmma";
+inline constexpr const char *kGemmInstCudaTCGEN05 = "cuda.tcgen05";
+inline constexpr const char *kGemmInstROCmMFMA = "rocm.mfma";
+inline constexpr const char *kGemmInstMusaMMA = "musa.mma";
+inline constexpr const char *kGemmInstMusaFMA = "musa.fma";
+inline constexpr const char *kGemmInstMusaSQMMA = "musa.sqmma";
+inline constexpr const char *kGemmInstMusaPH1WMMA = "musa.ph1wmma";
+inline constexpr const char *kGemmInstMusaQY2MMA = "musa.qy2mma";
+inline constexpr const char *kGemmInstCPUScalar = "cpu.scalar";
 
 class GemmWarpPolicyNode : public Object {
 public:
@@ -97,7 +70,7 @@ public:
   }
 
   std::pair<int, int> computeWarpPartition(
-      int M, int N, int block_size, Target target, GemmInst gemm_inst,
+      int M, int N, int block_size, Target target, String gemm_inst,
       std::optional<std::array<int, 3>> mma_inst_shape = std::nullopt) const;
 
   bool isSquare() const {
@@ -140,15 +113,6 @@ public:
 
 class GemmNode : public TileOperatorNode {
 public:
-  bool checkWgmma() const;
-  bool AllowSQMMA(int block_size, Target target) const;
-  bool AllowPH1Wmma(int block_size, Target target) const;
-  std::optional<std::array<int, 3>> SelectSQMMAInstShape(int block_size,
-                                                         Target target) const;
-  std::optional<std::array<int, 3>> SelectPH1WmmaInstShape(int block_size,
-                                                           Target target) const;
-  std::optional<std::array<int, 3>> SelectQY2MmaInstShape(int block_size,
-                                                          Target target) const;
   tir::Buffer a_, b_, c_;
   // BufferRegion for A, B and C
   BufferRegion aRegion_, bRegion_, cRegion_;
@@ -201,14 +165,39 @@ public:
 
   TileOperator Clone() const;
 
-  GemmInst getGemmInst(int block_size, Target target) const;
+  String getGemmInstructionKey(int block_size, Target target) const;
+  String getGemmInstructionKind(int block_size, Target target) const;
+  std::optional<std::array<int, 3>>
+  getGemmInstructionShape(int block_size, Target target,
+                          String gemm_inst) const;
 
 private:
-  bool allowTcgen5Mma(Target target) const;
-  bool allowWgmma(int block_size, Target target) const;
-
   mutable bool completed_ = false;
 };
+
+using GemmTargetPredicate = bool (*)(Target target);
+
+struct GemmImpl {
+  const char *name;
+  GemmTargetPredicate match_target;
+
+  String (*select_inst)(const GemmNode &op, int block_size, Target target);
+
+  std::pair<int, int> (*compute_warp_partition)(
+      const GemmWarpPolicyNode &policy, int M, int N, int block_size,
+      Target target, String gemm_inst,
+      std::optional<std::array<int, 3>> mma_inst_shape);
+
+  bool (*reuse_existing_shared_layout)(String gemm_inst);
+
+  String (*instruction_kind)(String gemm_inst);
+
+  std::optional<std::array<int, 3>> (*select_inst_shape)(
+      const GemmNode &op, int block_size, Target target,
+      String gemm_inst) = nullptr;
+};
+
+void RegisterGemmImpl(GemmImpl impl);
 
 class Gemm : public TileOperator {
 public:

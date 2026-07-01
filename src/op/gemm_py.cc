@@ -141,24 +141,31 @@ bool GemmPyNode::allowWgmma(int block_size, Target target) const {
          checkWgmma();
 }
 
-GemmInst GemmPyNode::getGemmInst(int block_size, Target target) const {
+String GemmPyNode::getGemmInstructionKey(int block_size, Target target) const {
   bool allow_sqmma = AllowSQMMA(block_size, target);
   if (allowTcgen5Mma(target)) {
-    return GemmInst::kTCGEN5MMA;
+    return kGemmInstCudaTCGEN05;
   } else if (allowWgmma(block_size, target)) {
-    return GemmInst::kWGMMA;
+    return kGemmInstCudaWGMMA;
   } else if (TargetIsCDNA(target)) {
-    return GemmInst::kMFMA;
-  } else if (TargetIsCuda(target) || TargetIsQY2(target)) {
-    return GemmInst::kMMA;
+    return kGemmInstROCmMFMA;
+  } else if (TargetIsQY2(target)) {
+    return kGemmInstMusaMMA;
+  } else if (TargetIsCuda(target)) {
+    return kGemmInstCudaMMA;
   } else if (TargetIsPH1(target)) {
-    return allow_sqmma ? GemmInst::kSQMMA : GemmInst::kFMA;
+    if (allow_sqmma) {
+      return kGemmInstMusaSQMMA;
+    }
+    if (AllowPH1Wmma(block_size, target)) {
+      return kGemmInstMusaPH1WMMA;
+    }
+    return kGemmInstMusaFMA;
   } else if (TargetIsCPU(target)) {
-    return GemmInst::kScalar;
+    return kGemmInstCPUScalar;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
-    return GemmInst::kMMA; // This line will never be reached due to ICHECK, but
-                           // satisfies compiler
+    return kGemmInstCudaMMA;
   }
 }
 
@@ -193,7 +200,7 @@ GemmPyNode::SelectSQMMAInstShape(int block_size, Target target) const {
     return std::nullopt;
   }
   auto warp_parts = policy_->computeWarpPartition(m_, n_, block_size, target,
-                                                  GemmInst::kSQMMA);
+                                                  kGemmInstMusaSQMMA);
   int warp_m = warp_parts.first;
   int warp_n = warp_parts.second;
   if (warp_m <= 0 || warp_n <= 0) {
@@ -323,6 +330,137 @@ GemmPyNode::SelectSQMMAInstShape(int block_size, Target target) const {
   return std::nullopt;
 }
 
+std::optional<std::array<int, 3>>
+GemmPyNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
+  if (!TargetIsPH1(target)) {
+    return std::nullopt;
+  }
+  const bool a_is_shared = a_.scope() == "shared.dyn" || a_.scope() == "shared";
+  const bool b_is_shared = b_.scope() == "shared.dyn" || b_.scope() == "shared";
+  const bool a_is_fragment = IsFragmentBuffer(a_);
+  const bool b_is_fragment = IsFragmentBuffer(b_);
+  if (!((a_is_shared && b_is_shared) || (a_is_fragment && b_is_fragment))) {
+    return std::nullopt;
+  }
+  if (c_.scope() != "local.fragment") {
+    return std::nullopt;
+  }
+
+  int warp_size = TargetGetWarpSize(target);
+  if (block_size % warp_size != 0) {
+    return std::nullopt;
+  }
+  if (m_ % 4 != 0 || n_ % 8 != 0) {
+    return std::nullopt;
+  }
+
+  auto warp_parts = policy_->computeWarpPartition(m_, n_, block_size, target,
+                                                  kGemmInstMusaPH1WMMA);
+  int warp_m = warp_parts.first;
+  int warp_n = warp_parts.second;
+  if (warp_m <= 0 || warp_n <= 0) {
+    return std::nullopt;
+  }
+  if (m_ % warp_m != 0 || n_ % warp_n != 0) {
+    return std::nullopt;
+  }
+
+  int warp_tile_m = m_ / warp_m;
+  int warp_tile_n = n_ / warp_n;
+  const auto &a_dtype = a_->dtype;
+  const auto &b_dtype = b_->dtype;
+  const auto &c_dtype = c_->dtype;
+
+  enum class Ph1WmmaTypeClass : uint8_t {
+    kF16F16F32,
+    kBF16BF16F32,
+    kTF32TF32F32,
+    kS8S8S32,
+    kU8U8U32,
+    kF16S8F32,
+    kBF16S8F32,
+    kS8F16F32,
+    kS8BF16F32,
+    kFP8F32,
+  };
+  std::optional<Ph1WmmaTypeClass> type_class = std::nullopt;
+
+  const bool a_is_ph1_fp8 = a_dtype.is_float8_e4m3() ||
+                            a_dtype.is_float8_e4m3fn() ||
+                            a_dtype.is_float8_e5m2();
+  const bool b_is_ph1_fp8 = b_dtype.is_float8_e4m3() ||
+                            b_dtype.is_float8_e4m3fn() ||
+                            b_dtype.is_float8_e5m2();
+  if (a_dtype == DataType::Float(16) && b_dtype == DataType::Float(16) &&
+      c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kF16F16F32;
+  } else if (a_dtype == DataType::BFloat(16) &&
+             b_dtype == DataType::BFloat(16) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kBF16BF16F32;
+  } else if (a_dtype == DataType::Float(32) && b_dtype == DataType::Float(32) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kTF32TF32F32;
+  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Int(8) &&
+             c_dtype == DataType::Int(32)) {
+    type_class = Ph1WmmaTypeClass::kS8S8S32;
+  } else if (a_dtype == DataType::UInt(8) && b_dtype == DataType::UInt(8) &&
+             c_dtype == DataType::UInt(32)) {
+    type_class = Ph1WmmaTypeClass::kU8U8U32;
+  } else if (a_dtype == DataType::Float(16) && b_dtype == DataType::Int(8) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kF16S8F32;
+  } else if (a_dtype == DataType::BFloat(16) && b_dtype == DataType::Int(8) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kBF16S8F32;
+  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Float(16) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kS8F16F32;
+  } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::BFloat(16) &&
+             c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kS8BF16F32;
+  } else if (a_is_ph1_fp8 && b_is_ph1_fp8 && c_dtype == DataType::Float(32)) {
+    type_class = Ph1WmmaTypeClass::kFP8F32;
+  } else {
+    return std::nullopt;
+  }
+
+  auto select_inst = [&](const std::vector<std::array<int, 3>> &candidates)
+      -> std::optional<std::array<int, 3>> {
+    for (const auto &inst : candidates) {
+      if (warp_tile_m % inst[0] == 0 && warp_tile_n % inst[1] == 0 &&
+          k_ % inst[2] == 0) {
+        return inst;
+      }
+    }
+    return std::nullopt;
+  };
+
+  if (*type_class == Ph1WmmaTypeClass::kF16F16F32 ||
+      *type_class == Ph1WmmaTypeClass::kBF16BF16F32) {
+    return select_inst(
+        {{16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}, {16, 8, 8}});
+  }
+  if (*type_class == Ph1WmmaTypeClass::kTF32TF32F32) {
+    return select_inst({{16, 16, 16}, {16, 8, 8}, {16, 8, 4}});
+  }
+  if (*type_class == Ph1WmmaTypeClass::kS8S8S32 ||
+      *type_class == Ph1WmmaTypeClass::kU8U8U32 ||
+      *type_class == Ph1WmmaTypeClass::kFP8F32) {
+    return select_inst(
+        {{16, 16, 64}, {16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}});
+  }
+  return select_inst({{16, 16, 32}, {16, 16, 16}, {16, 8, 16}, {8, 16, 16}});
+}
+
+bool GemmPyNode::AllowPH1Wmma(int block_size, Target target) const {
+  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+  if (ctxt->GetConfig(kDisablePH1WMMA, Optional<Bool>()).value_or(false)) {
+    return false;
+  }
+  return SelectPH1WmmaInstShape(block_size, target).has_value();
+}
+
 /**
  * @brief Checks whether WGMMA (warp-group MMA) can be used for this GEMM.
  *
@@ -401,7 +539,8 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
       mbar_phase = explicit_phase.value();
     }
-    // NOTE(wt): Decide GemmInst and compute warp partition on Python side
+    // NOTE(wt): Decide instruction key and compute warp partition on Python
+    // side.
     auto prim_func = Downcast<PrimFunc>(
         (*f)(tvm::ffi::GetRef<GemmPy>(this), T.layout_map, T.target,
              T.thread_bounds, T.thread_var, mbar_phase));
@@ -474,13 +613,18 @@ TVM_FFI_STATIC_INIT_BLOCK() { GemmPyNode::RegisterReflection(); }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.GemmPyGemmInst",
+  refl::GlobalDef().def("tl.GemmPyGemmInstructionKey",
                         [](GemmPy gemm_py, int block_size, Target target) {
-                          return gemm_py->getGemmInst(block_size, target);
+                          return gemm_py->getGemmInstructionKey(block_size,
+                                                                target);
                         });
   refl::GlobalDef().def("tl.GemmPyAllowSQMMA",
                         [](GemmPy gemm_py, int block_size, Target target) {
                           return gemm_py->AllowSQMMA(block_size, target);
+                        });
+  refl::GlobalDef().def("tl.GemmPyAllowPH1Wmma",
+                        [](GemmPy gemm_py, int block_size, Target target) {
+                          return gemm_py->AllowPH1Wmma(block_size, target);
                         });
   refl::GlobalDef().def("tl.GemmPySelectSQMMAInstShape",
                         [](GemmPy gemm_py, int block_size, Target target) {
@@ -494,34 +638,18 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                           }
                           return result;
                         });
-}
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def(
-      "tl.get_tcgen5_mma_meta",
-      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype);
-        Array<Integer> result;
-        if (success) {
-          result.push_back(Integer(meta.atom_m));
-          result.push_back(Integer(meta.atom_n));
-          result.push_back(Integer(meta.atom_k));
-          result.push_back(Integer(meta.enable_ws));
-          result.push_back(Integer(meta.enable_2cta));
-        }
-        return result;
-      });
-  refl::GlobalDef().def(
-      "tl.get_tcgen5_instr_desc",
-      [](int atom_m, int atom_n, int atom_k, DataType ab_dtype,
-         DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int scale_in_a,
-         int scale_in_b) {
-        uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, ab_dtype,
-                                           c_dtype, a_is_k_major, b_is_k_major,
-                                           scale_in_a, scale_in_b);
-        return Integer(static_cast<int64_t>(desc));
-      });
+  refl::GlobalDef().def("tl.GemmPySelectPH1WmmaInstShape",
+                        [](GemmPy gemm_py, int block_size, Target target) {
+                          Array<Integer> result;
+                          auto inst_shape = gemm_py->SelectPH1WmmaInstShape(
+                              block_size, target);
+                          if (inst_shape.has_value()) {
+                            result.push_back(Integer((*inst_shape)[0]));
+                            result.push_back(Integer((*inst_shape)[1]));
+                            result.push_back(Integer((*inst_shape)[2]));
+                          }
+                          return result;
+                        });
 }
 
 } // namespace tl

@@ -1188,6 +1188,53 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return makePHSqmmaFragmentC(block_m, block_n, warp_m, warp_n,
                                          element_size, inst);
            })
+      .def("tl.make_ph1_wmma_fragment_c",
+           [](int block_m, int block_n, int warp_m, int warp_n,
+              int element_size, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3)
+                 << "inst_shape for make_ph1_wmma_fragment_c must have 3 "
+                    "elements [M, N, K], but got "
+                 << inst_shape.size();
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return makePH1WmmaCLayout(block_m, block_n, warp_m, warp_n,
+                                       element_size, inst);
+           })
+      .def("tl.make_ph1_wmma_fragment_a",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size, bool transposed, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3)
+                 << "inst_shape for make_ph1_wmma_fragment_a must have 3 "
+                    "elements [M, N, K], but got "
+                 << inst_shape.size();
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return makePH1WmmaFragmentA(block_m, block_n, block_k, warp_m,
+                                         warp_n, element_size, transposed,
+                                         inst);
+           })
+      .def("tl.make_ph1_wmma_fragment_b",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size, bool transposed, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3)
+                 << "inst_shape for make_ph1_wmma_fragment_b must have 3 "
+                    "elements [M, N, K], but got "
+                 << inst_shape.size();
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return makePH1WmmaFragmentB(block_m, block_n, block_k, warp_m,
+                                         warp_n, element_size, transposed,
+                                         inst);
+           })
+      .def("tl.make_ph1_wmma_ab_layout",
+           [](int mat_stride, int mat_continuous, int continuity,
+              int element_size, bool k_inner) {
+             return makePH1WmmaABLayout(mat_stride, mat_continuous, continuity,
+                                        element_size, k_inner);
+           })
       .def("tl.make_gemm_fragment_8x8", []() { return makeGemmFragment8x8(); })
       .def("tl.make_gemm_fragment_8x8_transposed",
            []() { return makeGemmFragment8x8Transposed(); })
