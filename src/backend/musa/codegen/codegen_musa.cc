@@ -1271,13 +1271,10 @@ void CodeGenTileLangMUSA::PrintStorageSync(const CallNode *op) {
     if (args.size() == 1) {
       this->stream << "__syncthreads_lm();\n";
     } else if (args.size() == 2) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ">();\n";
+      this->stream << "__syncthreads_lm();\n";
     } else if (args.size() == 3) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      auto thread_count = args[2].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ", "
-                   << thread_count << ">();\n";
+      LOG(FATAL) << "MUSA partial storage_sync should be lowered by "
+                    "UnifiedBarrier before codegen";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
