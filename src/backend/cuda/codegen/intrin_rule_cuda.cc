@@ -1,20 +1,20 @@
 /*!
- * \file intrin_rule_musa.cc
- * \brief MUSA intrinsic rules.
+ * \file intrin_rule_cuda.cc
+ * \brief CUDA intrinsic rules.
  */
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../support/ffi_aliases.h"
+#include "support/ffi_aliases.h"
 #include "target/intrin_rule.h"
 
 namespace tvm {
 namespace codegen {
 namespace intrin {
-// Add float suffix to the intrinsics, MUSA fast math.
+// Add float suffix to the intrinsics, CUDA fast math.
 using tir::FLowerIntrinsic;
 
-struct MUSAMath {
+struct CUDAMath {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_float()) {
       switch (t.bits()) {
@@ -56,18 +56,18 @@ struct MUSAMath {
   }
 };
 
-struct MUSAFastMath : public MUSAMath {
+struct CUDAFastMath : public CUDAMath {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_float() && t.bits() == 32) {
       return "__" + name + 'f';
     } else {
-      return MUSAMath::operator()(t, name);
+      return CUDAMath::operator()(t, name);
     }
     return "";
   }
 };
 
-struct MUSAFastMathTan : public MUSAMath {
+struct CUDAFastMathTan : public CUDAMath {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_float()) {
       switch (t.bits()) {
@@ -87,7 +87,7 @@ struct MUSAFastMathTan : public MUSAMath {
   }
 };
 
-struct MUSAPopcount {
+struct CUDAPopcount {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_uint()) {
       switch (t.bits()) {
@@ -103,54 +103,26 @@ struct MUSAPopcount {
   }
 };
 
-struct MUSAWarpIntrinsic {
+struct CUDAWarpIntrinsic {
   const Op operator()(DataType t, const Op &orig_op) const {
     if (orig_op.same_as(builtin::tvm_warp_shuffle())) {
-      return Op::Get("tir.musa.__shfl_sync");
+      return Op::Get("tir.cuda.__shfl_sync");
     } else if (orig_op.same_as(builtin::tvm_warp_shuffle_up())) {
-      return Op::Get("tir.musa.__shfl_up_sync");
+      return Op::Get("tir.cuda.__shfl_up_sync");
     } else {
       ICHECK(orig_op.same_as(builtin::tvm_warp_shuffle_down()));
-      return Op::Get("tir.musa.__shfl_down_sync");
+      return Op::Get("tir.cuda.__shfl_down_sync");
     }
   }
 };
 
-static PrimExpr DispatchMUSAWarpActiveMask(const PrimExpr &e) {
+static PrimExpr DispatchCUDAWarpActiveMask(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
-  return Call(call->dtype, Op::Get("tir.musa.__activemask"), call->args,
+  return Call(call->dtype, Op::Get("tir.cuda.__activemask"), call->args,
               call->annotations);
 }
 
-template <typename T> static PrimExpr DispatchMUSAShuffle(const PrimExpr &e) {
-  const CallNode *call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  ICHECK_EQ(call->args.size(), 5); // mask, value, warp_id, width, warp_size
-  Array<PrimExpr> musa_args{
-      {call->args[0], call->args[1], call->args[2], call->args[3]}};
-  return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), musa_args,
-              call->annotations);
-}
-
-static PrimExpr DispatchMUSAExp2(const PrimExpr &e) {
-  const CallNode *call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  ICHECK_EQ(call->args.size(), 1U);
-  DataType t = call->dtype;
-  if (t.is_float() && t.bits() == 32) {
-    if (t.lanes() == 2) {
-      return Call(t, builtin::call_pure_extern(),
-                  {StringImm("tl::vec_exp2_f2"), call->args[0]});
-    }
-    if (t.lanes() == 4) {
-      return Call(t, builtin::call_pure_extern(),
-                  {StringImm("tl::vec_exp2_f4"), call->args[0]});
-    }
-  }
-  return DispatchPureExtern<MUSAMath>(e);
-}
-
-static PrimExpr DispatchMUSAIsFinite(const PrimExpr &e) {
+static PrimExpr DispatchCUDAIsFinite(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
   ICHECK(call != nullptr);
   ICHECK_EQ(call->args.size(), 1U);
@@ -166,15 +138,22 @@ static PrimExpr DispatchMUSAIsFinite(const PrimExpr &e) {
   return e;
 }
 
-TVM_REGISTER_OP("tir.rsqrt")
-    .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic",
-                               DispatchPureExtern<MUSAMath>, 11);
+template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
+  const CallNode *call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  ICHECK_EQ(call->args.size(), 5); // mask, value, warp_id, width, warp_size
+  Array<PrimExpr> cuda_args{
+      {call->args[0], call->args[1], call->args[2], call->args[3]}};
+  return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), cuda_args,
+              call->annotations);
+}
 
-TVM_REGISTER_OP("tir.exp2")
-    .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic", DispatchMUSAExp2, 11);
+TVM_REGISTER_OP("tir.rsqrt")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
 
 TVM_REGISTER_OP("tir.isfinite")
-    .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic", DispatchMUSAIsFinite);
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAIsFinite);
 
 } // namespace intrin
 } // namespace codegen

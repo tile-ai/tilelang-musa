@@ -5,11 +5,11 @@
 
 #include "op/copy.h"
 
+#include "backend/musa/codegen/musa.h"
 #include "backend/musa/op/copy.h"
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
-#include "target/musa.h"
 #include "target/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"

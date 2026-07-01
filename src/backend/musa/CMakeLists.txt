@@ -19,9 +19,9 @@ add_compile_definitions("MUSA_MAJOR_VERSION=${MUSAToolkit_VERSION_MAJOR}")
 
 file(GLOB TILE_LANG_MUSA_SRCS
   src/runtime/runtime.cc
-  src/target/codegen_musa.cc
-  src/target/ptx.cc
-  src/target/rt_mod_musa.cc
+  src/backend/musa/codegen/ptx.cc
+  src/backend/musa/codegen/codegen_musa.cc
+  src/backend/musa/codegen/rt_mod_musa.cc
   src/backend/musa/op/*.cc
 )
 

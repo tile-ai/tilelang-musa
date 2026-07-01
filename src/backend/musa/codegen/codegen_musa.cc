@@ -17,14 +17,15 @@
 #include <utility>
 #include <vector>
 
-#include "../op/builtin.h"
-#include "../op/gemm.h"
-#include "./ptx.h"
 #include "arith/pattern_match.h"
+#include "backend/musa/codegen/ptx.h"
+#include "op/builtin.h"
+#include "op/gemm.h"
 #include "tvm/node/cast.h"
 
 namespace tvm {
 namespace codegen {
+namespace musa_codegen = tvm::tl::codegen::musa;
 using namespace tvm::tl::codegen;
 using namespace ffi;
 
@@ -2248,10 +2249,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string data_ptr = this->PrintExpr(op->args[1]);
     std::string offset = this->PrintExpr(op->args[2]);
     std::string num_regs = this->PrintExpr(op->args[3]);
-    auto dtype_enum = tl::codegen::ptx::DTypeFromString(dtype);
+    auto dtype_enum = musa_codegen::ptx::DTypeFromString(dtype);
     std::string cast_type = "uint32_t";
-    if (dtype_enum == tl::codegen::ptx::DataType::kFloat32 ||
-        dtype_enum == tl::codegen::ptx::DataType::kTensorFloat32) {
+    if (dtype_enum == musa_codegen::ptx::DataType::kFloat32 ||
+        dtype_enum == musa_codegen::ptx::DataType::kTensorFloat32) {
       cast_type = "float";
     }
     this->PrintIndent();
@@ -2373,10 +2374,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string b_bias = this->PrintExpr(op->args[9]);
     std::string c_ref = this->PrintExpr(op->args[10]);
     std::string c_bias = this->PrintExpr(op->args[11]);
-    auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
-    auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
-    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
-    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    auto dtype_a_enum = musa_codegen::ptx::DTypeFromString(A_dtype);
+    auto dtype_b_enum = musa_codegen::ptx::DTypeFromString(B_dtype);
+    auto dtype_c_enum = musa_codegen::ptx::DTypeFromString(C_dtype);
+    auto [m, n, k] = musa_codegen::ptx::ParseMMAShape(shape);
 
     need_mma_instruction_h_ = true;
     this->PrintIndent();
@@ -2385,23 +2386,23 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "(TransB)>(reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
         "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "
         "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)));\n";
-    tl::codegen::Replacer replacer;
+    musa_codegen::Replacer replacer;
 
     // TODO(lei): Type Workaround for TF32, should be removed when
     // we introduced tfloat32_t in the frontend.
-    std::string AType = tl::codegen::ptx::DTypeEnumToString(dtype_a_enum);
+    std::string AType = musa_codegen::ptx::DTypeEnumToString(dtype_a_enum);
     if (AType == "tl::DataType::kFloat32") {
       AType = "tl::DataType::kTensorFloat32";
     }
-    std::string BType = tl::codegen::ptx::DTypeEnumToString(dtype_b_enum);
+    std::string BType = musa_codegen::ptx::DTypeEnumToString(dtype_b_enum);
     if (BType == "tl::DataType::kFloat32") {
       BType = "tl::DataType::kTensorFloat32";
     }
-    std::string ARegType = tl::codegen::GetMMARegisterType(dtype_a_enum);
+    std::string ARegType = musa_codegen::GetMMARegisterType(dtype_a_enum);
     if (ARegType == "float") {
       ARegType = "uint32_t";
     }
-    std::string BRegType = tl::codegen::GetMMARegisterType(dtype_b_enum);
+    std::string BRegType = musa_codegen::GetMMARegisterType(dtype_b_enum);
     if (BRegType == "float") {
       BRegType = "uint32_t";
     }
@@ -2409,7 +2410,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);
     replacer.register_rule("(CType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+                           musa_codegen::ptx::DTypeEnumToString(dtype_c_enum));
     replacer.register_rule("(M)", std::to_string(m));
     replacer.register_rule("(N)", std::to_string(n));
     replacer.register_rule("(K)", std::to_string(k));
@@ -2418,7 +2419,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(ARegType)", ARegType);
     replacer.register_rule("(BRegType)", BRegType);
     replacer.register_rule("(CRegType)",
-                           tl::codegen::GetMMARegisterType(dtype_c_enum));
+                           musa_codegen::GetMMARegisterType(dtype_c_enum));
     replacer.register_rule("(A_ptr)", a_ref);
     replacer.register_rule("(A_offset)", a_bias);
     replacer.register_rule("(B_ptr)", b_ref);
@@ -2453,10 +2454,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string b_bias = this->PrintExpr(op->args[9]);
     std::string c_ref = this->PrintExpr(op->args[10]);
     std::string c_bias = this->PrintExpr(op->args[11]);
-    auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
-    auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
-    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
-    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    auto dtype_a_enum = musa_codegen::ptx::DTypeFromString(A_dtype);
+    auto dtype_b_enum = musa_codegen::ptx::DTypeFromString(B_dtype);
+    auto dtype_c_enum = musa_codegen::ptx::DTypeFromString(C_dtype);
+    auto [m, n, k] = musa_codegen::ptx::ParseMMAShape(shape);
 
     need_mma_sm70_instruction_h_ = true;
     this->PrintIndent();
@@ -2465,25 +2466,25 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "(TransB)>(reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
         "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "
         "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)));\n";
-    tl::codegen::Replacer replacer;
+    musa_codegen::Replacer replacer;
 
     replacer.register_rule("(AType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_a_enum));
+                           musa_codegen::ptx::DTypeEnumToString(dtype_a_enum));
     replacer.register_rule("(BType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_b_enum));
+                           musa_codegen::ptx::DTypeEnumToString(dtype_b_enum));
     replacer.register_rule("(CType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+                           musa_codegen::ptx::DTypeEnumToString(dtype_c_enum));
     replacer.register_rule("(M)", std::to_string(m));
     replacer.register_rule("(N)", std::to_string(n));
     replacer.register_rule("(K)", std::to_string(k));
     replacer.register_rule("(TransA)", A_layout == "row" ? "false" : "true");
     replacer.register_rule("(TransB)", B_layout == "row" ? "false" : "true");
     replacer.register_rule("(ARegType)",
-                           tl::codegen::GetMMARegisterType(dtype_a_enum));
+                           musa_codegen::GetMMARegisterType(dtype_a_enum));
     replacer.register_rule("(BRegType)",
-                           tl::codegen::GetMMARegisterType(dtype_b_enum));
+                           musa_codegen::GetMMARegisterType(dtype_b_enum));
     replacer.register_rule("(CRegType)",
-                           tl::codegen::GetMMARegisterType(dtype_c_enum));
+                           musa_codegen::GetMMARegisterType(dtype_c_enum));
     replacer.register_rule("(A_ptr)", a_ref);
     replacer.register_rule("(A_offset)", a_bias);
     replacer.register_rule("(B_ptr)", b_ref);
@@ -2526,7 +2527,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string sparse_selector = this->PrintExpr(op->args[14]);
     bool saturate = Downcast<Bool>(op->args[15])->value;
     this->PrintIndent();
-    std::string asm_code = PrintMMAAssembly(
+    std::string asm_code = musa_codegen::PrintMMAAssembly(
         shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_offset,
         b_ref, b_offset, c_ref, c_offset, metadata, metadata_offset,
         sparse_selector, "", true, saturate);
@@ -2562,20 +2563,20 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     const bool a_is_shared = true;
     this->PrintIndent();
-    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    auto [m, n, k] = musa_codegen::ptx::ParseMMAShape(shape);
     need_wgmma_instruction_h_ = true;
     std::string wgmma_asm_code =
         "tl::wgmma_ss<(AType), (BType), (CType), (M), (N), (K), (tnspA), "
         "(tnspB), (scaleA), (scaleB)>(uint64_t((desc_a) + (A_offset)), "
         "uint64_t((desc_b) + (B_offset)), ((uint32_t*)((C))), (scale_out));\n";
     // replace patterns
-    tl::codegen::Replacer replacer;
+    musa_codegen::Replacer replacer;
 
-    std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
+    std::string AType = musa_codegen::ptx::DTypeEnumToString(A_dtype);
     if (AType == "tl::DataType::kFloat32") {
       AType = "tl::DataType::kTensorFloat32";
     }
-    std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
+    std::string BType = musa_codegen::ptx::DTypeEnumToString(B_dtype);
     if (BType == "tl::DataType::kFloat32") {
       BType = "tl::DataType::kTensorFloat32";
     }
@@ -2583,7 +2584,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);
     replacer.register_rule("(CType)",
-                           tl::codegen::ptx::DTypeEnumToString(C_dtype));
+                           musa_codegen::ptx::DTypeEnumToString(C_dtype));
     replacer.register_rule("(M)", std::to_string(m));
     replacer.register_rule("(N)", std::to_string(n));
     replacer.register_rule("(K)", std::to_string(k));
@@ -2630,10 +2631,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     bool scale_in_a = Downcast<Bool>(op->args[12])->value;
     bool scale_in_b = Downcast<Bool>(op->args[13])->value;
 
-    auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
-    auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
-    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
-    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    auto dtype_a_enum = musa_codegen::ptx::DTypeFromString(A_dtype);
+    auto dtype_b_enum = musa_codegen::ptx::DTypeFromString(B_dtype);
+    auto dtype_c_enum = musa_codegen::ptx::DTypeFromString(C_dtype);
+    auto [m, n, k] = musa_codegen::ptx::ParseMMAShape(shape);
 
     need_wgmma_instruction_h_ = true;
     this->PrintIndent();
@@ -2645,12 +2646,12 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "reinterpret_cast<uint32_t*>((C_ptr) + (C_offset)), "
         "(scale_out));\n";
 
-    tl::codegen::Replacer replacer;
-    std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
+    musa_codegen::Replacer replacer;
+    std::string AType = musa_codegen::ptx::DTypeEnumToString(A_dtype);
     if (AType == "tl::DataType::kFloat32") {
       AType = "tl::DataType::kTensorFloat32";
     }
-    std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
+    std::string BType = musa_codegen::ptx::DTypeEnumToString(B_dtype);
     if (BType == "tl::DataType::kFloat32") {
       BType = "tl::DataType::kTensorFloat32";
     }
@@ -2658,7 +2659,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);
     replacer.register_rule("(CType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+                           musa_codegen::ptx::DTypeEnumToString(dtype_c_enum));
     replacer.register_rule("(M)", std::to_string(m));
     replacer.register_rule("(N)", std::to_string(n));
     replacer.register_rule("(K)", std::to_string(k));
@@ -2693,7 +2694,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask3 = this->PrintExpr(op->args[12]);
     bool enable_ws = Downcast<Bool>(op->args[13])->value;
 
-    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
+    auto dtype_c_enum = musa_codegen::ptx::DTypeFromString(C_dtype);
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
@@ -2703,9 +2704,9 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
-    tl::codegen::Replacer replacer;
+    musa_codegen::Replacer replacer;
     replacer.register_rule("(CType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+                           musa_codegen::ptx::DTypeEnumToString(dtype_c_enum));
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
@@ -2740,7 +2741,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask2 = this->PrintExpr(op->args[11]);
     std::string mask3 = this->PrintExpr(op->args[12]);
 
-    auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
+    auto dtype_enum = musa_codegen::ptx::DTypeFromString(kind_dtype);
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
@@ -2751,9 +2752,9 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
-    tl::codegen::Replacer replacer;
+    musa_codegen::Replacer replacer;
     replacer.register_rule("(CType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_enum));
+                           musa_codegen::ptx::DTypeEnumToString(dtype_enum));
     replacer.register_rule("(A)", a_ref);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
@@ -2901,10 +2902,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // use size of argument list to indicate whether or not to use predicated
     // cp.async
     if (op->args.size() == 5) {
-      this->stream << PrintCpAsyncAssembly(dst, dst_offset, src, src_offset,
-                                           size);
+      this->stream << musa_codegen::PrintCpAsyncAssembly(dst, dst_offset, src,
+                                                         src_offset, size);
     } else {
-      this->stream << PrintPredicatedCpAsyncAssembly(
+      this->stream << musa_codegen::PrintPredicatedCpAsyncAssembly(
           dst, dst_offset, src, src_offset, size, this->PrintExpr(op->args[5]));
     }
   } else if (op->op.same_as(builtin::ptx_cp_async_bulk())) {
@@ -2918,8 +2919,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     CHECK(barrier_id < barrier_count_);
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
-    this->stream << PrintCpAsyncBulkAsm(dst, dst_offset, src, src_offset, size,
-                                        barrier);
+    this->stream << musa_codegen::PrintCpAsyncBulkAsm(
+        dst, dst_offset, src, src_offset, size, barrier);
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
     this->stream << "__asm__ __volatile__(\"cp.async.commit_group;\");\n\n";
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
@@ -2933,14 +2934,15 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     std::string thread_count = this->PrintExpr(op->args[1]);
-    this->stream << PrintInitBarrierThreadCountAsm(barrier, thread_count);
+    this->stream << musa_codegen::PrintInitBarrierThreadCountAsm(barrier,
+                                                                 thread_count);
   } else if (op->op.same_as(builtin::ptx_wait_barrier())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;
     CHECK(barrier_id < barrier_count_);
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
-    this->stream << PrintWaitBarrierAsm(barrier);
+    this->stream << musa_codegen::PrintWaitBarrierAsm(barrier);
   } else if (op->op.same_as(builtin::ptx_ldg32())) {
     /*
     asm volatile (
