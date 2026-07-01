@@ -9,14 +9,41 @@
 
 namespace tl {
 
-template <typename BarrierType = uint64_t>
+template <CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL,
+          int l2_cache_policy = 0, typename BarrierType = uint64_t>
 TL_DEVICE void tma_load(void *smem_ptr, void const *gmem_ptr,
                         int32_t const &bar_id, uint32_t size) {
-  mute::MP31_BLK_COPY_G2S::copy(gmem_ptr, bar_id, smem_ptr, size);
+  constexpr SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE;
+  constexpr SmemSwizzleStride ss = SmemSwizzleStride::B256;
+  constexpr SmemSwizzleLine sl = SmemSwizzleLine::B256;
+  constexpr PrefetchSize prefetch = PrefetchSize::B128;
+  uint64_t gmem_int_ptr = reinterpret_cast<uint64_t>(gmem_ptr);
+  uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
+  __musa_tme_ld_blk(
+      make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
+      make_ptr_with_address_space<AddressSpace::Global>(gmem_int_ptr), size,
+      bar_id, static_cast<int32_t>(sg), static_cast<int32_t>(ss),
+      static_cast<int32_t>(sl), static_cast<int32_t>(prefetch),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint),
+      l2_cache_policy);
 }
 
+template <CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL,
+          int l2_cache_policy = 0>
 TL_DEVICE void tma_store(void *gmem_ptr, void const *smem_ptr, uint32_t size) {
-  mute::MP31_BLK_COPY_S2G::copy(smem_ptr, gmem_ptr, size);
+  constexpr SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE;
+  constexpr SmemSwizzleStride ss = SmemSwizzleStride::B256;
+  constexpr SmemSwizzleLine sl = SmemSwizzleLine::B256;
+  uint64_t gmem_int_ptr = reinterpret_cast<uint64_t>(gmem_ptr);
+  uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
+  __musa_tme_st_blk(
+      make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
+      make_ptr_with_address_space<AddressSpace::Global>(gmem_int_ptr), size,
+      static_cast<int32_t>(sg), static_cast<int32_t>(ss),
+      static_cast<int32_t>(sl), static_cast<int32_t>(inner_hint),
+      static_cast<int32_t>(outer_hint), l2_cache_policy);
 }
 
 TL_DEVICE void prefetch_tma_descriptor(const MUtensorDescriptor &descriptor) {

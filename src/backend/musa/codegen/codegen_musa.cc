@@ -2112,8 +2112,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto arg0_call = op->args[0].as<CallNode>();
     if (arg0_call && arg0_call->op.same_as(builtin::address_of())) {
       ICHECK_EQ(op->args.size(), 7U);
-      CheckMUSATMACachePolicySupported("1D tma_load", inner_hint, outer_hint);
-      ss << "tl::tma_load(";
+      ss << "tl::tma_load<" << inner_hint << ", " << outer_hint << ">(";
       ss << this->PrintExpr(op->args[0]) << ", ";
       ss << this->PrintExpr(op->args[1]) << ", ";
       ss << print_mbarrier_id(op->args[2]) << ", ";
@@ -2173,9 +2172,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto arg0_call = op->args[0].as<CallNode>();
       if (arg0_call && arg0_call->op.same_as(builtin::address_of())) {
         ICHECK_EQ(op->args.size(), 7U);
-        CheckMUSATMACachePolicySupported("1D tma_store", inner_hint,
-                                         outer_hint);
-        ss << "tl::tma_store(";
+        ss << "tl::tma_store<" << inner_hint << ", " << outer_hint << ">(";
         ss << this->PrintExpr(op->args[0]) << ", "; // gmem_ptr
         ss << this->PrintExpr(op->args[1]) << ", "; // smem_ptr
         ss << this->PrintExpr(op->args[2]);         // size_bytes
