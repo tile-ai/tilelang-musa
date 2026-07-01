@@ -2908,7 +2908,7 @@ private:
 /// Volta-style) cannot be used with TMA.
 static bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
   // Recognised swizzle → TMA with swizzle.
-  if (DetectSwizzleMode(layout, buffer) != SwizzleMode::kNone) {
+  if (!DetectSwizzleMode(layout, buffer).IsNone()) {
     return true;
   }
   // Identity / row-major linear → TMA without swizzle.
