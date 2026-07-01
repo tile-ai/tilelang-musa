@@ -132,7 +132,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
           sync_barrier, {IntImm(DataType::Int(32), sync_barrier_id)});
       thread_reduce_args.push_back(barrier_id);
     }
-    if (reducing_threads >= 32) {
+    if (reducing_threads > Impl::WarpSize(lower_args.target)) {
       PrimExpr workspace = lower_args.add_workspace(
           *as_const_int(lower_args.thread_bounds->extent), buffer->dtype);
       thread_reduce_args.push_back(workspace);
