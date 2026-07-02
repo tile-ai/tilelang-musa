@@ -54,13 +54,38 @@ class KernelCache:
 
     @staticmethod
     @functools.cache
-    def _get_compile_args() -> dict:
+    def _get_source_compile_args() -> dict:
+        if sys.platform == "win32":
+            from tilelang.contrib.msvc import create_shared as msvc_create_shared
+
+            return {"fcompile": msvc_create_shared}
+
         if sys.platform != "darwin":
             return {}
 
         from torch.utils import cpp_extension
 
         return {"options": ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]}
+
+    @staticmethod
+    @functools.cache
+    def _get_export_link_args() -> dict:
+        if sys.platform == "win32":
+            from tilelang.contrib.msvc import create_shared as msvc_create_shared
+
+            return {"fcompile": msvc_create_shared}
+
+        return {}
+
+    @staticmethod
+    @functools.cache
+    def _get_export_link_args() -> dict:
+        if sys.platform == "win32":
+            from tilelang.contrib.msvc import create_shared as msvc_create_shared
+
+            return {"fcompile": msvc_create_shared}
+
+        return {}
 
     @staticmethod
     @functools.cache
@@ -448,10 +473,10 @@ class KernelCache:
         # Use atomic POSIX replace, so other processes cannot see a partial write
         os.replace(temp_path, path)
 
-    @classmethod
-    def _safe_write_executable(cls, executable: Executable, path: str):
+    @staticmethod
+    def _safe_write_executable(executable: Executable, path: str, export_kwargs: dict | None = None):
         temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.so")
-        executable.export_library(temp_path, **cls._get_compile_args())
+        executable.export_library(temp_path, **(export_kwargs or {}))
         os.replace(temp_path, path)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):
