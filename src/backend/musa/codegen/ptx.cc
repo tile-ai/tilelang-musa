@@ -930,7 +930,14 @@ inline uint32_t GetNumMMAComputations(int m, int n, int k,
  * \param dtype_c The data type of accumulator c.
  * \param sparse Whether it's Sparse MMA or not.
  */
-inline std::tuple<std::string, std::string, std::string>
+inline const char *MMAOutputScalarType(ptx::DataType dtype_c);
+
+inline std::pair<std::string, std::string>
+GetMMAOutputTemporaries(ptx::DataType dtype_c, int num_operands_c,
+                        const ptx::FragAttrs &frag_attr_c);
+
+inline std::tuple<std::string, std::string, std::string, std::string,
+                  std::string>
 GetMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
                ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse) {
   std::stringstream templates, inputs, outputs;
@@ -1000,10 +1007,38 @@ GetMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
     if (i != 0) {
       outputs << ",";
     }
-    outputs << " \"=" << frag_attr_c.reg_type << "\"((" << frag_attr_c.ptr_type
-            << "(D))[" << i << "])";
+    outputs << " \"=" << frag_attr_c.reg_type << "\"(d" << i << ")";
   }
-  return std::make_tuple(templates.str(), inputs.str(), outputs.str());
+  auto [output_decls, output_stores] =
+      GetMMAOutputTemporaries(dtype_c, num_operands_c, frag_attr_c);
+  return std::make_tuple(templates.str(), inputs.str(), outputs.str(),
+                         output_decls, output_stores);
+}
+
+inline const char *MMAOutputScalarType(ptx::DataType dtype_c) {
+  switch (dtype_c) {
+  case ptx::DataType::kFloat32:
+    return "float";
+  case ptx::DataType::kFloat64:
+    return "double";
+  case ptx::DataType::kInt32:
+    return "int";
+  default:
+    return "uint32_t";
+  }
+}
+
+inline std::pair<std::string, std::string>
+GetMMAOutputTemporaries(ptx::DataType dtype_c, int num_operands_c,
+                        const ptx::FragAttrs &frag_attr_c) {
+  std::stringstream declarations, stores;
+  const char *scalar_type = MMAOutputScalarType(dtype_c);
+  for (int i = 0; i < num_operands_c; ++i) {
+    declarations << "    " << scalar_type << " d" << i << ";\n";
+    stores << "    ((" << frag_attr_c.ptr_type << "(D))[" << i
+           << "]) = d" << i << ";\n";
+  }
+  return {declarations.str(), stores.str()};
 }
 
 inline std::tuple<std::string, std::string, std::string, std::string>
@@ -1150,14 +1185,16 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
                          bit_op, sparse, saturate);
   std::string asm_code = R"(
   {
+{output_decls}
     __asm__ __volatile__(
       "mma{.sparse}.sync.aligned{.shape}{.alayout}{.blayout}{.saturate}{.dtype}{.atype}{.btype}{.ctype}{.bitop}"
       "{templates};\n"
       : {outputs}
       : {inputs});
+{output_stores}
   }
 )";
-  auto [templates_str, inputs_str, outputs_str] =
+  auto [templates_str, inputs_str, outputs_str, output_decls, output_stores] =
       GetMMAOperands(m, n, k, dtype_a, dtype_b, dtype_c, sparse);
 
   // replace patterns
@@ -1176,6 +1213,8 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
   replacer.register_rule("{templates}", templates_str);
   replacer.register_rule("{outputs}", outputs_str);
   replacer.register_rule("{inputs}", inputs_str);
+  replacer.register_rule("{output_decls}", output_decls);
+  replacer.register_rule("{output_stores}", output_stores);
   asm_code = replacer.rewrite(asm_code);
   replacer.empty_rules();
   replacer.register_rule("A", a_ptr + " + " + a_elem_offset);

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 from collections import deque
+import os
 from tvm import tir
 from tvm.tir import Var
+from tvm.script.ir_builder.tir import evaluate as T_evaluate
 from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
@@ -337,6 +339,90 @@ def Kernel(
             attrs["cluster_dims"] = cluster_dims
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
+
+
+def _normalize_gpu_threads(threads: int | list[int] | tuple | None) -> list[int]:
+    if threads is None:
+        threads = 128
+
+    if isinstance(threads, int):
+        return [threads, 1, 1]
+    if isinstance(threads, list):
+        return threads + [1] * (3 - len(threads))
+    if isinstance(threads, tuple):
+        return list(threads) + [1] * (3 - len(threads))
+    raise TypeError("threads must be an integer or a list/tuple of integers")
+
+
+def _normalize_cluster_dims(
+    cluster_dims: int | tuple[int, int, int] | list[int] | None,
+) -> list[int] | None:
+    if cluster_dims is None:
+        return None
+    if isinstance(cluster_dims, (list, tuple)):
+        normalized = list(cluster_dims) + [1] * (3 - len(cluster_dims))
+    elif isinstance(cluster_dims, int):
+        normalized = [cluster_dims, 1, 1]
+    else:
+        raise ValueError("cluster_dims must be a list or tuple of integers")
+    return None if normalized == [1, 1, 1] else normalized
+
+
+def _load_cuda_source(source_code_or_path: str | os.PathLike[str]) -> str:
+    source = os.fspath(source_code_or_path)
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("source_code_or_path must be a non-empty source string or source path")
+
+    expanded = os.path.expanduser(source)
+    if os.path.isfile(expanded):
+        with open(expanded, encoding="utf-8") as f:
+            return f.read()
+
+    source_markers = ("\n", "__global__", 'extern "C"', "#include")
+    if any(marker in source for marker in source_markers):
+        return source
+
+    contains_path_sep = os.path.sep in source or (os.path.altsep is not None and os.path.altsep in source)
+    if contains_path_sep or source.endswith((".cu", ".cuh", ".cuda", ".cpp", ".cc", ".c")):
+        raise FileNotFoundError(f"CUDA source file not found: {source}")
+
+    return source
+
+
+def CUDASourceCodeKernel(
+    *blocks: int | tir.PrimExpr,
+    threads: int | list[int] | tuple | None = None,
+    source_code_or_path: str | os.PathLike[str],
+    entry_name: str = "main_kernel",
+    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+    prelude: str | None = None,
+) -> None:
+    """Launch a CUDA source-code kernel from an inline string or source file."""
+    from tilelang.language.eager.builder import Builder
+
+    if Builder.current() is None:
+        raise JITNoBuilderError(
+            "T.CUDASourceCodeKernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available."
+        )
+
+    source = _load_cuda_source(source_code_or_path)
+    if prelude is not None:
+        source = prelude + "\n" + source
+
+    if not isinstance(entry_name, str) or not entry_name.strip():
+        raise ValueError("entry_name must be a non-empty string when provided")
+
+    attrs: dict = {
+        "code_block_source": source,
+        "code_block_entry_name": entry_name,
+    }
+
+    normalized_cluster_dims = _normalize_cluster_dims(cluster_dims)
+    if normalized_cluster_dims is not None:
+        attrs["cluster_dims"] = normalized_cluster_dims
+
+    with _ffi_api.KernelLaunch(blocks, _normalize_gpu_threads(threads), attrs):
+        T_evaluate(tir.call_extern("int32", entry_name))
 
 
 def get_thread_binding(dim: int = 0) -> Var:
