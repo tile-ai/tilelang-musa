@@ -1914,6 +1914,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
+             op->op.same_as(tl::max2_nan()) ||
+             op->op.same_as(tl::min2_nan()) ||
              op->op.same_as(tl::abs2())) {
     ICHECK(op->dtype.lanes() == 2 && UseMusaNativeVector(op->dtype))
         << "MUSA packed x2 intrinsics require native x2 dtype, but got "
@@ -1932,6 +1934,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       op_name = "max2";
     else if (op->op.same_as(tl::min2()))
       op_name = "min2";
+    else if (op->op.same_as(tl::max2_nan()))
+      op_name = "max2_nan";
+    else if (op->op.same_as(tl::min2_nan()))
+      op_name = "min2_nan";
     else
       op_name = "abs2";
 

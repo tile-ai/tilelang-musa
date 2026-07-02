@@ -83,6 +83,66 @@ struct MinOpNan {
   }
 };
 
+struct SumOp_bf16x2 {
+  TL_DEVICE tl_bf2 operator()(tl_bf2 const &x, tl_bf2 const &y) {
+    return tl::add2(x, y);
+  }
+};
+
+struct MaxOp_bf16x2 {
+  TL_DEVICE tl_bf2 operator()(tl_bf2 const &x, tl_bf2 const &y) {
+    return tl::max2(x, y);
+  }
+};
+
+struct MinOp_bf16x2 {
+  TL_DEVICE tl_bf2 operator()(tl_bf2 const &x, tl_bf2 const &y) {
+    return tl::min2(x, y);
+  }
+};
+
+struct SumOp_fp16x2 {
+  TL_DEVICE tl_h2 operator()(tl_h2 const &x, tl_h2 const &y) {
+    return tl::add2(x, y);
+  }
+};
+
+struct MaxOp_fp16x2 {
+  TL_DEVICE tl_h2 operator()(tl_h2 const &x, tl_h2 const &y) {
+    return tl::max2(x, y);
+  }
+};
+
+struct MinOp_fp16x2 {
+  TL_DEVICE tl_h2 operator()(tl_h2 const &x, tl_h2 const &y) {
+    return tl::min2(x, y);
+  }
+};
+
+struct MaxOpNan_bf16x2 {
+  TL_DEVICE tl_bf2 operator()(tl_bf2 const &x, tl_bf2 const &y) {
+    return tl::max2_nan(x, y);
+  }
+};
+
+struct MinOpNan_bf16x2 {
+  TL_DEVICE tl_bf2 operator()(tl_bf2 const &x, tl_bf2 const &y) {
+    return tl::min2_nan(x, y);
+  }
+};
+
+struct MaxOpNan_fp16x2 {
+  TL_DEVICE tl_h2 operator()(tl_h2 const &x, tl_h2 const &y) {
+    return tl::max2_nan(x, y);
+  }
+};
+
+struct MinOpNan_fp16x2 {
+  TL_DEVICE tl_h2 operator()(tl_h2 const &x, tl_h2 const &y) {
+    return tl::min2_nan(x, y);
+  }
+};
+
 struct BitAndOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return x & y;

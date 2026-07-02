@@ -282,6 +282,8 @@ TVM_DLL const Op &fma2();
 TVM_DLL const Op &max2();
 TVM_DLL const Op &min2();
 TVM_DLL const Op &abs2();
+TVM_DLL const Op &max2_nan();
+TVM_DLL const Op &min2_nan();
 
 // MUSA accelerated compute ops.
 // mul_half_float_to_bfloat16_x4(half_vec, float_vec_or_scalar)

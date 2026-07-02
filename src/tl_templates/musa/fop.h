@@ -31,12 +31,28 @@ TL_DEVICE half_t scalar_min(half_t a, half_t b) {
   return half_t(__hmin(a.to_half(), b.to_half()));
 }
 
+TL_DEVICE half_t scalar_max_nan(half_t a, half_t b) {
+  return half_t(__hmax_nan(a.to_half(), b.to_half()));
+}
+
+TL_DEVICE half_t scalar_min_nan(half_t a, half_t b) {
+  return half_t(__hmin_nan(a.to_half(), b.to_half()));
+}
+
 TL_DEVICE bfloat16_t scalar_max(bfloat16_t a, bfloat16_t b) {
   return bfloat16_t(__hmax(__mt_bfloat16(a), __mt_bfloat16(b)));
 }
 
 TL_DEVICE bfloat16_t scalar_min(bfloat16_t a, bfloat16_t b) {
   return bfloat16_t(__hmin(__mt_bfloat16(a), __mt_bfloat16(b)));
+}
+
+TL_DEVICE bfloat16_t scalar_max_nan(bfloat16_t a, bfloat16_t b) {
+  return bfloat16_t(__hmax_nan(__mt_bfloat16(a), __mt_bfloat16(b)));
+}
+
+TL_DEVICE bfloat16_t scalar_min_nan(bfloat16_t a, bfloat16_t b) {
+  return bfloat16_t(__hmin_nan(__mt_bfloat16(a), __mt_bfloat16(b)));
 }
 
 TL_DEVICE tl_f2 add2(tl_f2 a, tl_f2 b) {
@@ -179,6 +195,18 @@ TL_DEVICE tl_h2 min2(tl_h2 a, tl_h2 b) {
       scalar_min(tl_h_elem_to_half(a[1]), tl_h_elem_to_half(b[1])));
 }
 
+TL_DEVICE tl_h2 max2_nan(tl_h2 a, tl_h2 b) {
+  return make_tl_h2(
+      scalar_max_nan(tl_h_elem_to_half(a[0]), tl_h_elem_to_half(b[0])),
+      scalar_max_nan(tl_h_elem_to_half(a[1]), tl_h_elem_to_half(b[1])));
+}
+
+TL_DEVICE tl_h2 min2_nan(tl_h2 a, tl_h2 b) {
+  return make_tl_h2(
+      scalar_min_nan(tl_h_elem_to_half(a[0]), tl_h_elem_to_half(b[0])),
+      scalar_min_nan(tl_h_elem_to_half(a[1]), tl_h_elem_to_half(b[1])));
+}
+
 TL_DEVICE tl_h2 abs2(tl_h2 a) {
   return make_tl_h2(abs(tl_h_elem_to_half(a[0])), abs(tl_h_elem_to_half(a[1])));
 }
@@ -296,6 +324,20 @@ TL_DEVICE tl_bf2 min2(tl_bf2 a, tl_bf2 b) {
   return make_tl_bf2(
       scalar_min(tl_bf_elem_to_bfloat16(a[0]), tl_bf_elem_to_bfloat16(b[0])),
       scalar_min(tl_bf_elem_to_bfloat16(a[1]), tl_bf_elem_to_bfloat16(b[1])));
+}
+
+TL_DEVICE tl_bf2 max2_nan(tl_bf2 a, tl_bf2 b) {
+  return make_tl_bf2(scalar_max_nan(tl_bf_elem_to_bfloat16(a[0]),
+                                    tl_bf_elem_to_bfloat16(b[0])),
+                     scalar_max_nan(tl_bf_elem_to_bfloat16(a[1]),
+                                    tl_bf_elem_to_bfloat16(b[1])));
+}
+
+TL_DEVICE tl_bf2 min2_nan(tl_bf2 a, tl_bf2 b) {
+  return make_tl_bf2(scalar_min_nan(tl_bf_elem_to_bfloat16(a[0]),
+                                    tl_bf_elem_to_bfloat16(b[0])),
+                     scalar_min_nan(tl_bf_elem_to_bfloat16(a[1]),
+                                    tl_bf_elem_to_bfloat16(b[1])));
 }
 
 TL_DEVICE tl_bf2 abs2(tl_bf2 a) {
