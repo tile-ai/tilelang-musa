@@ -7,20 +7,19 @@ from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
-from .gemm_mma import GemmMMA
-from tilelang.backend.gemm import resolve_gemm_impl
+from tilelang.tileop.gemm.registry import resolve_gemm_impl
 from tilelang import _ffi_api
 
 
 @tvm_ffi.register_global_func("tl.gemm_py.infer_layout")
-def gemm_py_infer_layout(gemm_py: GemmMMA, target: Target, thread_bounds: Range):
+def gemm_py_infer_layout(gemm_py, target: Target, thread_bounds: Range):
     thread_nums = thread_bounds.extent
     return gemm_py.infer_layout(target, thread_nums)
 
 
 @tvm_ffi.register_global_func("tl.gemm_py.lower")
 def gemm_py_lower(
-    gemm_py: GemmMMA,
+    gemm_py,
     layout_map,
     target: Target,
     thread_bounds: Range,

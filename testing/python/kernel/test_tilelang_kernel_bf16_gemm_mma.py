@@ -6,7 +6,7 @@ import tilelang.testing
 from tvm import DataType
 import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
-from tilelang.intrinsics.mma_macro_generator import (
+from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     TensorCoreIntrinEmitter,
 )
 from tilelang.transform import simplify_prim_func

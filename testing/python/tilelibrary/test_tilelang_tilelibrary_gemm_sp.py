@@ -7,7 +7,7 @@ import tilelang.language as T
 from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
 from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.utils.tensor import torch_assert_close
-from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
+from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
 musa_backend = getattr(torch.backends, "musa", None)
 if musa_backend is not None:

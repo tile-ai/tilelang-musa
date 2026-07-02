@@ -1,6 +1,6 @@
 from tilelang import tvm
 from tilelang.layout import Layout
-from tilelang.tileop.gemm.gemm_sqmma import GemmSQMMA
+from tilelang.musa.op.gemm.gemm_sqmma import GemmSQMMA
 
 
 _expand_input_shape = tvm.get_global_func("tl.transform._TestingExpandLayoutToBufferInputShape")

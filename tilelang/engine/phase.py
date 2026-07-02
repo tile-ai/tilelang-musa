@@ -32,6 +32,22 @@ def module_has_tma(mod: IRModule) -> bool:
     return any(func.attrs and func.attrs.get("tl.has_tma", False) for _, func in mod.functions.items())
 
 
+def lower_l2_persistent_for_target(mod: IRModule, target: Target) -> IRModule:
+    if target.kind.name == "cuda":
+        return tilelang.cuda.transform.LowerL2Persistent()(mod)
+    if target.kind.name == "musa":
+        return tilelang.musa.transform.LowerL2Persistent()(mod)
+    return mod
+
+
+def persist_threadblock_for_target(mod: IRModule, target: Target) -> IRModule:
+    if target.kind.name == "cuda":
+        return tilelang.cuda.transform.PersistThreadblock()(mod)
+    if target.kind.name == "musa":
+        return tilelang.musa.transform.PersistThreadblock()(mod)
+    return mod
+
+
 def allow_warp_group_reg_alloc(pass_ctx: PassContext, target: Target) -> bool:
     # MUSA backend does not use CUDA warp-group register annotations.
     return False
@@ -216,7 +232,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
-    mod = tilelang.transform.LowerL2Persistent()(mod)
+    mod = lower_l2_persistent_for_target(mod, target)
     # Decouple type cast vectorization constraints before vectorization.
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
@@ -288,7 +304,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.VectorizeSingleSide()(mod)
     mod = tilelang.transform.LowerLDGSTG()(mod)
     if mcc.is_ph1(target):
-        mod = tilelang.transform.LowerPHIntrin()(mod)
+        mod = tilelang.musa.transform.LowerPHIntrin()(mod)
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier
     if allow_global_thread_synchronization():
@@ -321,6 +337,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 
     # Transform threadblock to persistent threadblock
-    mod = tilelang.transform.PersistThreadblock()(mod)
+    mod = persist_threadblock_for_target(mod, target)
 
     return mod
