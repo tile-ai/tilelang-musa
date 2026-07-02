@@ -6,6 +6,7 @@
 #include "op/atomic_add.h"
 
 #include "backend/cuda/op/copy.h"
+#include "backend/cuda/stubs/cuda.h"
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"

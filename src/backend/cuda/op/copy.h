@@ -18,6 +18,9 @@ namespace cuda {
 
 using namespace tir;
 
+// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
+int to_CUtensorMapDataType(DataType dtype);
+
 enum class CopyInst : uint8_t {
   kNormal = 0,
   kLDSM = 1,

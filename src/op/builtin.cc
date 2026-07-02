@@ -10,7 +10,6 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "backend/cuda/codegen/stubs/cuda.h"
 #include "target/utils.h"
 
 namespace tvm {

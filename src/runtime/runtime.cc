@@ -9,7 +9,7 @@
 #if defined(MUSA_MAJOR_VERSION)
 #include <musa.h>
 #else
-#include "backend/cuda/codegen/stubs/cuda.h"
+#include "backend/cuda/stubs/cuda.h"
 #endif
 
 #include <cstdint>

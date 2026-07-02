@@ -5,8 +5,8 @@
 
 #include "op/copy.h"
 
-#include "backend/musa/codegen/musa.h"
 #include "backend/musa/op/copy.h"
+#include "backend/musa/tma_types.h"
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
@@ -142,41 +142,41 @@ bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
 }
 
 int to_MUtensorDescriptorDataType(DataType dtype) {
-  MUtensorDescriptorDataType tp;
+  musa::MUtensorDescriptorDataType tp;
   if (dtype.is_float()) {
     switch (dtype.bits()) {
     case 64:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_FLOAT64;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_FLOAT64;
       break;
     case 32:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_FLOAT32;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_FLOAT32;
       break;
     case 16:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_FLOAT16;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_FLOAT16;
       break;
     case 8:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
       break;
     default:
       ICHECK(0) << dtype;
     }
   } else if (dtype.is_bfloat16()) {
-    tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_BFLOAT16;
+    tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_BFLOAT16;
   } else if (dtype.is_float8()) {
-    tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
+    tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
   } else if (dtype.is_int()) {
     switch (dtype.bits()) {
     case 64:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_INT64;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_INT64;
       break;
     case 32:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_INT32;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_INT32;
       break;
     case 16:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT16;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT16;
       break;
     case 8:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
       break;
     default:
       ICHECK(0) << dtype;
@@ -184,16 +184,16 @@ int to_MUtensorDescriptorDataType(DataType dtype) {
   } else if (dtype.is_uint()) {
     switch (dtype.bits()) {
     case 64:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT64;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT64;
       break;
     case 32:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT32;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT32;
       break;
     case 16:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT16;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT16;
       break;
     case 8:
-      tp = MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
+      tp = musa::MU_TENSOR_DESCRIPTOR_DATA_TYPE_UINT8;
       break;
     default:
       ICHECK(0) << dtype;
@@ -1214,6 +1214,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
 
 Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer, CopyInst copy_inst) {
+  ICHECK(TargetIsMusa(T.target));
   const Buffer &src = op.src;
   const Buffer &dst = op.dst;
   const Array<Range> &src_range = op.src_range;
@@ -1319,10 +1320,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   // The first stride element should be 1
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   // Make global stride in bytes
-  auto stride_dtype =
-      TargetIsMusa(T.target) ? DataType::UInt(64) : DataType::Int(64);
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return cast(stride_dtype, e) * global_tensor->dtype.bytes();
+    return cast(DataType::UInt(64), e) * global_tensor->dtype.bytes();
   });
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
     auto stride = desc.global_stride[i].as<IntImmNode>();
@@ -1374,20 +1373,16 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
   desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
   // L2 & OOB
-  desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
-  desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  desc.l2_promotion = static_cast<int>(TensorMapL2Promotion::k128B);
+  desc.oob_fill = static_cast<int>(TensorMapFloatOOBFill::kNone);
 
   // Detect smem layout
   // Shared memory swizzling is crucial for TMA performance
   // It determines how data is arranged in shared memory banks to minimize bank
   // conflicts Different swizzle patterns (32B, 64B, 128B) offer different
   // trade-offs between access efficiency and memory usage
-  desc.interleave = TargetIsMusa(T.target)
-                        ? static_cast<int>(MU_TENSOR_DESCRIPTOR_INTERLEAVE_NONE)
-                        : static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
-  desc.swizzle = TargetIsMusa(T.target)
-                     ? static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE)
-                     : static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+  desc.interleave = static_cast<int>(MU_TENSOR_DESCRIPTOR_INTERLEAVE_NONE);
+  desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE);
   Layout shared_layout;
   auto active_layout = GetActiveLayout(T, shared_tensor);
   if (active_layout.has_value()) {
@@ -1398,52 +1393,13 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   }
   bool musa_force_swizzle_none = false;
   if (!shared_layout.defined()) {
-    desc.swizzle = TargetIsMusa(T.target)
-                       ? static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE)
-                       : static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+    desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE);
   } else if (StructuralEqual()(shared_layout, linear_layout)) {
-    desc.swizzle = TargetIsMusa(T.target)
-                       ? static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE)
-                       : static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-    musa_force_swizzle_none = TargetIsMusa(T.target);
-  } else if (TargetIsMusa(T.target) && IsMatrixLinearLayout(shared_layout)) {
     desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE);
     musa_force_swizzle_none = true;
-  } else if (!TargetIsMusa(T.target)) {
-    if (shared_layout->InputDim() < 2) {
-      LOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
-                   << "dimension " << shared_layout->InputDim()
-                   << ", fallback to normal copy.";
-      return fallback_to_normal("shared layout input dimension is less than 2");
-    }
-    const int ndim = static_cast<int>(shared_layout->InputDim());
-    auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
-    auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);
-    ICHECK(stride != nullptr && continuous != nullptr);
-    // We also need to check if the shape satisfies the following doc:
-    // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
-    SwizzleMode swizzle_mode =
-        DetectSwizzleMode(shared_layout, shared_tensor_unmapped);
-    if (swizzle_mode == SwizzleMode::kQuarter) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (swizzle_mode == SwizzleMode::kHalf) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (swizzle_mode == SwizzleMode::kFull) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
-    } else if (StructuralEqual()(
-                   shared_layout,
-                   makeGemmABLayoutPadded(*stride, *continuous,
-                                          shared_tensor->dtype.bits()))) {
-      LOG(WARNING) << "Bulk copy cannot support a padded layout for src: "
-                   << src->name << ", dst: " << dst->name
-                   << ", fallback to normal copy";
-      return fallback_to_normal("padded shared layout");
-    } else {
-      LOG(WARNING) << "Came across unsupported swizzle layout for src: "
-                   << src->name << ", dst: " << dst->name
-                   << ", fallback to normal copy";
-      return fallback_to_normal("unsupported shared swizzle layout");
-    }
+  } else if (IsMatrixLinearLayout(shared_layout)) {
+    desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE);
+    musa_force_swizzle_none = true;
   }
 
   auto get_k_major = [&](const Buffer &buf) -> int {
@@ -1454,7 +1410,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return -1;
   };
   // set swizzle granularity by elem_bytes and k_major
-  if (TargetIsMusa(T.target) && !musa_force_swizzle_none) {
+  if (!musa_force_swizzle_none) {
     int elem_bytes = shared_tensor->dtype.bytes();
     int is_k_major = get_k_major(shared_tensor);
     if (is_k_major < 0 && !shared_tensor.same_as(shared_tensor_unmapped)) {
@@ -1489,7 +1445,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   int split_count = 1;
   PrimExpr split_stride = 0;
   PrimExpr split_size_expr = 0;
-  if (TargetIsMusa(T.target) && is_load) {
+  if (is_load) {
     auto sqmma_opt = GetLayoutSQMMA(T, shared_tensor);
     auto k_major_opt = GetLayoutKMajor(T, shared_tensor);
     if (!sqmma_opt.has_value() &&
@@ -1551,53 +1507,13 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return fallback_to_normal("non-constant inner box dimension");
   }
   int instruction_dim = *inner_box_dim;
-  if (!TargetIsMusa(T.target)) {
-    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-      instruction_dim = 64 / src->dtype.bytes();
-    } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-      instruction_dim = 128 / src->dtype.bytes();
-    }
-  }
-  if (!TargetIsMusa(T.target) && instruction_dim > 256) {
-    // smem_box dim must be in [0, 256]
-    // if is 512, we need to split the copy into two parts
-    ICHECK((*inner_box_dim) % 256 == 0)
-        << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
-    instruction_dim = 256;
-  }
   ICHECK((*inner_box_dim) % instruction_dim == 0)
       << "inner_box_dim: " << *inner_box_dim
       << " is not divisible by instruction_dim: " << instruction_dim;
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
-  int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
-
-  // Check inner_box_dim_ for each swizzle type in a cleaner way
-  struct SwizzleCheck {
-    int swizzle;
-    int max_dim;
-  };
-  static const std::vector<SwizzleCheck> swizzle_checks = {
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B), 32},
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B), 64},
-      {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B), 128},
-  };
-  if (!TargetIsMusa(T.target)) {
-    for (const auto &check : swizzle_checks) {
-      if (desc.swizzle == check.swizzle && inner_box_dim_ > check.max_dim) {
-        LOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
-                        "with inner_box_dim_ > "
-                     << check.max_dim << ", will be fallback to normal copy";
-        return fallback_to_normal(
-            "swizzled shared box exceeds swizzle byte width");
-      }
-    }
-  }
-
-  if (TargetIsMusa(T.target)) {
-    desc.global_shape = desc.global_shape.Map(
-        [](PrimExpr e) { return cast(DataType::UInt(64), e); });
-  }
+  desc.global_shape = desc.global_shape.Map(
+      [](PrimExpr e) { return cast(DataType::UInt(64), e); });
 
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
@@ -1635,7 +1551,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   for (auto e : desc.smem_box)
     total_elements *= e;
 
-  if (TargetIsMusa(T.target) && split_count > 1) {
+  if (split_count > 1) {
     Array<PrimExpr> base_args;
     base_args.reserve(desc.rank + 4);
     base_args.push_back(create_descriptor);
@@ -1752,7 +1668,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     } else {
       total_bytes = total_elements * shared_tensor->dtype.bytes();
     }
-    if (TargetIsMusa(T.target) && split_count > 1) {
+    if (split_count > 1) {
       total_bytes *= split_count;
     }
     total_bytes = analyzer->Simplify(total_bytes);

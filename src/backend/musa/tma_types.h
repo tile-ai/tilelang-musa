@@ -2,6 +2,10 @@
 
 #include <tvm/runtime/logging.h>
 
+namespace tvm {
+namespace tl {
+namespace musa {
+
 /**
  * Tensor descriptor data type
  */
@@ -39,6 +43,18 @@ typedef enum MUtensorDescriptorInterleave_enum {
   MU_TENSOR_DESCRIPTOR_INTERLEAVE_256B
 } MUtensorDescriptorInterleave;
 
+enum class TensorMapL2Promotion : int {
+  kNone = 0,
+  k64B,
+  k128B,
+  k256B,
+};
+
+enum class TensorMapFloatOOBFill : int {
+  kNone = 0,
+  kNaNRequestZeroFMA,
+};
+
 typedef enum MUsmemSwizzleGranularity_enum {
   MU_SMEM_SWIZZLE_GRANULARITY_NONE = 0,
   MU_SMEM_SWIZZLE_GRANULARITY_B16,
@@ -61,3 +77,7 @@ inline constexpr const char *ToString(MUsmemSwizzleGranularity sg) {
     return "";
   }
 }
+
+} // namespace musa
+} // namespace tl
+} // namespace tvm

@@ -432,15 +432,15 @@ CodeGenTileLangMUSA::GetTMASmemBox(const PrimExpr &desc) const {
   return smem_box;
 }
 
-MUsmemSwizzleGranularity
+tl::musa::MUsmemSwizzleGranularity
 CodeGenTileLangMUSA::GetTMASwizzleGranularity(const PrimExpr &desc) const {
   const auto *var = desc.as<VarNode>();
   if (!var) {
-    return MU_SMEM_SWIZZLE_GRANULARITY_NONE;
+    return tl::musa::MU_SMEM_SWIZZLE_GRANULARITY_NONE;
   }
   auto it = tma_descriptor_args_.find(var->name_hint);
   if (it == tma_descriptor_args_.end()) {
-    return MU_SMEM_SWIZZLE_GRANULARITY_NONE;
+    return tl::musa::MU_SMEM_SWIZZLE_GRANULARITY_NONE;
   }
   const Array<PrimExpr> &args = it->second;
   auto rank = args[3].as<IntImmNode>()->value;
@@ -449,9 +449,9 @@ CodeGenTileLangMUSA::GetTMASwizzleGranularity(const PrimExpr &desc) const {
       << "arg's size must be equal desc_size(i.e. rank * 4 + 9)";
   const auto *sg = args[desc_size - 3].as<IntImmNode>();
   if (!sg) {
-    return MU_SMEM_SWIZZLE_GRANULARITY_NONE;
+    return tl::musa::MU_SMEM_SWIZZLE_GRANULARITY_NONE;
   }
-  return MUsmemSwizzleGranularity(sg->value);
+  return tl::musa::MUsmemSwizzleGranularity(sg->value);
 }
 
 std::string

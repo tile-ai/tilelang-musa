@@ -12,7 +12,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "musa.h"
+#include "backend/musa/tma_types.h"
 #include "target/source/codegen_c.h"
 #include "tvm/ffi/string.h"
 
@@ -175,7 +175,8 @@ private:
       "bf1622float2", "bf1622int16", "float22bf162", "bf162bf162"};
 
   std::vector<PrimExpr> GetTMASmemBox(const PrimExpr &desc) const;
-  MUsmemSwizzleGranularity GetTMASwizzleGranularity(const PrimExpr &desc) const;
+  tl::musa::MUsmemSwizzleGranularity
+  GetTMASwizzleGranularity(const PrimExpr &desc) const;
   std::string GetTMACachePolicy(const PrimExpr &hint,
                                 const std::string &field_name) const;
   std::string GetMUSATMALoadCallee(const PrimExpr &desc,

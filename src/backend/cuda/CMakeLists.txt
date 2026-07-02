@@ -31,7 +31,7 @@ if(TILELANG_USE_CUDA_STUBS)
   #   - cuModuleLoadData, cuLaunchKernel, cuMemsetD32_v2, etc.
   # These can be called directly without any wrapper macros.
   # ============================================================================
-  add_library(cuda_stub SHARED src/backend/cuda/codegen/stubs/cuda.cc)
+  add_library(cuda_stub SHARED src/backend/cuda/stubs/cuda.cc)
   target_include_directories(cuda_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   # Export symbols with visibility="default" when building
   target_compile_definitions(cuda_stub PRIVATE TILELANG_CUDA_STUB_EXPORTS)
@@ -55,7 +55,7 @@ if(TILELANG_USE_CUDA_STUBS)
   # The stub exports a minimal set of CUDA Runtime API entrypoints used by TVM
   # and lazily loads libcudart at runtime on first API call.
   # ============================================================================
-  add_library(cudart_stub SHARED src/backend/cuda/codegen/stubs/cudart.cc)
+  add_library(cudart_stub SHARED src/backend/cuda/stubs/cudart.cc)
   target_include_directories(cudart_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_compile_definitions(cudart_stub PRIVATE TILELANG_CUDART_STUB_EXPORTS)
   target_link_libraries(cudart_stub PRIVATE ${CMAKE_DL_LIBS})
@@ -83,7 +83,7 @@ if(TILELANG_USE_CUDA_STUBS)
   # The stub exports a minimal set of NVRTC C API entrypoints used by TVM and
   # lazily loads libnvrtc at runtime on first API call.
   # ============================================================================
-  add_library(nvrtc_stub SHARED src/backend/cuda/codegen/stubs/nvrtc.cc)
+  add_library(nvrtc_stub SHARED src/backend/cuda/stubs/nvrtc.cc)
   target_include_directories(nvrtc_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_compile_definitions(nvrtc_stub PRIVATE TILELANG_NVRTC_STUB_EXPORTS)
   target_link_libraries(nvrtc_stub PRIVATE ${CMAKE_DL_LIBS})
