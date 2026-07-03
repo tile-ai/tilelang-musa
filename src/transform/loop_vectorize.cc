@@ -30,21 +30,23 @@
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
-#include "tvm/tir/analysis.h"
-#include "tvm/tir/var.h"
-#include <algorithm>
+#include "support/check.h"
 #include <iostream>
 #include <optional>
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/ir/transform.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/var.h>
 #include <vector>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /*!
  * \brief Check if buffer strides represent a contiguous (row-major) layout.
@@ -101,17 +103,6 @@ Array<PrimExpr> GetBufferStrides(const Buffer &buffer) {
     stride = stride * buffer->shape[i];
   }
   return Array<PrimExpr>{strides.rbegin(), strides.rend()};
-}
-
-PrimExpr ComputeBufferElemOffset(const Array<PrimExpr> &indices,
-                                 const Buffer &buffer,
-                                 arith::Analyzer *analyzer) {
-  Array<PrimExpr> strides = GetBufferStrides(buffer);
-  PrimExpr elem_offset = 0;
-  for (size_t i = 0; i < indices.size(); ++i) {
-    elem_offset += indices[i] * strides[i];
-  }
-  return analyzer ? analyzer->Simplify(elem_offset) : elem_offset;
 }
 
 class VectorizeFindMemoryAccess : public StmtExprVisitor {
@@ -271,15 +262,17 @@ public:
         // reduction-like pattern where ComputeBufferVectorSize has already
         // returned 1 to disable vectorization, and that constraint must not
         // be dropped (memory strategy ignores local_fragment_min).
-        bool depends_on_loop_var =
-            !info.indices.empty() && inner_for_ &&
-            std::any_of(info.indices.begin(), info.indices.end(),
-                        [&](const PrimExpr &idx) {
-                          return UsesVar(idx, [&](const VarNode *v) {
-                            return v == inner_for_->loop_var.get();
-                          });
-                        });
-        if (depends_on_loop_var || info.is_store) {
+        bool depends_on_loop_var = true;
+        if (!info.indices.empty() && inner_for_) {
+          Array<PrimExpr> strides = GetBufferStrides(info.buffer);
+          PrimExpr elem_offset = 0;
+          for (size_t i = 0; i < info.indices.size(); ++i) {
+            elem_offset += info.indices[i] * strides[i];
+          }
+          depends_on_loop_var = !IsExprInvariantInVectorBoundary(
+              elem_offset, inner_for_->loop_var, vector_size_, analyzer_);
+        }
+        if (depends_on_loop_var) {
           memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
           has_global_or_shared_buffer = true;
         } else {
@@ -326,8 +319,12 @@ public:
       // at the new vector_size boundary. If not, take GCD.
       for (const auto &info : local_fragment_buffers) {
         if (vector_size_ > info.vector_size && !info.indices.empty()) {
-          PrimExpr elem_offset =
-              ComputeBufferElemOffset(info.indices, info.buffer, analyzer_);
+          // Compute elem_offset from indices and strides
+          Array<PrimExpr> strides = GetBufferStrides(info.buffer);
+          PrimExpr elem_offset = 0;
+          for (size_t i = 0; i < info.indices.size(); ++i) {
+            elem_offset += info.indices[i] * strides[i];
+          }
           if (!IndicesCanVectorize(elem_offset, inner_for_->loop_var,
                                    inner_for_->extent, vector_size_,
                                    analyzer_)) {
@@ -383,7 +380,7 @@ private:
       // tiling size is always static.
       if (!extent_ptr) {
         loop_extent_vector_size_ = 1;
-        return ffi::GetRef<Stmt>(node);
+        return GetRef<Stmt>(node);
       }
       loop_extent_vector_size_ =
           arith::ZeroAwareGCD(initial_vector_size_, *extent_ptr);
@@ -529,8 +526,8 @@ private:
     } else if (node->op.same_as(builtin::ptx_cp_async()) ||
                node->op.same_as(tl::ptx_cp_async())) {
       // builtin::ptx_cp_async stores bytes, while tl::ptx_cp_async stores
-      // logical element counts. In both cases choose the widest vector length
-      // whose final payload is one of {4, 8, 16} bytes.
+      // logical element counts. In both cases we pick the largest vector width
+      // whose eventual PTX payload is one of {4, 8, 16} bytes.
       int vectorize_length =
           GetMaxCPAsyncVectorizeLength(GetCPAsyncBitsPerCall(node).value_or(0));
       buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
@@ -559,34 +556,30 @@ private:
       if (!inner_for_)
         return true;
       bool all_invariant = true;
-      PostOrderVisit(ffi::GetRef<PrimExpr>(node), [&](const ObjectRef &obj) {
+      PostOrderVisit(GetRef<PrimExpr>(node), [&](const ObjectRef &obj) {
         if (!all_invariant)
           return;
         if (auto *load = obj.as<BufferLoadNode>()) {
-          bool layout_transform_valid = true;
-          auto transformed_indices = TransformIndices(
-              load->indices, load->buffer, &layout_transform_valid);
-          if (!layout_transform_valid) {
-            all_invariant = false;
-            return;
+          auto transformed_indices =
+              TransformIndices(load->indices, load->buffer);
+          Array<PrimExpr> strides = GetBufferStrides(load->buffer);
+          PrimExpr elem_offset = 0;
+          for (size_t i = 0; i < transformed_indices.size(); ++i) {
+            elem_offset += transformed_indices[i] * strides[i];
           }
-          PrimExpr elem_offset = ComputeBufferElemOffset(
-              transformed_indices, load->buffer, analyzer_);
           if (!IsExprInvariantInVectorBoundary(elem_offset,
                                                inner_for_->loop_var,
                                                target_vec_size, analyzer_)) {
             all_invariant = false;
           }
         } else if (auto *store = obj.as<BufferStoreNode>()) {
-          bool layout_transform_valid = true;
-          auto transformed_indices = TransformIndices(
-              store->indices, store->buffer, &layout_transform_valid);
-          if (!layout_transform_valid) {
-            all_invariant = false;
-            return;
+          auto transformed_indices =
+              TransformIndices(store->indices, store->buffer);
+          Array<PrimExpr> strides = GetBufferStrides(store->buffer);
+          PrimExpr elem_offset = 0;
+          for (size_t i = 0; i < transformed_indices.size(); ++i) {
+            elem_offset += transformed_indices[i] * strides[i];
           }
-          PrimExpr elem_offset = ComputeBufferElemOffset(
-              transformed_indices, store->buffer, analyzer_);
           if (!IsExprInvariantInVectorBoundary(elem_offset,
                                                inner_for_->loop_var,
                                                target_vec_size, analyzer_)) {
@@ -633,7 +626,7 @@ private:
         << "tvm_access_ptr requires at least 3 args";
 
     // args[0] is TypeAnnotation(dtype[/lanes]); dtype() encodes the element
-    // type. See tvm::tir::Buffer::access_ptr implementation.
+    // type. See tvm::tirx::Buffer::access_ptr implementation.
     DataType dtype = node->args[0].dtype();
     Var data_var;
     if (auto data_var_node = node->args[1].as<VarNode>()) {
@@ -701,13 +694,12 @@ private:
   }
 
   Array<PrimExpr> TransformIndices(const Array<PrimExpr> &indices,
-                                   const Buffer &buffer,
-                                   bool *layout_transform_valid = nullptr) {
-    if (layout_transform_valid) {
-      *layout_transform_valid = true;
-    }
+                                   const Buffer &buffer) {
     auto transformed_indices = indices;
     if (layout_map_.defined() && layout_map_.count(buffer)) {
+      ICHECK(IsBufferContiguous(buffer, analyzer_))
+          << buffer
+          << " has non-contiguous strides, but layout map is provided.";
       // forward indices
       auto layout = layout_map_[buffer];
       transformed_indices = layout->Forward(indices);
@@ -715,12 +707,9 @@ private:
       if (transformed_indices.size() != buffer->shape.size()) {
         // Step 1: Compute linear offset using layout->OutputShape()
         auto output_shape = layout->OutputShape();
-        if (transformed_indices.size() != output_shape.size()) {
-          if (layout_transform_valid) {
-            *layout_transform_valid = false;
-          }
-          return indices;
-        }
+        ICHECK_EQ(transformed_indices.size(), output_shape.size())
+            << "Forward indices size " << transformed_indices.size()
+            << " != OutputShape size " << output_shape.size();
         PrimExpr linear_offset = 0;
         PrimExpr stride = 1;
         for (int i = output_shape.size() - 1; i >= 0; --i) {
@@ -743,7 +732,8 @@ private:
   PrimExpr VisitExpr_(const CastNode *node) final {
     // Consider both source and target types to ensure all intermediate
     // vector types can be represented. For example, casting int32 to
-    // float8_e4m3fn: target allows more lanes than int32 can safely provide.
+    // float8_e4m3fn: target allows 128/8=16 lanes but int32 only supports
+    // up to 128/32=4 lanes in CUDA vector types.
     int target_lanes = vector_load_bits_max_ / node->dtype.bits();
     int source_bits = node->value.dtype().bits();
     int max_lanes = target_lanes;
@@ -752,14 +742,6 @@ private:
       max_lanes = std::min(target_lanes, source_lanes);
     }
     int cast_vector_size = arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
-    Target target = Target::Current(false);
-    // On MUSA, mixed-precision vectorized casts (e.g. float32 <-> fp8/fp4)
-    // are lowered via x2/x4 chunk helpers in codegen. Cap planning width to x8
-    // so we don't emit unsupported vector dtypes.
-    if (TargetIsMusa(target) &&
-        IsCudaVectorizableCast(node->value.dtype(), node->dtype)) {
-      cast_vector_size = arith::ZeroAwareGCD(cast_vector_size, 8);
-    }
     // Record cast constraint (use empty buffer to indicate cast)
     // Mark is_cast=true so Plan() can distinguish cast from other call nodes
     buffer_vector_infos_.push_back(
@@ -774,28 +756,16 @@ private:
 
     int buffer_vec_size = loop_extent_vector_size_;
 
-    // This prevents generating unsupported wide vector dtypes in arithmetic
-    // expressions (e.g. float32x16) after vector loop lowering.
-    int dtype_lane_cap =
-        vector_load_bits_max_ / (buffer->dtype.bits() * buffer->dtype.lanes());
-    if (dtype_lane_cap > 0) {
-      buffer_vec_size = arith::ZeroAwareGCD(buffer_vec_size, dtype_lane_cap);
-    }
-
     // Transform indices using layout_map if present
-    bool layout_transform_valid = true;
-    auto transformed_indices =
-        TransformIndices(indices, buffer, &layout_transform_valid);
-    if (!layout_transform_valid) {
-      return 1;
-    }
+    auto transformed_indices = TransformIndices(indices, buffer);
 
-    // 1. Compute raw element offset. Simplify it early so shared-layout stores
-    // that are linear after row-major flattening are not misclassified as
-    // non-vectorizable merely because the pre-simplified indices span multiple
-    // dimensions.
-    PrimExpr elem_offset =
-        ComputeBufferElemOffset(transformed_indices, buffer, analyzer_);
+    // 1. Compute raw element offset
+    Array<PrimExpr> strides = GetBufferStrides(buffer);
+
+    PrimExpr elem_offset = 0;
+    for (size_t i = 0; i < transformed_indices.size(); ++i) {
+      elem_offset += transformed_indices[i] * strides[i];
+    }
 
     // 2. Check if current buffer_vec_size works with invariant boundary check
     // In some cases, buffer_vec_size is max (e.g. 128), but
@@ -824,14 +794,10 @@ private:
     // 3. If element offset is independent with loop_var, ignore it.
     bool is_independent =
         CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_);
-    // For memory BufferStore, if indices are invariant/independent with
-    // loop_var, do not vectorize (broadcasting store is not supported). Keep
-    // local/fragment stores vectorizable to preserve register-level cast fusion
-    // (e.g. parallel vectorized cast kernels).
+    // For BufferStore, if indices is invariant or independent with loop_var,
+    // we should not vectorize it (broadcasting store is not supported).
     if (is_store && (is_invariant || is_independent)) {
-      if (!IsLocalBuffer(buffer) && !IsFragmentBuffer(buffer)) {
-        return 1;
-      }
+      return 1;
     }
     if (is_independent) {
       return buffer_vec_size; // only limited constraint from this buffer
@@ -853,27 +819,24 @@ private:
         {buffer, buffer_vec_size, is_store, indices});
   }
 
-  // NOTE(wt): The base class IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*)
+  // NOTE(wt): The base class IRMutatorWithAnalyzer::VisitStmt_(BindNode*)
   // binds let variables, but this causes issues when the same variable name
   // appears multiple times with different values (e.g., in pipelined loops
   // where the body is duplicated). For this case, we allow the analyzer to
   // override the binding. Check the impl of
-  // IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*) in:
+  // IRMutatorWithAnalyzer::VisitStmt_(BindNode*) in:
   // tvm/src/arith/ir_mutator_with_analyzer.cc
-  Stmt VisitStmt_(const LetStmtNode *op) final {
+  Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
     if (SideEffect(value) <= CallEffectKind::kPure) {
       // Allow override to handle duplicated loop bodies in pipelined loops
       analyzer_->Bind(op->var, value, /*allow_override=*/true);
     }
-    // Continue visiting the body to collect vectorization info
-    Stmt body = this->VisitStmt(op->body);
-    if (value.same_as(op->value) && body.same_as(op->body)) {
-      return ffi::GetRef<Stmt>(op);
+    if (value.same_as(op->value)) {
+      return GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = std::move(value);
-      n->body = std::move(body);
       return Stmt(n);
     }
   }
@@ -891,8 +854,7 @@ private:
 
 class VectorizeRewriter : public StmtExprMutator {
 public:
-  VectorizeRewriter(int vector_size, bool enable_auto_unroll)
-      : vector_size_(vector_size), enable_auto_unroll_(enable_auto_unroll) {}
+  VectorizeRewriter(int vector_size) : vector_size_(vector_size) {}
 
 private:
   Stmt VisitStmt_(const ForNode *node) final {
@@ -925,20 +887,6 @@ private:
         if (outer_kind == ForKind::kParallel) {
           outer_kind = ForKind::kSerial;
         }
-        if (enable_auto_unroll_ && outer_kind == ForKind::kSerial) {
-          bool should_auto_unroll = true;
-          // Keep moderate unrolling for small loops while
-          // preserving correctness for large extents.
-          constexpr int kMusaMaxAutoUnrollOuterExtent = 256;
-          int outer_extent = extent / vector_size_;
-          if (outer_extent > kMusaMaxAutoUnrollOuterExtent) {
-            should_auto_unroll = false;
-          }
-
-          if (should_auto_unroll) {
-            outer_kind = ForKind::kUnrolled;
-          }
-        }
         body = For(outer_var, 0, extent / vector_size_, outer_kind, body,
                    fnode->thread_binding, fnode->annotations, fnode->step,
                    fnode->span);
@@ -957,7 +905,6 @@ private:
 
   const ForNode *inner_for_{};
   const int vector_size_;
-  const bool enable_auto_unroll_;
 };
 
 int GetVectorizeSize(const For &loop, const LayoutMap &layout_map) {
@@ -973,9 +920,8 @@ int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer) {
   // 1. if var doesn't exist, it is independent
-  bool used_var = UsesVar(expr, [&](const VarNode *v) {
-    return tvm::ffi::GetRef<Var>(v).same_as(var);
-  });
+  bool used_var = UsesVar(
+      expr, [&](const VarNode *v) { return GetRef<Var>(v).same_as(var); });
   if (!used_var) {
     return true;
   }
@@ -1010,116 +956,6 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
   return false;
 }
 
-// Rewrite lane-sized offsets inside floor div/mod:
-//   (aligned_base + lane) // divisor -> aligned_base // divisor
-//   (aligned_base + lane) % divisor  -> aligned_base % divisor + lane
-// when aligned_base is vector_size aligned and divisor is a vector_size
-// multiple.
-class LaneOffsetDivModSimplifier : public StmtExprMutator {
-public:
-  LaneOffsetDivModSimplifier(int lane, int vector_size,
-                             arith::Analyzer *analyzer)
-      : lane_(lane), vector_size_(vector_size), analyzer_(analyzer) {}
-
-  PrimExpr Rewrite(const PrimExpr &expr) { return this->VisitExpr(expr); }
-
-private:
-  bool CanSimplifyWithLaneOffset(const PrimExpr &value, const PrimExpr &divisor,
-                                 PrimExpr *aligned_base) const {
-    if (lane_ == 0) {
-      return false;
-    }
-
-    auto divisor_int = as_const_int(analyzer_->Simplify(divisor));
-    if (!divisor_int || *divisor_int <= 0 || *divisor_int % vector_size_ != 0 ||
-        lane_ >= *divisor_int) {
-      return false;
-    }
-
-    PrimExpr lane = make_const(value.dtype(), lane_);
-    PrimExpr base = analyzer_->Simplify(value - lane);
-    PrimExpr vector_size = make_const(base.dtype(), vector_size_);
-    PrimExpr zero = make_const(base.dtype(), 0);
-    if (!analyzer_->CanProveEqual(FloorMod(base, vector_size), zero)) {
-      return false;
-    }
-
-    *aligned_base = base;
-    return true;
-  }
-
-  PrimExpr VisitExpr_(const FloorDivNode *op) final {
-    PrimExpr a = this->VisitExpr(op->a);
-    PrimExpr b = this->VisitExpr(op->b);
-    PrimExpr aligned_base;
-    if (CanSimplifyWithLaneOffset(a, b, &aligned_base)) {
-      return analyzer_->Simplify(FloorDiv(aligned_base, b));
-    }
-    if (a.same_as(op->a) && b.same_as(op->b)) {
-      return ffi::GetRef<PrimExpr>(op);
-    }
-    return FloorDiv(a, b);
-  }
-
-  PrimExpr VisitExpr_(const FloorModNode *op) final {
-    PrimExpr a = this->VisitExpr(op->a);
-    PrimExpr b = this->VisitExpr(op->b);
-    PrimExpr aligned_base;
-    if (CanSimplifyWithLaneOffset(a, b, &aligned_base)) {
-      PrimExpr lane = make_const(a.dtype(), lane_);
-      return analyzer_->Simplify(FloorMod(aligned_base, b) + lane);
-    }
-    if (a.same_as(op->a) && b.same_as(op->b)) {
-      return ffi::GetRef<PrimExpr>(op);
-    }
-    return FloorMod(a, b);
-  }
-
-  int lane_;
-  int vector_size_;
-  arith::Analyzer *analyzer_;
-};
-
-bool HasContiguousOffsetsInVectorBoundary(const PrimExpr &expr, Var var,
-                                          const PrimExpr &iter_var_size,
-                                          int target_vectorized_size,
-                                          arith::Analyzer *analyzer) {
-  PrimExpr target_size_for_expr =
-      make_const(expr.dtype(), target_vectorized_size);
-  PrimExpr zero_for_expr = make_const(expr.dtype(), 0);
-
-  auto extent = as_const_int(analyzer->Simplify(iter_var_size));
-  if (!extent || *extent % target_vectorized_size != 0) {
-    return false;
-  }
-
-  PrimExpr one_for_expr = make_const(expr.dtype(), 1);
-  for (int boundary = 0; boundary < *extent;
-       boundary += target_vectorized_size) {
-    PrimExpr base = analyzer->Simplify(
-        Substitute(expr, {{var, make_const(var.dtype(), boundary)}}));
-    if (!analyzer->CanProveEqual(FloorMod(base, target_size_for_expr),
-                                 zero_for_expr)) {
-      return false;
-    }
-
-    PrimExpr previous = base;
-    for (int lane = 1; lane < target_vectorized_size; ++lane) {
-      PrimExpr current = analyzer->Simplify(
-          Substitute(expr, {{var, make_const(var.dtype(), boundary + lane)}}));
-      current = analyzer->Simplify(
-          LaneOffsetDivModSimplifier(lane, target_vectorized_size, analyzer)
-              .Rewrite(current));
-      PrimExpr delta = analyzer->Simplify(current - previous);
-      if (!analyzer->CanProveEqual(delta, one_for_expr)) {
-        return false;
-      }
-      previous = current;
-    }
-  }
-  return true;
-}
-
 bool IndicesCanVectorize(const PrimExpr &expr, Var var,
                          const PrimExpr &iter_var_size,
                          int target_vectorized_size,
@@ -1143,13 +979,6 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
 
   if (IsExprInvariantInVectorBoundary(expr, var, target_vectorized_size,
                                       analyzer)) {
-    return true;
-  }
-
-  // Swizzled layouts can still be contiguous within each vector boundary even
-  // when the generic vectorizer cannot reduce their floor/mod form to a Ramp.
-  if (HasContiguousOffsetsInVectorBoundary(expr, var, iter_var_size,
-                                           target_vectorized_size, analyzer)) {
     return true;
   }
 
@@ -1226,11 +1055,7 @@ For VectorizeLoop(const For &loop, const LayoutMap &layout_map,
   }
   if (vectorize_hint == 1)
     return ParallelToSerial(loop);
-  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-  Optional<Bool> opt_enable_auto_unroll =
-      ctxt->GetConfig(kEnableAutoUnroll, Optional<Bool>());
-  bool enable_auto_unroll = opt_enable_auto_unroll.value_or(Bool(false));
-  auto rewriter = VectorizeRewriter(vectorize_hint, enable_auto_unroll);
+  auto rewriter = VectorizeRewriter(vectorize_hint);
   return Downcast<For>(rewriter(loop));
 }
 
@@ -1242,11 +1067,7 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
   }
   if (vectorize_hint == 1)
     return ParallelToSerial(loop);
-  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-  Optional<Bool> opt_enable_auto_unroll =
-      ctxt->GetConfig(kEnableAutoUnroll, Optional<Bool>());
-  bool enable_auto_unroll = opt_enable_auto_unroll.value_or(Bool(false));
-  auto rewriter = VectorizeRewriter(vectorize_hint, enable_auto_unroll);
+  auto rewriter = VectorizeRewriter(vectorize_hint);
   return Downcast<For>(rewriter(loop));
 }
 

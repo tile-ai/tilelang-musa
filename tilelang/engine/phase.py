@@ -1,22 +1,30 @@
 from __future__ import annotations
-from tvm import tir, IRModule
+from tvm import tirx, s_tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
-from tilelang.contrib import mcc
-from tilelang.contrib import nvcc
+from tilelang.contrib import mcc, nvcc
 
 
-def has_tma(target: Target | None = None) -> bool:
-    if target is None or target.kind.name != "musa":
+def target_has_tma(target: Target | None = None) -> bool:
+    if target is None:
         return False
-    return mcc.have_tma(target)
+    if target.kind.name == "cuda":
+        return nvcc.have_tma(target)
+    if target.kind.name == "musa":
+        return mcc.have_tma(target)
+    return False
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
+    # avoid circular import
+    from tilelang.jit.adapter.utils import is_cuda_target, is_musa_target
+
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if not has_tma(target):
+    if target is None:
+        return False
+    if not ((is_cuda_target(target) or is_musa_target(target)) and target_has_tma(target)):
         return False
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not disable_warp_specialized
@@ -34,29 +42,38 @@ def module_has_tma(mod: IRModule) -> bool:
 
 def lower_l2_persistent_for_target(mod: IRModule, target: Target) -> IRModule:
     if target.kind.name == "cuda":
-        return tilelang.cuda.transform.LowerL2Persistent()(mod)
+        from tilelang.cuda import transform as cuda_transform
+
+        return cuda_transform.LowerL2Persistent()(mod)
     if target.kind.name == "musa":
-        return tilelang.musa.transform.LowerL2Persistent()(mod)
+        from tilelang.musa import transform as musa_transform
+
+        return musa_transform.LowerL2Persistent()(mod)
     return mod
 
 
 def persist_threadblock_for_target(mod: IRModule, target: Target) -> IRModule:
     if target.kind.name == "cuda":
-        return tilelang.cuda.transform.PersistThreadblock()(mod)
+        from tilelang.cuda import transform as cuda_transform
+
+        return cuda_transform.PersistThreadblock()(mod)
     if target.kind.name == "musa":
-        return tilelang.musa.transform.PersistThreadblock()(mod)
+        from tilelang.musa import transform as musa_transform
+
+        return musa_transform.PersistThreadblock()(mod)
     return mod
 
 
 def allow_warp_group_reg_alloc(pass_ctx: PassContext, target: Target) -> bool:
-    # MUSA backend does not use CUDA warp-group register annotations.
-    return False
+    if target.kind.name != "cuda":
+        return False
+    return allow_warp_specialized(pass_ctx=pass_ctx, target=target)
 
 
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    disable_vectorize = pass_ctx.config.get("tir.disable_vectorize", False)
+    disable_vectorize = pass_ctx.config.get("tirx.disable_vectorize", False)
     return not disable_vectorize
 
 
@@ -200,7 +217,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     Returns:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """
-    mod = tir.transform.BindTarget(target)(mod)
+    mod = tirx.transform.BindTarget(target)(mod)
 
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
@@ -226,6 +243,9 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # applies.
     if allow_warp_specialized(target=target):
         mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
+    # LayoutInference so that the use_2cta annotation is visible to infer_layout)
+    mod = tilelang.transform.LowerBlackwell2SM()(mod)
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
@@ -239,7 +259,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
     mod = lower_l2_persistent_for_target(mod, target)
-    # Decouple type cast vectorization constraints before vectorization.
+    # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
@@ -279,23 +299,23 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tir.transform.NarrowDataType(32)(mod)
+    mod = tirx.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     # ConfigIndexBitwidth must be applied after FlattenBuffer
     # as it will flatten index computing
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tir.transform.Simplify()(mod)
+    mod = tirx.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tir.transform.Simplify()(mod)
-    mod = tir.transform.RemoveNoOp()(mod)
-    mod = tir.transform.HoistIfThenElse()(mod)
+    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.RemoveNoOp()(mod)
+    mod = s_tir.transform.HoistIfThenElse()(mod)
 
-    mod = tir.transform.VerifyMemory()(mod)
-    mod = tir.transform.AnnotateEntryFunc()(mod)
+    mod = tirx.transform.VerifyMemory()(mod)
+    mod = tirx.transform.AnnotateEntryFunc()(mod)
     # TODO(lei): This is a hack to make sure the
     # thread level allreduce pass can be applied
     # in TL. As Tl only use one thread dimension
@@ -305,32 +325,42 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # We can find a way better to create var instead
     # of putting the LowerThreadAllreduce before
     # the Legalization.
-    mod = tir.transform.InferFragment()(mod)
+    mod = s_tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.VectorizeSingleSide()(mod)
     mod = tilelang.transform.LowerLDGSTG()(mod)
+    from tilelang.cuda import transform as cuda_transform
+
+    mod = cuda_transform.LowerHopperIntrin()(mod)
     if mcc.is_ph1(target):
-        mod = tilelang.musa.transform.LowerPHIntrin()(mod)
-    # Global Barrier Synchronization must be applied before
-    # SplitHostDevice pass, as the global barrier
+        from tilelang.musa import transform as musa_transform
+
+        mod = musa_transform.LowerPHIntrin()(mod)
+    # Global barrier synchronization must be applied before SplitHostDevice.
     if allow_global_thread_synchronization():
         mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
-
     # Mark the function contains pdl_sync or pdl_trigger
     mod = tilelang.transform.MarkCudaSyncCalls(nvcc.have_pdl(target))(mod)
-
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
     mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge, disable_reuse=disable_reuse)(mod)
+    # InjectFenceProxy is a no-op on targets that lack the TMA / async-proxy
+    # programming model; the pass itself checks the PrimFunc's target.
+    mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     if mcc.is_ph1(target):
         mod = tilelang.transform.UnifiedBarrier()(mod)
+    # Inject conservative tcgen05 fences on Blackwell (SM100+).
+    # Must run after ThreadSync so that tvm_storage_sync calls are present.
+    # The pass handles shared syncs and simple linear wait/use, use/arrive
+    # handoffs, and is a no-op on non-SM100 targets or functions without TMEM.
+    mod = tilelang.transform.InjectTcgen05Fence()(mod)
     # Run before MergeIfStmt so async scope markers are still available.
     mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
     mod = tilelang.transform.MergeAsyncCopy()(mod)

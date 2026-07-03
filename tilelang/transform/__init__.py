@@ -128,6 +128,13 @@ def LowerMUSAAcceleratedOps():
     return lambda f: f
 
 
+def ThreadRangeConstProp():
+    """Constant propagation for simple threadIdx range guarded expressions."""
+    if hasattr(_ffi_api, "ThreadRangeConstProp"):
+        return _ffi_api.ThreadRangeConstProp()  # type: ignore
+    return lambda f: f
+
+
 def LowerReduceBarrier():
     """LowerReduceBarrier
 
@@ -136,7 +143,9 @@ def LowerReduceBarrier():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerReduceBarrier() if hasattr(_ffi_api, "LowerReduceBarrier") else lambda f: f  # type: ignore
+    if hasattr(_ffi_api, "LowerReduceBarrier"):
+        return _ffi_api.LowerReduceBarrier()  # type: ignore
+    return lambda f: f
 
 
 def ThreadSync(storage_scope: str):
@@ -173,7 +182,9 @@ def ThreadPartialSync(storage_scope: str):
 
 def UnifiedBarrier():
     """Unify MUSA barrier setup and rewrite partial sync to barrier synchronization."""
-    return _ffi_api.UnifiedBarrier() if hasattr(_ffi_api, "UnifiedBarrier") else lambda f: f  # type: ignore
+    if hasattr(_ffi_api, "UnifiedBarrier"):
+        return _ffi_api.UnifiedBarrier()  # type: ignore
+    return lambda f: f
 
 
 def IfStmtBinding():
@@ -224,17 +235,6 @@ def ProducerConsumerWarpSpecialized():
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 
-def WarpSpecialized():
-    """WarpSpecializedPipeline
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.WarpSpecialized()  # type: ignore
-
-
 def ProducerConsumerWarpSpecializedTiled():
     """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
 
@@ -278,6 +278,26 @@ def InjectFenceProxy():
         The result pass
     """
     return _ffi_api.InjectFenceProxy()  # type: ignore
+
+
+def InjectTcgen05Fence():
+    """Inject tcgen05.fence::before_thread_sync / after_thread_sync at
+    conservative TCGEN05/TMEM synchronization boundaries on Blackwell
+    (SM100+) targets.
+
+    The current pass wraps CTA-wide shared-memory syncs and also inserts
+    fences around linear mbarrier wait/use and use/arrive handoff patterns.
+    It is intentionally conservative and does not try to infer arbitrary
+    barrier protocols.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    if hasattr(_ffi_api, "InjectTcgen05Fence"):
+        return _ffi_api.InjectTcgen05Fence()  # type: ignore
+    return lambda f: f
 
 
 def LegalizeVectorizedLoop():
@@ -395,15 +415,17 @@ def LateVectorizePlanner():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LateVectorizePlanner() if hasattr(_ffi_api, "LateVectorizePlanner") else lambda f: f  # type: ignore
+    if hasattr(_ffi_api, "LateVectorizePlanner"):
+        return _ffi_api.LateVectorizePlanner()  # type: ignore
+    return lambda f: f
 
 
 def LowerPTXAsyncCopy():
-    """Lower eligible global->shared copies into TileLang `cp.async`.
+    """Lower eligible global->shared copies into PTX `cp.async` on CUDA.
 
     When enabled (pass config `tl.enable_async_copy`, default True), this pass
     may rewrite plain user-written global->shared `BufferStore` patterns (e.g.
-    SIMT copies in `T.Parallel`) into `tl.ptx_cp_async`, and insert
+    SIMT copies in `T.Parallel`) into `tir.ptx_cp_async`, and insert
     `tir.ptx_commit_group` + `tir.ptx_wait_group(0)` to preserve synchronous
     semantics for normal stores. If explicit commit/wait intrinsics already
     exist, the pass avoids duplicating them (and may insert a missing commit
@@ -435,26 +457,6 @@ def MergeAsyncCopy():
 def InjectPTXAsyncCopy():
     """Deprecated alias of `LowerPTXAsyncCopy`."""
     return LowerPTXAsyncCopy()
-
-
-def LowerDeviceStorageAccessInfo():
-    """Lower attached storage access information on device.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-
-    Note
-    ----
-    Run this pass after all storage access analysis finish.
-    """
-    return _ffi_api.LowerDeviceStorageAccessInfo()  # type: ignore
-
-
-def ThreadRangeConstProp():
-    """Constant propagation for simple threadIdx range guarded expressions."""
-    return _ffi_api.ThreadRangeConstProp()  # type: ignore
 
 
 def ConfigIndexBitwidth():
@@ -613,7 +615,7 @@ def LowerLDGSTG():
     - Supports predicated loads (if_then_else with else=0)
     - Supports predicated stores (if in then case)
     - Skips loads in async scope (will be lowered to cp.async)
-    - Only enabled for CUDA and MUSA targets
+    - Only enabled for CUDA targets
 
     Returns
     -------
@@ -621,3 +623,13 @@ def LowerLDGSTG():
         The result pass
     """
     return _ffi_api.LowerLDGSTG()  # type: ignore
+
+
+def LowerBlackwell2SM():
+    """Lower 2SM TCGEN5MMA and related on Blackwell target
+
+    Returns:
+        fpass : tvm.transform.Pass
+            The result pass
+    """
+    return _ffi_api.LowerBlackwell2SM()  # type: ignore

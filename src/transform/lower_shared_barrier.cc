@@ -3,14 +3,16 @@
  *  \brief Convert shared.barrier buffers to plain shared + ptx init.
  */
 #include "../op/builtin.h"
+#include "support/check.h"
 #include "tvm/ir/type.h"
-#include "tvm/tir/expr.h"
-#include "tvm/tir/stmt.h"
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/arith/analyzer.h>
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <utility>
 
@@ -22,7 +24,8 @@ namespace attr {
 constexpr const char *kBarrierInit = "barrier_init";
 } // namespace attr
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class SharedBarrierRewriter : public StmtExprMutator {
 public:
@@ -35,9 +38,17 @@ private:
   SharedBarrierRewriter(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
 
-  Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = tvm::ffi::GetRef<Block>(op);
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block = GetRef<SBlock>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
+
+    // Record the mapping from buffer data var to buffer for later lookup
+    for (auto buffer : alloc_buffers) {
+      buffer_map_.insert({buffer->data, buffer});
+    }
+    for (auto match_buffer : op->match_buffers) {
+      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
+    }
 
     // Only check buffers allocated in THIS block, not accumulated from parent
     // blocks
@@ -48,8 +59,12 @@ private:
       if (!ptr_type)
         continue;
       auto storage_scope = ptr_type->storage_scope;
-      if (storage_scope == "shared.barrier") {
+      if (storage_scope == "shared.barrier" ||
+          storage_scope == "shared.cluster_barrier") {
         barrier_buffers.push_back(buffer);
+        if (storage_scope == "shared.cluster_barrier") {
+          has_cluster_barrier_ = true;
+        }
       }
     }
 
@@ -58,6 +73,10 @@ private:
     }
 
     ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
+
+    for (auto buffer : barrier_buffers) {
+      buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
 
     /*
     Transform:
@@ -72,7 +91,7 @@ private:
         # This is emitted by this pass
         if tx == 0:
           for i in range(len(arrive_counts)):
-            T.ptx_init_barrier_thread_count(barrier_var_i, arrive_counts[i])
+            T.ptx_init_barrier_thread_count(mbarrier_list[i], arrive_counts[i])
     */
 
     // Extract the arrive counts from the block attr "barrier_init"
@@ -98,7 +117,6 @@ private:
           << ") must match the barrier buffer size (" << buffer->shape[0]
           << ") for buffer " << buffer->name;
 
-      // Create barrier vars and record the remapping from buffer to vars
       Array<Var> remap_vars;
       remap_vars.reserve(arrive_counts.size());
       for (size_t i = 0; i < arrive_counts.size(); i++) {
@@ -114,7 +132,6 @@ private:
       buffer_expr_remap_.Set(buffer, remap_vars);
     }
 
-    // Remove alloc_buffer("shared.barrier")
     Array<Buffer> filtered;
     filtered.reserve(alloc_buffers.size());
     for (auto buf : alloc_buffers) {
@@ -145,18 +162,22 @@ private:
                                   Stmt()));
 
     new_body.push_back(
-        Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
-                      {StringImm("shared")})));
+        Evaluate(Call(DataType::Handle(), ptx_fence_barrier_init(), {})));
+    new_body.push_back(Evaluate(
+        Call(DataType::Handle(), builtin::tvm_storage_sync(),
+             {StringImm(has_cluster_barrier_ ? "cluster" : "shared")})));
     new_body.push_back(block->body);
 
-    Stmt new_block_body = SeqStmt(new_body);
-    for (int i = static_cast<int>(barrier_vars.size()) - 1; i >= 0; --i) {
+    Array<Stmt> block_body;
+    block_body.reserve(barrier_vars.size() + 1);
+    for (size_t i = 0; i < barrier_vars.size(); ++i) {
       PrimExpr placeholder =
           Call(DataType::Int(32), barrier_id_placeholder(), {});
-      new_block_body = LetStmt(barrier_vars[i], placeholder, new_block_body);
+      block_body.push_back(Bind(barrier_vars[i], placeholder));
     }
+    block_body.push_back(SeqStmt(new_body));
 
-    block.CopyOnWrite()->body = new_block_body;
+    block.CopyOnWrite()->body = SeqStmt(block_body);
 
     return StmtExprMutator::VisitStmt_(block.get());
   }
@@ -172,8 +193,6 @@ private:
       PrimExpr index = load->indices[0];
       const auto *imm = index.as<IntImmNode>();
       int64_t remap_size = static_cast<int64_t>(remap_vars.size());
-      // fast path for constant index, directly return the corresponding barrier
-      // var
       if (imm) {
         ICHECK_GE(imm->value, 0);
         ICHECK_LT(imm->value, remap_size)
@@ -181,9 +200,6 @@ private:
         return remap_vars[static_cast<int>(imm->value)];
       }
 
-      // Dynamic 1-D index maps to contiguous barrier ids:
-      //   mbars[idx] -> mbars_0 + idx
-      // where mbars_0 is the first placeholder-backed barrier id.
       PrimExpr index_i32 = index.dtype() == DataType::Int(32)
                                ? index
                                : Cast(DataType::Int(32), index);
@@ -204,7 +220,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
@@ -217,9 +233,14 @@ private:
   // This is a workaround for cpu backend,
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_;
+  Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Array<Var>> buffer_expr_remap_;
+  // Mapping from data Var of a Buffer to Buffer, for lookup
+  std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   // Disable shuffle elect for the warp specialized kernel
   bool disable_shuffle_elect_;
+  // Whether the block has a cluster barrier
+  bool has_cluster_barrier_ = false;
 };
 
 PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
@@ -229,7 +250,7 @@ PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
 }
 
 namespace transform {
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerSharedBarrier() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
@@ -241,7 +262,7 @@ tvm::transform::Pass LowerSharedBarrier() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerSharedBarrier", LowerSharedBarrier);
 }
 

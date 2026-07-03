@@ -15,8 +15,7 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
-from tvm import tir
-from tilelang.utils.device import synchronize
+from tvm import tirx
 
 
 @dataclass
@@ -82,7 +81,7 @@ class Profiler:
         """
         new_shape = []
         for dim in param.shape:
-            if isinstance(dim, tir.Var):
+            if isinstance(dim, tirx.Var):
                 var_name = dim.name
                 if var_name in constraints:
                     new_shape.append(constraints[var_name])
@@ -121,9 +120,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        synchronize()
+        torch.cuda.synchronize()
         lib_outs = self.func(*ins)
-        synchronize()
+        torch.cuda.synchronize()
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -181,9 +180,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        synchronize()
+        torch.cuda.synchronize()
         lib_outs = self.func(*ins)
-        synchronize()
+        torch.cuda.synchronize()
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]

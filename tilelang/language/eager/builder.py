@@ -7,16 +7,17 @@ from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
 from tvm.ir.base import Span
 from tvm.ir.expr import Range
-from tvm.tir.stmt import BufferRegion
-from tvm.tir.stmt_functor import substitute
+from tvm.tirx.stmt import BufferRegion
+from tvm.tirx.stmt_functor import substitute
 from .ast import BaseBuilder, IRGenerator, eval_op, has_internal_prim_func, mutate
 from .utils import construct_strides
+from tilelang.language.frame import clear_let_values, register_let_value
 from tilelang.utils import side_effect
 import tvm
-from tvm.tir import Buffer
-from tvm.script.ir_builder import tir, IRBuilder
+from tvm.tirx import Buffer
+from tvm.script.ir_builder import tirx, IRBuilder
 
-from tvm.tir.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
+from tvm.tirx.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, ForwardRef, Literal, get_origin, ParamSpec
 from collections.abc import Callable
 from typing_extensions import Self
@@ -36,12 +37,12 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
     """
     unwrap expr and convert it into PrimExpr like
     """
-    if isinstance(expr, tir.meta_var):
+    if isinstance(expr, tirx.meta_var):
         expr = expr.value
     elif isinstance(expr, Ref):
         return expr.load()
     elif is_var(expr):
-        expr = tir.BufferLoad(expr, indices=[0])
+        expr = tirx.BufferLoad(expr, indices=[0])
     elif isinstance(expr, (EqualOp, NotEqualOp)):
         expr = expr.asobject()
     return expr
@@ -124,7 +125,7 @@ class Ref:
         return self.bufload.buffer
 
     def store(self, value):
-        tir.buffer_store(self.bufload.buffer, value, self.bufload.indices)
+        tirx.buffer_store(self.bufload.buffer, value, self.bufload.indices)
 
     def load(self):
         return self.bufload
@@ -135,20 +136,20 @@ class UnrollForWithStep(SerialForWithStep): ...
 
 # Runtime frame checks use tuple form; AnyFrame is kept as an annotation alias.
 ContinueOrBreak = (ContinueFrame, BreakFrame)
-AnyFrame = tir.frame.IRBuilderFrame | Frame
+AnyFrame = tirx.frame.IRBuilderFrame | Frame
 
 TIR_CONTROL_FRAME = (
-    tir.frame.WhileFrame,
-    tir.frame.ForFrame,
-    tir.frame.IfFrame,
-    tir.frame.PrimFuncFrame,
+    tirx.frame.WhileFrame,
+    tirx.frame.ForFrame,
+    tirx.frame.IfFrame,
+    tirx.frame.PrimFuncFrame,
 )
 
 TIR_VAR_SCOPE_FRAME = (
-    tir.frame.WhileFrame,
-    tir.frame.ForFrame,
-    tir.frame.IfFrame,
-    tir.frame.PrimFuncFrame,
+    tirx.frame.WhileFrame,
+    tirx.frame.ForFrame,
+    tirx.frame.IfFrame,
+    tirx.frame.PrimFuncFrame,
     MacroFrame,
     KernelLaunchFrame,
 )
@@ -191,13 +192,15 @@ class Builder(BaseBuilder):
     @contextmanager
     def prim_func(self, name):
         thread_local_storage.builder = self
+        clear_let_values()
         try:
-            with self.ir_builder, self.with_frame(tir.prim_func()):
-                tir.func_name(name)
+            with self.ir_builder, self.with_frame(tirx.prim_func()):
+                tirx.func_name(name)
                 yield
             if self.eager_jit != "phase1" and len(self.out_idx) != self.out_tensor_cnt:
                 raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
         finally:
+            clear_let_values()
             del thread_local_storage.builder
 
     @contextmanager
@@ -261,14 +264,14 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         cond = unwrap_cond(cond)
         if isinstance(cond, PrimExpr):
-            with self.with_frame(tir.If(cond)):
+            with self.with_frame(tirx.If(cond)):
                 yield self._has_if_frame
         else:
             yield cond
 
     def ctx_then(self, val):
         if val is self._has_if_frame:
-            with self.with_frame(tir.Then()):
+            with self.with_frame(tirx.Then()):
                 yield
         else:
             if val:
@@ -276,7 +279,7 @@ class Builder(BaseBuilder):
 
     def ctx_else(self, val):
         if val is self._has_if_frame:
-            with self.with_frame(tir.Else()):
+            with self.with_frame(tirx.Else()):
                 yield
         else:
             if not val:
@@ -286,23 +289,23 @@ class Builder(BaseBuilder):
         val = unwrap_expr(val)
         if val is None:
             pass
-        elif isinstance(val, tir.frame.IRBuilderFrame):
-            if isinstance(val, tir.frame.ForFrame):
+        elif isinstance(val, tirx.frame.IRBuilderFrame):
+            if isinstance(val, tirx.frame.ForFrame):
                 logger.warning(
                     "A for-loop frame is being evaluated as a standalone expression. Did you mean to use it in a `for` statement?",
                     stacklevel=2,
                 )
             self.enter_frame(val)
         elif isinstance(val, PrimExpr):
-            tir.evaluate(val)
+            tirx.evaluate(val)
         elif isinstance(val, (int, bool)):
-            tir.evaluate(tvm.tir.const(val))
+            tirx.evaluate(tvm.tirx.const(val))
         elif isinstance(val, str):
             pass
-        elif isinstance(val, tvm.tir.stmt.BufferStore):
-            tir.buffer_store(val.buffer, val.value, val.indices, val.predicate)
-        elif isinstance(val, tvm.tir.stmt.AttrStmt):
-            with self.with_frame(tir.attr(val.node, val.attr_key, val.value)):
+        elif isinstance(val, tvm.tirx.stmt.BufferStore):
+            tirx.buffer_store(val.buffer, val.value, val.indices, val.predicate)
+        elif isinstance(val, tvm.tirx.stmt.AttrStmt):
+            with self.with_frame(tirx.attr(val.node, val.attr_key, val.value)):
                 self.eval(val.body)
         elif isinstance(val, (Buffer, Var)):
             pass
@@ -319,19 +322,19 @@ class Builder(BaseBuilder):
                 if step_value == 0:
                     raise ValueError("Invalid stepped serial: step must be non-zero")
                 if step_value > 0:
-                    real_stop = tir.ceildiv(it.stop - it.start, step_value)
+                    real_stop = tirx.ceildiv(it.stop - it.start, step_value)
                 else:
-                    real_stop = tir.ceildiv(it.start - it.stop, -step_value)
+                    real_stop = tirx.ceildiv(it.start - it.stop, -step_value)
             else:
                 logger.warning(
                     f"Non-constant step `{it.step}` in serial range may produce unexpected results. Consider using a constant step if possible.",
                     stacklevel=2,
                 )
-                real_stop = tir.ceildiv(it.stop - it.start, it.step)
+                real_stop = tirx.ceildiv(it.stop - it.start, it.step)
             if isinstance(it, UnrollForWithStep):
-                real_frame = tir.unroll(real_stop, annotations=it.annotations)
+                real_frame = tirx.unroll(real_stop, annotations=it.annotations)
             elif isinstance(it, SerialForWithStep):
-                real_frame = tir.serial(real_stop, annotations=it.annotations)
+                real_frame = tirx.serial(real_stop, annotations=it.annotations)
             else:
                 raise TypeError(
                     f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
@@ -341,7 +344,7 @@ class Builder(BaseBuilder):
                 IRBuilder.name("_tmp", v)
                 yield it.start + v * it.step
         else:
-            if not isinstance(it, tir.frame.ForFrame):
+            if not isinstance(it, tirx.frame.ForFrame):
                 raise TypeError(
                     f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
                     "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding"
@@ -353,13 +356,13 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         # add a dummy frame for checking code after continue/break
         self.enter_frame(ContinueFrame())
-        tir.evaluate(tir.continue_loop())
+        tirx.evaluate(tirx.continue_loop())
 
     def ctx_break(self):
         self.check_continue_break()
         # add a dummy frame for checking code after continue/break
         self.enter_frame(BreakFrame())
-        tir.evaluate(tir.break_loop())
+        tirx.evaluate(tirx.break_loop())
 
     def ctx_while(self, cond):
         self.check_continue_break()
@@ -377,7 +380,7 @@ class Builder(BaseBuilder):
                     f"Condition: {cond_v} ({type(cond_v)}) => {cond_v_unwrap} ({type(cond_v_unwrap)})\n",
                     stacklevel=2,
                 )
-        with self.with_frame(tir.While(cond_v_unwrap)):
+        with self.with_frame(tirx.While(cond_v_unwrap)):
             yield None
 
     def bind(self, name, value, annot=BaseBuilder.empty):
@@ -394,7 +397,7 @@ class Builder(BaseBuilder):
         # here we do a quick check in prim_func_frame, if the value is pure expr, we directly return it
         if (
             isinstance(value, PrimExpr)
-            and isinstance(self.frames[-1], tir.frame.PrimFuncFrame)
+            and isinstance(self.frames[-1], tirx.frame.PrimFuncFrame)
             and side_effect(value) <= CallEffectKind.Pure.value
         ):
             return value
@@ -441,13 +444,13 @@ class Builder(BaseBuilder):
             orig_value.store(value)
             return orig_value
         if is_var(orig_value) and isinstance(value, (int, float, PrimExpr)):
-            tir.buffer_store(orig_value, value, 0)
+            tirx.buffer_store(orig_value, value, 0)
             return orig_value
 
         # 2. Quick return for trivil types
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
             return value
-        if isinstance(value, tir.IntImm) and value.dtype == "int32":
+        if isinstance(value, tirx.IntImm) and value.dtype == "int32":
             return value.value
         if isinstance(value, (Var, Buffer)):
             # Bind TVM Var/Buffer names and also record scope so reusing the same
@@ -481,7 +484,7 @@ class Builder(BaseBuilder):
         """
         value = unwrap_expr(value)
         # handle bx, by = tl.Kernel(128, 128), rval is frame
-        if isinstance(value, tir.frame.IRBuilderFrame):
+        if isinstance(value, tirx.frame.IRBuilderFrame):
             return self.enter_frame(value)
         else:
             return value
@@ -494,14 +497,14 @@ class Builder(BaseBuilder):
         if name == "_":
             # use _tmp to make the generated tir more readable
             name = "_tmp"
-        if isinstance(value, tir.meta_var):
+        if isinstance(value, tirx.meta_var):
             return value.value
-        elif isinstance(value, tir.frame.IRBuilderFrame):
+        elif isinstance(value, tirx.frame.IRBuilderFrame):
             return self.enter_frame(value)
         elif isinstance(value, OutTensor):
-            arg = tir.arg(
+            arg = tirx.arg(
                 name,
-                tir.buffer(
+                tirx.buffer(
                     shape=value.shape,
                     dtype=value.dtype,
                     strides=value.strides,
@@ -510,14 +513,14 @@ class Builder(BaseBuilder):
             arg._out_idx = self.out_tensor_cnt
             self.out_tensor_cnt += 1
             return arg
-        elif isinstance(value, (Buffer, tir.IterVar, tir.Var)):
+        elif isinstance(value, (Buffer, tirx.IterVar, tirx.Var)):
             IRBuilder.name(name, value)
             return value
         elif isinstance(value, (PrimExpr, BufferRegion)):
-            frame = tir.LetStmt(value)
-            var = frame.var
+            var = tirx.bind(value)
+            register_let_value(var, value)
             IRBuilder.name(name, var)
-            return self.enter_frame(frame)
+            return var
         else:
             return value
 
@@ -526,7 +529,7 @@ class Builder(BaseBuilder):
         if annot is not self.empty:
             logger.warning("Type annotation on slice assignment is not supported and will be ignored.", stacklevel=2)
         if isinstance(lval, Buffer):
-            tir.buffer_store(lval, value, sl)
+            tirx.buffer_store(lval, value, sl)
         else:
             return super().assign_slice(lval, sl, value)
 
@@ -536,7 +539,7 @@ class Builder(BaseBuilder):
             target.store(eval_op(op, target.bufload, aug_value))
             return target
         elif is_var(target):
-            tir.buffer_store(target, eval_op(op, target[0], aug_value), 0)
+            tirx.buffer_store(target, eval_op(op, target[0], aug_value), 0)
             return target
         elif isinstance(target, Buffer):
             raise RuntimeError(
@@ -557,7 +560,7 @@ class Builder(BaseBuilder):
             # LetStmts before match_buffer.
             if (
                 isinstance(res, PrimExpr)
-                and isinstance(self.frames[-1], tir.frame.PrimFuncFrame)
+                and isinstance(self.frames[-1], tirx.frame.PrimFuncFrame)
                 and side_effect(res) <= CallEffectKind.Pure.value
             ):
                 return res
@@ -579,7 +582,7 @@ class Builder(BaseBuilder):
     def aug_assign_slice(self, op, target, sl, aug_value):
         self.check_continue_break()
         if isinstance(target, Buffer):
-            tir.buffer_store(target, eval_op(op, target[sl], aug_value), sl)
+            tirx.buffer_store(target, eval_op(op, target[sl], aug_value), sl)
         else:
             return super().aug_assign_slice(op, target, sl, aug_value)
 
@@ -588,11 +591,11 @@ class Builder(BaseBuilder):
         if isinstance(left, PrimExpr):
             with self.with_frame(BoolOpFrame()):
                 if op == "And":
-                    return tir.And(left, right())
+                    return tirx.And(left, right())
                 if op == "Or":
-                    return tir.Or(left, right())
+                    return tirx.Or(left, right())
                 if op == "Not":
-                    return tir.Not(left)
+                    return tirx.Not(left)
             raise RuntimeError(f"Unsupported boolean operator: {op}")
         else:
             return super().boolop(op, left, right)
@@ -601,7 +604,7 @@ class Builder(BaseBuilder):
         cond = unwrap_cond(cond)
         if isinstance(cond, PrimExpr):
             with self.with_frame(BoolOpFrame()):
-                return tir.if_then_else(cond, then(), otherwise())
+                return tirx.if_then_else(cond, then(), otherwise())
         else:
             return super().ifexp(cond, then, otherwise)
 
@@ -648,7 +651,7 @@ class Builder(BaseBuilder):
 
     def ctx_with(self, ctx):
         self.check_continue_break()
-        if isinstance(ctx, tir.frame.IRBuilderFrame):
+        if isinstance(ctx, tirx.frame.IRBuilderFrame):
             return self.with_frame(ctx)
         else:
             return super().ctx_with(ctx)
@@ -659,7 +662,7 @@ class Builder(BaseBuilder):
         if msg is None:
             msg = "Assertion failed"
         if isinstance(cond, PrimExpr):
-            self.enter_frame(tir.Assert(cond, msg))
+            self.enter_frame(tirx.Assert(cond, msg))
         elif not cond:
             raise AssertionError(msg)
 
@@ -690,18 +693,14 @@ class Builder(BaseBuilder):
             raise ValueError(
                 f"To pass as reference, argument `{name}` is expected to be a variable or a buffer region, but got {value}({type(value)})"
             )
-        elif isinstance(value, (PrimExpr, bool)):
+        elif isinstance(value, (PrimExpr, int, float)):
             return self.bind(name, value)
-        elif isinstance(value, int):
-            return self.bind(name, tvm.tir.const(value, "int32"))
-        elif isinstance(value, float):
-            return self.bind(name, tvm.tir.const(value, "float32"))
         else:
             return value
 
     def prim_func_arg(self, name, value):
         if isinstance(value, (Buffer, Var)):
-            return tir.arg(name, value)
+            return tirx.arg(name, value)
         elif value is self.empty:
             raise ValueError(f"Argument `{name}` is not annotated")
         elif isinstance(value, Hashable):
@@ -723,7 +722,7 @@ class Builder(BaseBuilder):
         raise ValueError(f"Unknown override: {name}")
 
     def constexpr(self, name: str, dtype: str = "int32") -> Var:
-        var = tir.Var(name, dtype)
+        var = tirx.Var(name, dtype)
         self.constexpr_var.add(var)
         var.orig_name = name
         return var
@@ -747,18 +746,18 @@ _T = TypeVar("_T")
 
 if TYPE_CHECKING:
 
-    class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
-        params: list[tvm.tir.Var | tvm.tir.Buffer]
-        body: tvm.tir.Stmt
+    class PrimFunc(Generic[_P, _T], tvm.tirx.PrimFunc):
+        params: list[tvm.tirx.Var | tvm.tirx.Buffer]
+        body: tvm.tirx.Stmt
         ret_type: tvm.ir.Type
-        buffer_map: Map[tvm.tir.Var, tvm.tir.Buffer]
+        buffer_map: Map[tvm.tirx.Var, tvm.tirx.Buffer]
         attrs: tvm.Attrs | None
         span: Span | None
         ir_gen: IRGenerator[_P, _T] | None
         orig_func: Callable[_P, _T] | None
 
 else:
-    PrimFunc = tvm.tir.PrimFunc
+    PrimFunc = tvm.tirx.PrimFunc
 
 
 @dataclass
@@ -851,7 +850,7 @@ def get_type_hints(func):
     # ```
     #
     # This is incomplete and buggy
-    #   the only bug scenario the function body doesn't use the the parameters
+    #   the only bug scenario the function body doesn't use the parameters
     #   but such define-no-use scenario is very rare in writing kernels
     #
     # ```py
@@ -968,8 +967,7 @@ def annotate_pass_configs(configs: dict[str, Any]) -> None:
         @tilelang.jit
         def kernel(A, B):
             T.annotate_pass_configs({
-                PassConfigKey.TL_ENABLE_FAST_MATH: True,
-            })
+                PassConfigKey.TL_ENABLE_FAST_MATH: True})
             ...
     """
     builder = Builder.current()
@@ -1006,7 +1004,7 @@ class TirTemplate(Generic[_P, _T]):
 
     name: str
     prim_func: PrimFunc[_P, _T]
-    matcher: dict[Var, tuple[tvm.tir.Var, str, int, str]] | None = None
+    matcher: dict[Var, tuple[tvm.tirx.Var, str, int, str]] | None = None
     constexprs: set[Var] = None
     is_lazy_style: bool = False  # True if from lazy-style (returns PrimFunc directly)
     ir_gen: IRGenerator[_P, _T] | None = None
@@ -1226,7 +1224,7 @@ def substitute_primfunc(prim_func, vmap):
         return analyzer.simplify(substitute(v, vmap))
 
     def substitute_buffer(buf):
-        return tvm.tir.decl_buffer(
+        return tvm.tirx.decl_buffer(
             data=sub(buf.data),
             shape=[sub(dim) for dim in buf.shape],
             dtype=buf.dtype,
@@ -1241,16 +1239,8 @@ def substitute_primfunc(prim_func, vmap):
     )
 
 
-def prim_func(
-    func: Callable[_P, _T] = None,
-    *,
-    eager_jit: bool = False,
-    generator: bool = False,
-) -> PrimFunc[_P, _T] | JITFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
-    def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | JITFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
-        if eager_jit and generator:
-            raise ValueError("`prim_func` does not support eager_jit=True with generator=True")
-
+def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
+    def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
         sig = inspect.signature(func)
         ir_gen = mutate(func)
         func_annot = get_type_hints(func)
@@ -1269,26 +1259,6 @@ def prim_func(
             if not isinstance(annot[k], type) and callable(annot[k]) and get_origin(annot[k]) is None:
                 annot[k] = annot[k]()
 
-        def build_prim_func(call_kwargs):
-            builder = Builder()
-            with builder.prim_func(func.__name__):
-                ir_gen.gen(builder)(**call_kwargs)
-            built = builder.get()
-            built = _patch_prim_func_attrs(built, builder)
-            built.orig_func = func
-            if builder.out_idx:
-                built.out_idx_override = builder.out_idx
-            return built
-
-        def prim_func_generator(*args, **kwargs):
-            bound = sig.bind_partial(*args, **kwargs)
-            bound.apply_defaults()
-            return build_prim_func(bound.arguments)
-
-        prim_func_generator.ir_gen = ir_gen
-        prim_func_generator.source = ir_gen.source
-        prim_func_generator.orig_func = func
-
         if eager_jit:
             arg_names = list(sig.parameters.keys())
             tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
@@ -1296,15 +1266,17 @@ def prim_func(
                 k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty
             }
             return JITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
-
-
-        if generator:
-            return prim_func_generator
-
-        try:
-            return build_prim_func(annot)
-        except Exception as e:
-            logger.fatal(f"Failed to build prim_func from {func.__name__}\nargs={annot}\nsource={ir_gen.source}")
-            raise e
+        else:
+            try:
+                builder = Builder()
+                with builder.prim_func(func.__name__):
+                    ir_gen.gen(builder)(**annot)
+                prim_func = builder.get()
+                prim_func = _patch_prim_func_attrs(prim_func, builder)
+                prim_func.orig_func = func
+                return prim_func
+            except Exception as e:
+                logger.fatal(f"Failed to build prim_func from {func.__name__}\nargs={annot}\nsource={ir_gen.source}")
+                raise e
 
     return impl(func) if func is not None else impl

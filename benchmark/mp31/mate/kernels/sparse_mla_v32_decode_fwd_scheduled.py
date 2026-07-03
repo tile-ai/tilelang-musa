@@ -2,7 +2,7 @@
 import torch
 import tilelang
 from tilelang import language as T
-from tvm import tir
+from tvm import tirx as tir
 import math
 
 from .gdn_common import cosize

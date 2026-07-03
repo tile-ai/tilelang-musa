@@ -3,6 +3,13 @@
 from tilelang.transform import _ffi_api
 
 
+def LowerHopperIntrin():
+    """LowerHopperIntrin"""
+    if hasattr(_ffi_api, "LowerHopperIntrin"):
+        return _ffi_api.LowerHopperIntrin()  # type: ignore
+    return lambda f: f
+
+
 def LowerL2Persistent():
     """LowerL2Persistent"""
     return _ffi_api.LowerL2Persistent()  # type: ignore
@@ -14,6 +21,7 @@ def PersistThreadblock():
 
 
 __all__ = [
+    "LowerHopperIntrin",
     "LowerL2Persistent",
     "PersistThreadblock",
 ]

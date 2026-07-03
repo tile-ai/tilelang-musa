@@ -5,8 +5,11 @@
 #include "codegen_musa.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
-#include <tvm/tir/index_map.h>
-#include <tvm/tir/op.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/index_map.h>
+#include <tvm/tirx/op.h>
 
 #include <algorithm>
 #include <cmath>
@@ -21,7 +24,8 @@
 #include "backend/musa/codegen/ptx.h"
 #include "op/builtin.h"
 #include "op/gemm.h"
-#include "tvm/node/cast.h"
+#include "target/utils.h"
+#include "transform/common/attr.h"
 
 namespace tvm {
 namespace codegen {
@@ -30,6 +34,10 @@ using namespace tvm::tl::codegen;
 using namespace ffi;
 
 namespace {
+
+constexpr const char *kMUSAGlobalBarrierState = "__tvm_global_barrier_state";
+constexpr const char *kMUSAGlobalBarrierKInitOp =
+    "tir.tvm_global_barrier_kinit";
 
 bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
@@ -340,21 +348,19 @@ std::string GetTileLangFP4Type(DataType type) {
 
 CodeGenTileLangMUSA::CodeGenTileLangMUSA() {
   restrict_keyword_ = "__restrict__";
-  vid_global_barrier_state_ =
-      name_supply_->FreshName(runtime::symbol::tvm_global_barrier_state);
+  vid_global_barrier_state_ = name_supply_->FreshName(kMUSAGlobalBarrierState);
   vid_global_barrier_expect_ = name_supply_->FreshName("__barrier_expect");
-  ICHECK_EQ(vid_global_barrier_state_,
-            runtime::symbol::tvm_global_barrier_state);
+  ICHECK_EQ(vid_global_barrier_state_, kMUSAGlobalBarrierState);
 }
 
 void CodeGenTileLangMUSA::PrintFuncPrefix(std::ostream &os) {
   os << "extern \"C\" __global__ ";
 }
 
-class LaunchConfigExtractor : public tir::StmtVisitor {
+class LaunchConfigExtractor : public tirx::StmtVisitor {
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->var->name_hint == "threadIdx.x" ||
           iv->thread_tag == "threadIdx.x") {
@@ -572,8 +578,8 @@ std::string CodeGenTileLangMUSA::Finish() {
   return CodeGenC::Finish();
 }
 
-void CodeGenTileLangMUSA::VisitStmt_(const tir::ForNode *op) {
-  if (op->kind == tir::ForKind::kUnrolled) {
+void CodeGenTileLangMUSA::VisitStmt_(const tirx::ForNode *op) {
+  if (op->kind == tirx::ForKind::kUnrolled) {
     PrintIndent();
     if (unroll_factor.count(op->loop_var.get())) {
       stream << "#pragma unroll "
@@ -1865,6 +1871,12 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+  if (op->op.same_as(tl::make_robust_desc())) {
+    ICHECK_EQ(op->args.size(), 2);
+    os << "tl::make_robust_desc(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+    return;
+  }
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
     const bool is_max = op->op.same_as(tl::max_nan());
@@ -1928,8 +1940,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
-             op->op.same_as(tl::max2_nan()) ||
-             op->op.same_as(tl::min2_nan()) ||
+             op->op.same_as(tl::max2_nan()) || op->op.same_as(tl::min2_nan()) ||
              op->op.same_as(tl::abs2())) {
     ICHECK(op->dtype.lanes() == 2 && UseMusaNativeVector(op->dtype))
         << "MUSA packed x2 intrinsics require native x2 dtype, but got "
@@ -2045,8 +2056,14 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
-    this->PrintIndent();
-    this->stream << "__musa_async_bar_record(" << barrier_count << ");\n";
+    if (barrier_count > 0) {
+      next_mbarrier_id_ += barrier_count;
+      ICHECK_LE(next_mbarrier_id_, 63)
+          << "MUSA async barrier IDs must be in [1, 63], but requested "
+          << next_mbarrier_id_ << " barriers";
+      this->PrintIndent();
+      this->stream << "__musa_async_bar_record(" << barrier_count << ");\n";
+    }
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     if (op->args.size() == 1) {
       this->PrintIndent();
@@ -2853,10 +2870,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     class LowerFloorDivMod : public ExprMutator {
     public:
       PrimExpr VisitExpr_(const FloorDivNode *op) {
-        return tir::Div(this->VisitExpr(op->a), this->VisitExpr(op->b));
+        return tirx::Div(this->VisitExpr(op->a), this->VisitExpr(op->b));
       }
       PrimExpr VisitExpr_(const FloorModNode *op) {
-        return tir::Mod(this->VisitExpr(op->a), this->VisitExpr(op->b));
+        return tirx::Mod(this->VisitExpr(op->a), this->VisitExpr(op->b));
       }
     };
 
@@ -2910,7 +2927,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string src_offset = this->PrintExpr(op->args[3]);
     std::string size = this->PrintExpr(op->args[4]);
     int barrier_id = Downcast<IntImm>(op->args[5])->value;
-    CHECK(barrier_id < barrier_count_);
+    ICHECK(barrier_id < barrier_count_);
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << musa_codegen::PrintCpAsyncBulkAsm(
@@ -2924,7 +2941,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;
-    CHECK(barrier_id < barrier_count_);
+    ICHECK(barrier_id < barrier_count_);
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     std::string thread_count = this->PrintExpr(op->args[1]);
@@ -2933,7 +2950,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(builtin::ptx_wait_barrier())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;
-    CHECK(barrier_id < barrier_count_);
+    ICHECK(barrier_id < barrier_count_);
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << musa_codegen::PrintWaitBarrierAsm(barrier);
@@ -3091,8 +3108,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     // Handle float4_e2m1fn reinterpret
     if (!src_dtype.is_float4_e2m1fn() && !tgt_dtype.is_float4_e2m1fn()) {
-      CHECK_EQ(tgt_dtype.lanes() * tgt_dtype.bits(),
-               src_dtype.lanes() * src_dtype.bits())
+      ICHECK_EQ(tgt_dtype.lanes() * tgt_dtype.bits(),
+                src_dtype.lanes() * src_dtype.bits())
           << "reinterpret expects source and target to have the same number of "
              "bits";
 
@@ -3118,11 +3135,11 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
                                       src_dtype.lanes() * src_dtype.bits()) {
       return CodeGenC::VisitExpr_(op, os);
     }
-    CHECK_EQ(tgt_dtype.lanes(), src_dtype.lanes())
+    ICHECK_EQ(tgt_dtype.lanes(), src_dtype.lanes())
         << "E2M1 float4 reinterpret expects source and target to have the same "
            "number of lanes. "
         << "Source dtype: " << src_dtype << ", Target dtype: " << tgt_dtype;
-    CHECK_EQ(tgt_dtype.bytes(), src_dtype.bytes())
+    ICHECK_EQ(tgt_dtype.bytes(), src_dtype.bytes())
         << "E2M1 float4 reinterpret expects source and target to have the same "
            "number of bytes. "
         << "Source dtype: " << src_dtype << ", Target dtype: " << tgt_dtype;
@@ -3150,48 +3167,48 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       if (tgt_dtype.is_float4_e2m1fn()) {
         // We view the source as an uint16, and then extract bits of two fp4
         // numbers, and finally reinterpret the result as fp4x2.
+        value = tirx::Call(DataType::UInt(16), tirx::builtin::reinterpret(),
+                           {value});
+        tirx::Var temp_var("temp_var", DataType::UInt(16));
         value =
-            tir::Call(DataType::UInt(16), tir::builtin::reinterpret(), {value});
-        tir::Var temp_var("temp_var", DataType::UInt(16));
-        value =
-            tir::Let(temp_var, value,
-                     tir::Cast(DataType::UInt(8),
-                               (temp_var & IntImm(DataType::UInt(16), 0xF)) |
-                                   ((temp_var >> 4) &
-                                    IntImm(DataType::UInt(16), 0xF0))));
+            tirx::Let(temp_var, value,
+                      tirx::Cast(DataType::UInt(8),
+                                 (temp_var & IntImm(DataType::UInt(16), 0xF)) |
+                                     ((temp_var >> 4) &
+                                      IntImm(DataType::UInt(16), 0xF0))));
       } else {
-        value = tir::Cast(
-            DataType::UInt(16),
-            tir::Call(DataType::UInt(8), tir::builtin::reinterpret(), {value}));
-        tir::Var temp_var("temp_var", DataType::UInt(16));
+        value = tirx::Cast(DataType::UInt(16),
+                           tirx::Call(DataType::UInt(8),
+                                      tirx::builtin::reinterpret(), {value}));
+        tirx::Var temp_var("temp_var", DataType::UInt(16));
         value =
-            tir::Let(temp_var, value,
-                     (temp_var & IntImm(DataType::UInt(16), 0xF)) |
-                         ((temp_var & IntImm(DataType::UInt(16), 0xF0)) << 4));
+            tirx::Let(temp_var, value,
+                      (temp_var & IntImm(DataType::UInt(16), 0xF)) |
+                          ((temp_var & IntImm(DataType::UInt(16), 0xF0)) << 4));
       }
       os << PrintExpr(
-          tir::Call(tgt_dtype, tir::builtin::reinterpret(), {value}));
+          tirx::Call(tgt_dtype, tirx::builtin::reinterpret(), {value}));
     } else if (lanes == 4) {
       if (tgt_dtype.is_float4_e2m1fn()) {
         // We view the source as an uint32, and then extract bits of four fp4
         // numbers, and finally reinterpret the result as fp4x4.
-        value =
-            tir::Call(DataType::UInt(32), tir::builtin::reinterpret(), {value});
-        tir::Var temp_var("temp_var", DataType::UInt(32));
-        value = tir::Let(
+        value = tirx::Call(DataType::UInt(32), tirx::builtin::reinterpret(),
+                           {value});
+        tirx::Var temp_var("temp_var", DataType::UInt(32));
+        value = tirx::Let(
             temp_var, value,
-            tir::Cast(
+            tirx::Cast(
                 DataType::UInt(16),
                 (temp_var & IntImm(DataType::UInt(32), 0xF)) |
                     ((temp_var >> 4) & IntImm(DataType::UInt(32), 0xF0)) |
                     ((temp_var >> 8) & IntImm(DataType::UInt(32), 0xF00)) |
                     ((temp_var >> 12) & IntImm(DataType::UInt(32), 0xF000))));
       } else {
-        value = tir::Cast(DataType::UInt(32),
-                          tir::Call(DataType::UInt(16),
-                                    tir::builtin::reinterpret(), {value}));
-        tir::Var temp_var("temp_var", DataType::UInt(32));
-        value = tir::Let(
+        value = tirx::Cast(DataType::UInt(32),
+                           tirx::Call(DataType::UInt(16),
+                                      tirx::builtin::reinterpret(), {value}));
+        tirx::Var temp_var("temp_var", DataType::UInt(32));
+        value = tirx::Let(
             temp_var, value,
             (temp_var & IntImm(DataType::UInt(32), 0xF)) |
                 ((temp_var & IntImm(DataType::UInt(32), 0xF0)) << 4) |
@@ -3199,7 +3216,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
                 ((temp_var & IntImm(DataType::UInt(32), 0xF000)) << 12));
       }
       os << PrintExpr(
-          tir::Call(tgt_dtype, tir::builtin::reinterpret(), {value}));
+          tirx::Call(tgt_dtype, tirx::builtin::reinterpret(), {value}));
     } else {
       LOG(FATAL) << "Invalid number of lanes for float4_e2m1fn reinterpret: "
                  << lanes;
@@ -3574,7 +3591,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangMUSA::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tir::attr::fragment_shape) {
+  if (op->attr_key == s_tir::attr::fragment_shape) {
     const VarNode *buffer = op->node.as<VarNode>();
     const StringImmNode *shape_str = op->value.as<StringImmNode>();
     fragment_shapes[buffer] = shape_str->value;
@@ -3614,11 +3631,11 @@ void CodeGenTileLangMUSA::VisitStmt_(const AttrStmtNode *op) {
       this->stream << "}\n";
       return;
     }
-  } else if (op->attr_key == tir::attr::fragment_layout) {
+  } else if (op->attr_key == s_tir::attr::fragment_layout) {
     const VarNode *buffer = op->node.as<VarNode>();
     const StringImmNode *layout_str = op->value.as<StringImmNode>();
     fragment_layouts[buffer] = layout_str->value;
-  } else if (op->attr_key == tir::attr::async_commit_queue_scope) {
+  } else if (op->attr_key == s_tir::attr::async_commit_queue_scope) {
     const IntImmNode *queue_id = op->value.as<IntImmNode>();
     ICHECK(queue_id && queue_id->value == 0)
         << "For MUSA, the index of an async queue must be 0.";
@@ -3626,7 +3643,7 @@ void CodeGenTileLangMUSA::VisitStmt_(const AttrStmtNode *op) {
     auto commit_group = Call(DataType::Void(), builtin::ptx_commit_group(), {});
     this->VisitExpr(commit_group, this->stream);
     return;
-  } else if (op->attr_key == tir::attr::async_wait_queue_scope) {
+  } else if (op->attr_key == s_tir::attr::async_wait_queue_scope) {
     auto wait_attrs = GetAsyncWaitAttributes(op);
     auto queue_id = wait_attrs.first.as<IntImmNode>();
     ICHECK(queue_id && queue_id->value == 0)
@@ -3654,26 +3671,29 @@ void CodeGenTileLangMUSA::VisitStmt_(const AttrStmtNode *op) {
   CodeGenC::VisitStmt_(op);
 }
 
-void CodeGenTileLangMUSA::VisitStmt_(const AllocateNode *op) {
-  ICHECK(!is_zero(op->condition));
-  std::string vid = AllocVarID(op->buffer_var.get());
+void CodeGenTileLangMUSA::VisitStmt_(const AllocBufferNode *op) {
+  std::string vid = AllocVarID(op->buffer->data.get());
   this->PrintIndent();
-  std::string scope = GetPtrStorageScope(op->buffer_var);
-  const VarNode *buffer = op->buffer_var.as<VarNode>();
+  std::string scope = GetPtrStorageScope(op->buffer->data);
+  const VarNode *buffer = op->buffer->data.as<VarNode>();
+  DataType alloc_dtype = op->buffer->dtype;
   if (scope.find("wmma.") == 0) {
     if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
-      ICHECK(op->dtype == DataType::Float(16) ||
-             op->dtype == DataType::Int(8) || op->dtype == DataType::UInt(8) ||
-             op->dtype == DataType::Int(4) || op->dtype == DataType::UInt(4) ||
-             op->dtype == DataType::Int(1) || op->dtype == DataType::BFloat(16))
+      ICHECK(
+          alloc_dtype == DataType::Float(16) ||
+          alloc_dtype == DataType::Int(8) || alloc_dtype == DataType::UInt(8) ||
+          alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4) ||
+          alloc_dtype == DataType::Int(1) ||
+          alloc_dtype == DataType::BFloat(16))
           << "Matrix_a and matrix_b only support half or char or unsigned char "
           << "or uint4 or int4 or int1 type for now";
     } else {
-      ICHECK(op->dtype == DataType::Float(16) ||
-             op->dtype == DataType::Float(32) || op->dtype == DataType::Int(32))
+      ICHECK(alloc_dtype == DataType::Float(16) ||
+             alloc_dtype == DataType::Float(32) ||
+             alloc_dtype == DataType::Int(32))
           << "Accumulator only support half, float and int type for now";
     }
-    PrintWmmaScope(scope, op->dtype, buffer, stream);
+    PrintWmmaScope(scope, alloc_dtype, buffer, stream);
   } else if (scope == "local.descriptor.wgmma") {
     stream << "tl::GmmaDescriptor " << vid << ";\n";
   } else if (scope == "local.descriptor.tcgen05_smem") {
@@ -3681,53 +3701,66 @@ void CodeGenTileLangMUSA::VisitStmt_(const AllocateNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    bool is_fp4_scalar_local = op->dtype.is_float4() && op->dtype.is_scalar() &&
+    bool is_fp4_scalar_local = alloc_dtype.is_float4() &&
+                               alloc_dtype.is_scalar() &&
                                (scope == "local" || scope.empty());
     if (!is_fp4_scalar_local) {
       PrintStorageScope(scope, stream);
-      PrintType(op->dtype, stream);
+      PrintType(alloc_dtype, stream);
     }
   }
 
   if (scope == "shared.dyn") {
     stream << ' ' << vid << "[];\n";
   } else {
-    size_t constant_size = op->ConstantAllocationSize();
-    ICHECK_GT(constant_size, 0)
+    auto alloc_ref = GetRef<AllocBuffer>(op);
+    auto opt_size = alloc_ref.ConstantAllocationSize();
+    ICHECK(opt_size.has_value())
         << "Can only handle constant size stack allocation for now, but get "
-        << constant_size << " for " << op->buffer_var->name_hint;
+        << "non-constant for " << op->buffer->data->name_hint;
+    size_t constant_size = static_cast<size_t>(opt_size.value());
+    ICHECK_GT(constant_size, 0)
+        << "Can only handle constant size stack allocation for now";
     if (scope.find("wmma.") == 0) {
       constant_size = GetWmmaFragmentSize(scope, buffer, constant_size);
     }
-    if ((op->dtype == DataType::Int(4) || op->dtype == DataType::UInt(4) ||
-         op->dtype == DataType::Int(1)) &&
+    if ((alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4) ||
+         alloc_dtype == DataType::Int(1)) &&
         scope == "shared") {
-      constant_size = constant_size / (32 / op->dtype.bits());
+      constant_size = constant_size / (32 / alloc_dtype.bits());
     }
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "shared.barrier") {
       auto v_id_mem = vid + "_mem";
       stream << ' ' << v_id_mem << "[" << constant_size << "];\n";
+      int base_id = next_mbarrier_id_ + 1;
+      next_mbarrier_id_ += static_cast<int>(constant_size);
+      ICHECK_LE(next_mbarrier_id_, 63)
+          << "MUSA async barrier IDs must be in [1, 63], but requested "
+          << next_mbarrier_id_ << " barriers";
+      mbarrier_base_ids_[op->buffer->data.get()] = base_id;
+      this->PrintIndent();
+      this->stream << "__musa_async_bar_record(" << constant_size << ");\n";
       PrintIndent();
       stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
              << "*>(" << v_id_mem << ");\n";
     } else if (scope == "local") {
-      if (op->dtype.is_float4() && op->dtype.is_scalar()) {
+      if (alloc_dtype.is_float4() && alloc_dtype.is_scalar()) {
         auto vid_packed = vid + "_packed";
         stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
                << "];\n";
-        fp4_packed_buffers_[op->buffer_var.get()] = vid_packed;
+        fp4_packed_buffers_[op->buffer->data.get()] = vid_packed;
       } else {
         stream << ' ' << vid << '[' << constant_size << "];\n";
       }
     } else if (scope == "local.var") {
-      PrimExpr init = tir::make_const(op->dtype, 0);
+      PrimExpr init = tirx::make_const(alloc_dtype, 0);
       auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
       if (init_it != op->annotations.end()) {
         PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
-        if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
-          user_init = tir::Cast(op->dtype, user_init);
+        if (!user_init.dtype().is_void() && user_init.dtype() != alloc_dtype) {
+          user_init = tirx::Cast(alloc_dtype, user_init);
         }
         init = user_init;
       }
@@ -3737,15 +3770,29 @@ void CodeGenTileLangMUSA::VisitStmt_(const AllocateNode *op) {
     }
   }
 
-  RegisterHandleType(op->buffer_var.get(), op->dtype);
-  this->PrintStmt(op->body);
+  RegisterHandleType(op->buffer->data.get(), alloc_dtype);
+  if (op->annotations.count(tirx::attr::kVolatile)) {
+    MarkVolatile(op->buffer->data.get());
+  }
+}
+
+void CodeGenTileLangMUSA::VisitStmt_(const BindNode *op) {
+  const auto *call = op->value.as<CallNode>();
+  if (call && call->op.same_as(tvm::tl::make_robust_desc())) {
+    return;
+  }
+  CodeGenC::VisitStmt_(op);
 }
 
 void CodeGenTileLangMUSA::VisitStmt_(const EvaluateNode *op) {
   if (is_const_int(op->value))
     return;
   const CallNode *call = op->value.as<CallNode>();
-  if (call && call->op.same_as(builtin::tvm_global_barrier_kinit())) {
+  if (call && call->op.same_as(tvm::tl::layout_marker())) {
+    return;
+  }
+  if (call && call->op.as<OpNode>() &&
+      call->op.as<OpNode>()->name == kMUSAGlobalBarrierKInitOp) {
     PrintIndent();
     stream << "__shared__ unsigned " << vid_global_barrier_expect_ << ";\n";
     PrintIndent();
@@ -3812,6 +3859,22 @@ void CodeGenTileLangMUSA::VisitExpr_(const BufferLoadNode *op,
   PrimExpr index = op->indices[0];
   Var buffer_var = op->buffer->data;
   DataType element_dtype = op->buffer->dtype;
+
+  if (op->buffer.scope() == "shared.barrier") {
+    auto it = mbarrier_base_ids_.find(buffer_var.get());
+    ICHECK(it != mbarrier_base_ids_.end())
+        << "Cannot find MUSA async barrier base ID for " << buffer_var;
+    int base_id = it->second;
+    if (const auto *imm = index.as<IntImmNode>()) {
+      int barrier_id = base_id + static_cast<int>(imm->value);
+      ICHECK_GE(barrier_id, 1);
+      ICHECK_LE(barrier_id, 63);
+      os << barrier_id;
+    } else {
+      os << "(" << PrintExpr(index) << " + " << base_id << ")";
+    }
+    return;
+  }
 
   auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
   if (packed_it != fp4_packed_buffers_.end() && value_dtype.is_scalar()) {
@@ -4480,11 +4543,11 @@ void CodeGenTileLangMUSA::PrintFunctionSignature(const String &function_name,
   PrintFuncPrefix(os);
   CodeGenC::PrintType(func->ret_type, os);
   CodeGenC::PrintExtraAttrs(func, os);
-  bool no_alias = func->HasNonzeroAttr(tir::attr::kNoAlias);
+  bool no_alias = func->HasNonzeroAttr(tirx::attr::kNoAlias);
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
-          func->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tir::Var &v : opt.value())
+          func->GetAttr<ffi::Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
+    for (const tirx::Var &v : opt.value())
       non_restrict.insert(v.get());
   }
   std::unordered_set<int> ro_param_indices;
@@ -4496,7 +4559,7 @@ void CodeGenTileLangMUSA::PrintFunctionSignature(const String &function_name,
   }
   os << " " << function_name << "(";
   for (size_t i = 0; i < func->params.size(); ++i) {
-    tir::Var v = func->params[i];
+    tirx::Var v = func->params[i];
     std::string vid = AllocVarID(v.get());
 
     if (i > 0) {
@@ -4559,6 +4622,8 @@ void CodeGenTileLangMUSA::AddFunction(const GlobalVar &gvar,
   // clear previous generated state.
   this->InitFuncState(f);
   tma_descriptor_args_.clear();
+  next_mbarrier_id_ = 0;
+  mbarrier_base_ids_.clear();
   if (auto attr =
           f->GetAttr<Map<String, Array<PrimExpr>>>("tma_descriptor_args")) {
     for (const auto &kv : attr.value()) {
@@ -4571,11 +4636,11 @@ void CodeGenTileLangMUSA::AddFunction(const GlobalVar &gvar,
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
-  bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
-          f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tir::Var &v : opt.value())
+          f->GetAttr<ffi::Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
+    for (const tirx::Var &v : opt.value())
       non_restrict.insert(v.get());
   }
   std::unordered_set<int> ro_param_indices;
@@ -4592,7 +4657,7 @@ void CodeGenTileLangMUSA::AddFunction(const GlobalVar &gvar,
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
 
   for (size_t i = 0; i < f->params.size(); ++i) {
-    tir::Var v = f->params[i];
+    tirx::Var v = f->params[i];
     std::string vid = AllocVarID(v.get());
     if (i != 0)
       stream << ", ";

@@ -3,13 +3,14 @@
  * \brief Rewrite partial shared sync into mbarrier arrive/wait for MUSA.
  */
 #include "../op/builtin.h"
+#include "support/check.h"
 #include "tvm/runtime/logging.h"
-#include "tvm/tir/buffer.h"
-#include "tvm/tir/builtin.h"
-#include "tvm/tir/expr.h"
-#include "tvm/tir/op.h"
-#include "tvm/tir/stmt_functor.h"
-#include "tvm/tir/transform.h"
+#include "tvm/tirx/buffer.h"
+#include "tvm/tirx/builtin.h"
+#include "tvm/tirx/expr.h"
+#include "tvm/tirx/op.h"
+#include "tvm/tirx/stmt_functor.h"
+#include "tvm/tirx/transform.h"
 #include <tvm/ffi/reflection/registry.h>
 
 #include <optional>
@@ -21,7 +22,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 // Collect barrier metadata and rewrite partial sync to internal placeholders.
 class UnifiedBarrierPrepass : public StmtExprMutator {
@@ -167,28 +168,15 @@ public:
   }
 
 private:
-  Stmt VisitStmt_(const LetStmtNode *op) final {
+  Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
-    auto body = op->body;
-
-    auto previous_it = let_var_to_const_int_.find(op->var.get());
-    bool had_previous = previous_it != let_var_to_const_int_.end();
-    int64_t previous_value = had_previous ? previous_it->second : 0;
 
     if (const auto *imm = value.as<IntImmNode>()) {
       let_var_to_const_int_[op->var.get()] = imm->value;
-    } else if (had_previous) {
-      let_var_to_const_int_.erase(op->var.get());
-    }
-
-    Stmt new_body = this->VisitStmt(body);
-
-    if (had_previous) {
-      let_var_to_const_int_[op->var.get()] = previous_value;
     } else {
       let_var_to_const_int_.erase(op->var.get());
     }
-    return LetStmt(op->var, value, new_body);
+    return Bind(op->var, value, op->span);
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
@@ -209,8 +197,7 @@ private:
       return expr;
     }
     std::string suffix;
-    if (name.size() >= 12 &&
-        name.substr(name.size() - 12) == ">::run_batch") {
+    if (name.size() >= 12 && name.substr(name.size() - 12) == ">::run_batch") {
       suffix = ">::run_batch";
     } else if (name.size() >= 6 && name.substr(name.size() - 6) == ">::run") {
       suffix = ">::run";
@@ -237,12 +224,13 @@ private:
     size_t sync_barrier_pos = name.find("tl::SyncThreadsBarrier");
     if (sync_barrier_pos != std::string::npos) {
       new_name = name;
-      new_name.replace(sync_barrier_pos, std::string("tl::SyncThreadsBarrier").size(),
+      new_name.replace(sync_barrier_pos,
+                       std::string("tl::SyncThreadsBarrier").size(),
                        barrier_name);
     } else {
       size_t run_pos = name.size() - suffix.size();
-      new_name = name.substr(0, run_pos) + ", " + barrier_name +
-                 name.substr(run_pos);
+      new_name =
+          name.substr(0, run_pos) + ", " + barrier_name + name.substr(run_pos);
     }
     Array<PrimExpr> new_args;
     new_args.reserve(call->args.size() - 1);
@@ -291,11 +279,9 @@ public:
     body = this->VisitStmt(std::move(body));
     for (auto it = phase_vars_.rbegin(); it != phase_vars_.rend(); ++it) {
       const Buffer &buf = *it;
-      body = DeclBuffer(buf, body);
       Map<String, ffi::Any> annotations;
       annotations.Set(tl::attr::kLocalVarInit, IntImm(DataType::Int(32), 0));
-      body = Allocate(buf->data, buf->dtype, buf->shape,
-                      const_true(buf->dtype.lanes()), body, annotations);
+      body = SeqStmt({AllocBuffer(buf, annotations), body});
     }
     return body;
   }
@@ -392,10 +378,13 @@ namespace transform {
 tvm::transform::Pass UnifiedBarrier() {
   auto pass_func = [](PrimFunc f, IRModule m,
                       const tvm::transform::PassContext &ctx) {
+    if (!f->HasNonzeroAttr(tirx::attr::kIsGlobalFunc)) {
+      return f;
+    }
     return RewriteUnifiedBarrier(std::move(f));
   };
-  return tir::transform::CreatePrimFuncPass(pass_func, 0, "tl.UnifiedBarrier",
-                                            {});
+  return tirx::transform::CreatePrimFuncPass(pass_func, 0, "tl.UnifiedBarrier",
+                                             {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

@@ -23,13 +23,14 @@
  * memory allocation. This pass merges multiple TIR-level dynamic or static
  * shared memory allocations into one allocation.
  */
-#include <tvm/ffi/function.h>
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cstring>
@@ -47,12 +48,13 @@
 #include "../target/utils.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
-#include "tvm/tir/function.h"
+#include <tvm/tirx/function.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 using runtime::StorageRank;
 using runtime::StorageScope;
@@ -76,18 +78,19 @@ static bool IsStaticSharedMemory(Var buffer_var) {
  */
 class AllocateCollector : public StmtExprVisitor {
 public:
-  void VisitStmt_(const AllocateNode *op) final {
-    if (IsDynamicSharedMemory(op->buffer_var)) {
-      dyn_shmem_allocs_[op->buffer_var.get()] = op;
-    } else if (IsStaticSharedMemory(op->buffer_var)) {
-      static_shmem_allocs_[op->buffer_var.get()] = op;
+  void VisitStmt_(const AllocBufferNode *op) final {
+    if (IsDynamicSharedMemory(op->buffer->data)) {
+      dyn_shmem_allocs_[op->buffer->data.get()] = op;
+    } else if (IsStaticSharedMemory(op->buffer->data)) {
+      static_shmem_allocs_[op->buffer->data.get()] = op;
     }
     StmtExprVisitor::VisitStmt_(op);
   }
   // The dynamic mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const AllocateNode *> dyn_shmem_allocs_;
+  std::unordered_map<const VarNode *, const AllocBufferNode *>
+      dyn_shmem_allocs_;
   // The static mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const AllocateNode *>
+  std::unordered_map<const VarNode *, const AllocBufferNode *>
       static_shmem_allocs_;
 };
 
@@ -129,7 +132,7 @@ public:
     // the level in the scope stack
     size_t level{0};
     // allocation stmt
-    const AllocateNode *alloc{nullptr};
+    const AllocBufferNode *alloc{nullptr};
   };
 
   struct StmtAttr {
@@ -145,11 +148,9 @@ public:
     }
   }
 
-  void VisitStmt_(const AllocateNode *op) final {
+  void VisitStmt_(const AllocBufferNode *op) final {
     size_t level = scope_.size();
-    const VarNode *buf = op->buffer_var.get();
-    // Record the allocation site and depth so liveness can reason about the
-    // original scope.
+    const VarNode *buf = op->buffer->data.get();
     alloc_info_[buf].alloc = op;
     alloc_info_[buf].level = level;
     StmtExprVisitor::VisitStmt_(op);
@@ -164,7 +165,7 @@ public:
     auto it = alloc_info_.find(buf);
     if (it != alloc_info_.end() && it->second.alloc) {
       ICHECK_LT(it->second.level, scope_.size());
-      if (IsAppropriateSharedMemory(tvm::ffi::GetRef<Var>(buf))) {
+      if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
         // set into scope_.size() - 1 for aggressive memory reuse
         auto enable_aggressive_merge = enable_aggressive_merge_;
         if (enable_aggressive_merge) {
@@ -207,11 +208,12 @@ public:
       // would occur strictly inside a nested scope.  In practice the lowering
       // pipeline may materialise reads in the very same frame that owns the
       // allocation (e.g. when the buffer value is passed directly to a call),
-      // which used to trigger the CHECK.  Treat same-level accesses as valid so
-      // the merged allocator can reason about their lifetime correctly.
+      // which used to trigger the invariant check.  Treat same-level accesses
+      // as valid so the merged allocator can reason about their lifetime
+      // correctly.
       ICHECK_LE(it->second.level, scope_.size())
           << "Load memory in places other than store.";
-      if (IsAppropriateSharedMemory(tvm::ffi::GetRef<Var>(buf))) {
+      if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
         auto enable_aggressive_merge = enable_aggressive_merge_;
         if (enable_aggressive_merge) {
           scope_[scope_.size() - 1].touched.push_back(buf);
@@ -235,7 +237,7 @@ public:
       // emitted at the allocation level after flattening, so accept them and
       // record the touch for liveness planning.
       ICHECK_LE(it->second.level, scope_.size());
-      if (IsAppropriateSharedMemory(tvm::ffi::GetRef<Var>(buf))) {
+      if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
         auto enable_aggressive_merge = enable_aggressive_merge_;
         if (enable_aggressive_merge) {
           scope_[scope_.size() - 1].touched.push_back(buf);
@@ -274,13 +276,13 @@ public:
 
   void VisitStmt_(const AttrStmtNode *op) final {
     // Only record the outer most thread extent.
-    if (op->attr_key == tir::attr::thread_extent && !in_thread_env_) {
+    if (op->attr_key == tirx::attr::thread_extent && !in_thread_env_) {
       in_thread_env_ = true;
       VisitNewScope(op);
       in_thread_env_ = false;
-    } else if (op->attr_key == tir::attr::extern_scope) {
+    } else if (op->attr_key == tirx::attr::extern_scope) {
       VisitNewScope(op);
-    } else if (op->attr_key == tir::attr::virtual_thread) {
+    } else if (op->attr_key == s_tir::attr::virtual_thread) {
       VisitNewScope(op);
     } else if (op->attr_key == "kWarpSpecializationScope") {
       VisitWarpSpecializationBody(op->body);
@@ -343,11 +345,6 @@ private:
       VisitWarpSpecializationBody(attr->body);
       return;
     }
-    if (const auto *let_node = stmt.as<LetStmtNode>()) {
-      this->VisitExpr(let_node->value);
-      VisitWarpSpecializationBody(let_node->body);
-      return;
-    }
     StmtExprVisitor::VisitStmt(stmt);
   }
 
@@ -388,7 +385,7 @@ private:
     auto ptr_type = op->type_annotation.as<PointerTypeNode>();
     if (!ptr_type)
       return;
-    auto scope = GetPtrStorageScope(tvm::ffi::GetRef<Var>(op));
+    auto scope = GetPtrStorageScope(GetRef<Var>(op));
     if (scope == "shared" || scope == "shared.dyn") {
       auto target = Target::Current();
       ICHECK(target.defined()) << "Target is not defined";
@@ -453,7 +450,7 @@ private:
 class SharedMemoryRewriter : public StmtExprMutator {
 public:
   explicit SharedMemoryRewriter(
-      const std::unordered_map<const VarNode *, const AllocateNode *>
+      const std::unordered_map<const VarNode *, const AllocBufferNode *>
           &shmem_allocs,
       bool is_dynamic = true, bool verbose = false, int align_bytes = 0)
       : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
@@ -556,7 +553,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent && !allocated_) {
+    if (op->attr_key == tirx::attr::thread_extent && !allocated_) {
       // Allocate one dynamic shared memory allocation at the beginning of
       // thread scope
 
@@ -572,11 +569,12 @@ private:
           PrimExpr byte_offset = pair.second;
           auto alloc_it = shmem_allocs_.find(buffer_var_node);
           if (alloc_it != shmem_allocs_.end()) {
-            const AllocateNode *alloc = alloc_it->second;
-            PrimExpr buffer_size_bytes =
-                alloc->extents[0] * alloc->dtype.bytes() * alloc->dtype.lanes();
+            const AllocBufferNode *alloc = alloc_it->second;
+            PrimExpr buffer_size_bytes = alloc->buffer->shape[0] *
+                                         alloc->buffer->dtype.bytes() *
+                                         alloc->buffer->dtype.lanes();
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
-                       << " (Type: " << alloc->dtype << ")"
+                       << " (Type: " << alloc->buffer->dtype << ")"
                        << ", Start Offset: " << byte_offset
                        << ", Size: " << buffer_size_bytes << " bytes"
                        << ", End Offset: "
@@ -591,17 +589,22 @@ private:
       }
 
       allocated_ = true;
-      Allocate new_body(merged_buf_var_, DataType::UInt(8),
-                        {merged_alloc_size_}, const_true(),
-                        StmtExprMutator::VisitStmt(op->body));
+      Buffer merged_buf(merged_buf_var_, DataType::UInt(8),
+                        {merged_alloc_size_}, {}, PrimExpr(),
+                        merged_buf_var_->name_hint, 0, 0, kDefault);
+      Stmt new_body = SeqStmt(
+          {AllocBuffer(merged_buf), StmtExprMutator::VisitStmt(op->body)});
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);
     }
     return StmtMutator::VisitStmt_(op);
   }
 
-  Stmt VisitStmt_(const AllocateNode *op) final {
-    if (IsAppropriateSharedMemory(op->buffer_var)) {
-      return StmtExprMutator::VisitStmt(op->body);
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
+    if (IsAppropriateSharedMemory(op->buffer->data)) {
+      // In the new flat model, AllocBuffer has no body.
+      // Simply remove this node from the tree (its sibling statements
+      // will be visited by the SeqStmt visitor).
+      return Evaluate(0);
     }
     return StmtExprMutator::VisitStmt_(op);
   }
@@ -672,6 +675,12 @@ private:
       if (!IsAppropriateSharedMemory(buffer)) {
         return StmtExprMutator::VisitExpr_(op);
       }
+      if (!IsManagedAllocation(buffer)) {
+        return StmtExprMutator::VisitExpr_(op);
+      }
+      ICHECK(HasBufferOffset(buffer))
+          << "Shared memory allocation " << buffer->name_hint
+          << " was collected for merging but was not assigned an offset.";
       PrimExpr extra_offset = GetBufferOffset(buffer, dtype);
 
       PrimExpr offset = this->VisitExpr(op->args[2]);
@@ -695,6 +704,12 @@ private:
       if (!IsAppropriateSharedMemory(buffer)) {
         return StmtExprMutator::VisitExpr_(op);
       }
+      if (!IsManagedAllocation(buffer)) {
+        return StmtExprMutator::VisitExpr_(op);
+      }
+      ICHECK(HasBufferOffset(buffer))
+          << "Shared memory allocation " << buffer->name_hint
+          << " was collected for merging but was not assigned an offset.";
 
       DataType dtype = op->dtype;
       DataType ptr_dtype = dst_access_ptr->args[0].dtype();
@@ -728,6 +743,15 @@ private:
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
     return indexdiv(it->second, dtype.bytes() * dtype.lanes());
+  }
+
+  bool HasBufferOffset(const Var &buffer_var) {
+    return buffer_byte_offsets_.find(buffer_var.get()) !=
+           buffer_byte_offsets_.end();
+  }
+
+  bool IsManagedAllocation(const Var &buffer_var) {
+    return shmem_allocs_.find(buffer_var.get()) != shmem_allocs_.end();
   }
 
   // Wrapper function to determine if the shared memory allocation for a
@@ -1461,19 +1485,19 @@ private:
         info.alignment = std::max(info.alignment, align_it->second);
       }
 
-      const AllocateNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem =
-          static_cast<int64_t>(alloc->dtype.bytes() * alloc->dtype.lanes());
+      const AllocBufferNode *alloc = shmem_allocs_.at(var);
+      int64_t bytes_per_elem = static_cast<int64_t>(
+          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
       DataType size_dtype = DataType::Int(32);
-      if (!alloc->extents.empty()) {
-        size_dtype = alloc->extents[0].dtype();
+      if (!alloc->buffer->shape.empty()) {
+        size_dtype = alloc->buffer->shape[0].dtype();
       }
       if (!size_dtype.is_int() && !size_dtype.is_uint()) {
         size_dtype = DataType::Int(32);
       }
 
       PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->extents) {
+      for (const PrimExpr &extent : alloc->buffer->shape) {
         PrimExpr e = extent;
         if (e.dtype() != size_dtype) {
           e = cast(size_dtype, e);
@@ -1483,9 +1507,9 @@ private:
       info.size_dtype = size_dtype;
       info.size_expr = size_expr;
 
-      int64_t const_extent = alloc->ConstantAllocationSize();
-      if (const_extent >= 0) {
-        info.const_size_bytes = const_extent * bytes_per_elem;
+      auto const_size = GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
+      if (const_size.has_value()) {
+        info.const_size_bytes = const_size.value() * bytes_per_elem;
       }
 
       buf_infos.push_back(std::move(info));
@@ -1647,7 +1671,7 @@ private:
   Var merged_buf_var_{"buf_dyn_shmem",
                       PointerType(PrimType(DataType::UInt(8)), "shared.dyn")};
   // The mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const AllocateNode *> shmem_allocs_;
+  std::unordered_map<const VarNode *, const AllocBufferNode *> shmem_allocs_;
   // The size of the merged buffer
   PrimExpr merged_alloc_size_{0};
   // The mapping from the original buffer var to its offset in the merged buffer
@@ -1691,7 +1715,7 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
   return stmt;
 }
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 namespace transform {
 
@@ -1701,7 +1725,7 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
   auto pass_func = [enable_aggressive_merge, align_bytes, disable_reuse](
                        PrimFunc f, const IRModule &m, PassContext ctx) {
     bool merge_static_smem =
-        ctx->GetConfig<Bool>("tir.merge_static_smem", Bool(false)).value();
+        ctx->GetConfig<Bool>("tirx.merge_static_smem", Bool(false)).value();
     bool debug_merge_shared_memory_allocations =
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
@@ -1716,7 +1740,7 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.MergeSharedMemoryAllocations",
                         MergeSharedMemoryAllocations);
 }

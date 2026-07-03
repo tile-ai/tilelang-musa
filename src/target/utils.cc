@@ -4,14 +4,16 @@
  */
 
 #include "utils.h"
-
-#include "../support/ffi_aliases.h"
-#include "dlpack/dlpack.h"
+#include "support/check.h"
 #include <cstdlib>
-#include <tvm/node/node.h>
+#include <tvm/ir/cast.h>
+
+#include "dlpack/dlpack.h"
 
 namespace tvm {
 namespace tl {
+
+using namespace ffi;
 
 bool TargetIsCuda(Target target) {
   return target->GetTargetDeviceType() == kDLCUDA;
@@ -30,7 +32,7 @@ bool TargetIsCPU(Target target) {
 }
 
 int GetArchInt(Target target) {
-  auto s = target->GetAttr<tvm::ffi::String>("arch");
+  auto s = target->GetAttr<String>("arch");
   ICHECK(s.has_value());
   const std::string arch_str = s.value();
   ICHECK(arch_str.size() >= 3);
@@ -90,9 +92,20 @@ bool TargetIsCDNA(Target target) {
   if (!TargetIsRocm(target))
     return false;
   if (target->attrs.count("mcpu")) {
-    std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
+    std::string mcpu = Downcast<String>(target->attrs.at("mcpu"));
     // if mcpu start with "gfx9", it is CDNA
     return mcpu.find("gfx9") == 0;
+  }
+  return false;
+}
+
+bool TargetIsRDNA(Target target) {
+  if (!TargetIsRocm(target))
+    return false;
+  if (target->attrs.count("mcpu")) {
+    std::string mcpu = Downcast<String>(target->attrs.at("mcpu"));
+    // gfx11xx, gfx12xx are RDNA architectures
+    return mcpu.find("gfx11") == 0 || mcpu.find("gfx12") == 0;
   }
   return false;
 }
@@ -101,7 +114,7 @@ bool TargetIsGfx950(Target target) {
   if (!TargetIsRocm(target))
     return false;
   if (target->attrs.count("mcpu")) {
-    std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
+    std::string mcpu = Downcast<String>(target->attrs.at("mcpu"));
     return mcpu.find("gfx950") != std::string::npos;
   }
   return false;
@@ -130,7 +143,7 @@ bool TargetHasAsyncCopy(Target target) {
     return arch >= 21;
   } else if (TargetIsCDNA(target)) {
     if (target->attrs.count("mcpu")) {
-      std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
+      std::string mcpu = Downcast<String>(target->attrs.at("mcpu"));
       if (mcpu.rfind("gfx9", 0) == 0) {
         int gfx_version = std::stoi(mcpu.substr(3, 2));
         return gfx_version >= 94;
@@ -318,8 +331,21 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
   return false;
 }
 
+int TargetGetRDNAGeneration(Target target) {
+  if (!TargetIsRDNA(target))
+    return 0;
+  if (target->attrs.count("mcpu")) {
+    std::string mcpu = Downcast<String>(target->attrs.at("mcpu"));
+    if (mcpu.rfind("gfx11", 0) == 0)
+      return 11;
+    if (mcpu.rfind("gfx12", 0) == 0)
+      return 12;
+  }
+  return 0;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef()
       .def("tl.TargetIsCuda",
            [](Target target) { return TargetIsCuda(target); })
@@ -341,6 +367,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsSM120(target); })
       .def("tl.TargetIsCDNA",
            [](Target target) { return TargetIsCDNA(target); })
+      .def("tl.TargetIsRDNA",
+           [](Target target) { return TargetIsRDNA(target); })
       .def("tl.TargetIsGfx950",
            [](Target target) { return TargetIsGfx950(target); })
       .def("tl.TargetIsQY2", [](Target target) { return TargetIsQY2(target); })
@@ -353,6 +381,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetHasStmatrix(target); })
       .def("tl.TargetHasBulkCopy",
            [](Target target) { return TargetHasBulkCopy(target); })
+      .def("tl.TargetGetRDNAGeneration",
+           [](Target target) { return TargetGetRDNAGeneration(target); })
       .def("tl.TargetGetWarpSize",
            [](Target target) { return TargetGetWarpSize(target); });
 }

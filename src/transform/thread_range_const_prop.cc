@@ -4,10 +4,11 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -17,10 +18,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "support/check.h"
+
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace {
 
@@ -114,7 +117,7 @@ private:
   };
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (IsTargetThreadIdxTag(iv->thread_tag)) {
         std::optional<int64_t> extent = GetConstInt(op->value);
@@ -414,7 +417,7 @@ PrimFunc ThreadRangeConstProp(PrimFunc f) {
 
 namespace transform {
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass ThreadRangeConstProp() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {

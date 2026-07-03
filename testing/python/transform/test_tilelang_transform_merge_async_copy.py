@@ -3,16 +3,16 @@
 import tilelang as tl
 import tilelang.language as T
 from tilelang import tvm
-from tvm import tir
-from tvm.tir.stmt_functor import post_order_visit
+from tvm import tirx as tir
+from tvm.tirx.stmt_functor import post_order_visit
 
 
-def _collect_async_copy_calls(func: tvm.tir.PrimFunc):
+def _collect_async_copy_calls(func: tvm.tirx.PrimFunc):
     calls = []
 
     def _visit(node):
         if (
-            isinstance(node, tvm.tir.Call)
+            isinstance(node, tvm.tirx.Call)
             and isinstance(node.op, tvm.ir.Op)
             and str(node.op.name)
             in {
@@ -27,12 +27,12 @@ def _collect_async_copy_calls(func: tvm.tir.PrimFunc):
     return calls
 
 
-def _count_for_loops(func: tvm.tir.PrimFunc) -> int:
+def _count_for_loops(func: tvm.tirx.PrimFunc) -> int:
     count = 0
 
     def _visit(node):
         nonlocal count
-        if isinstance(node, tvm.tir.For):
+        if isinstance(node, tvm.tirx.For):
             count += 1
 
     post_order_visit(func.body, _visit)

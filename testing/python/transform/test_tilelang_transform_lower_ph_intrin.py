@@ -42,11 +42,11 @@ def test_tma_descriptor_init_after_alloc_global():
             )
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(musa_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(musa_target)(mod)
     mod = musa_transform.LowerPHIntrin()(mod)
     func = mod["main"]
 
-    assert not tvm.tir.analysis.undefined_vars(func.body, func.params)
+    assert not tvm.tirx.analysis.undefined_vars(func.body, func.params)
     body_text = func.script()
     assert body_text.index('T.allocate([32], "float16", "global")') < body_text.index('T.call_packed("__tvm_tensormap_create_tiled"')
 

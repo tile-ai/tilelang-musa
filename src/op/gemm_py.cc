@@ -6,10 +6,12 @@
 #include "gemm_py.h"
 
 #include "builtin.h"
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/transform.h>
 #include <vector>
 
 #include "../target/utils.h"
@@ -19,7 +21,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 // NormalizeToBufferRegion moved to src/op/utils.{h,cc}
 
@@ -548,30 +550,30 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto global_symbol =
         prim_func->attrs.GetAttr<tvm::ffi::String>("global_symbol");
     ICHECK(global_symbol.has_value());
-    if (prim_func->body.as<BlockRealizeNode>()) {
-      BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
+    if (prim_func->body.as<SBlockRealizeNode>()) {
+      SBlockRealize block_realize = Downcast<SBlockRealize>(prim_func->body);
       auto block = block_realize->block;
       {
-        BlockNode *n = block.CopyOnWrite();
+        SBlockNode *n = block.CopyOnWrite();
         n->name_hint = global_symbol.value();
         n->annotations.Set(tl::attr::kLexicalAllocScope,
                            IntImm(DataType::Int(32), 1));
       }
-      return BlockRealize(block_realize->iter_values, block_realize->predicate,
-                          block);
+      return SBlockRealize(block_realize->iter_values, block_realize->predicate,
+                           block);
     }
     // warp with block realize node
     Map<String, ObjectRef> block_annotations;
     block_annotations.Set(tl::attr::kLexicalAllocScope,
                           IntImm(DataType::Int(32), 1));
-    return BlockRealize(
+    return SBlockRealize(
         /*iter_values=*/Array<PrimExpr>(),
         /*predicate=*/const_true(),
         /*block=*/
-        Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-              /*name_hint=*/global_symbol.value(), prim_func->body,
-              /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
-              /*match_buffers=*/{}, /*annotations=*/block_annotations));
+        SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+               /*name_hint=*/global_symbol.value(), prim_func->body,
+               /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
+               /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
     LOG(FATAL) << "No lower function found for gemm_py";
     return Stmt(); // This line will never be reached due to LOG(FATAL), but

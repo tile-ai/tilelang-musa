@@ -28,6 +28,7 @@
 
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace tvm::tl {
 namespace codegen {

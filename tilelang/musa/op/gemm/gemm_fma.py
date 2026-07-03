@@ -5,7 +5,7 @@ from tilelang.layout import make_gemm_fragment_c_linear, make_linear_layout
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.target import Target
 from tvm.ir import Range
-from tvm import tir
+from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
@@ -42,8 +42,8 @@ class GemmFMA(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_var: tirx.Var,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         del mbar_phase_expr
         del layout_map  # FMA lowering does not need layout remap input.

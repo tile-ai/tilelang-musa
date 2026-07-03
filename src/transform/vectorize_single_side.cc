@@ -12,12 +12,12 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
@@ -26,7 +26,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace {
 
@@ -108,7 +108,7 @@ public:
       in_force_async_copy_ = previous_in_force_async_copy;
       return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
     }
-    if (op->attr_key == tir::attr::tilelang_assume) {
+    if (op->attr_key == tirx::attr::tilelang_assume) {
       PrimExpr constraint = Downcast<PrimExpr>(op->node);
       auto recovery = analyzer_.EnterConstraint(constraint, /*is_assume=*/true);
       Stmt body = this->VisitStmt(op->body);
@@ -257,7 +257,7 @@ private:
                 load->dtype.with_lanes(lanes));
         Stmt scalar_stores = MakeScalarStoresFromVector(
             store, vec, op->loop_var, group_var, lanes);
-        new_body = LetStmt(vec, vector_load, scalar_stores);
+        new_body = SeqStmt({Bind(vec, vector_load), scalar_stores});
       } else {
         PrimExpr vector_value =
             MakeVectorFromScalarLoads(load, op->loop_var, group_var, lanes);
@@ -280,7 +280,7 @@ private:
   }
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass VectorizeSingleSide() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {

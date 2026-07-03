@@ -16,7 +16,8 @@ namespace tvm {
 namespace tl {
 namespace musa {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 enum class CopyInst : uint8_t {
   kNormal = 0,

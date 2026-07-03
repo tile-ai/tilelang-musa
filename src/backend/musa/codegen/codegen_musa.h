@@ -5,12 +5,15 @@
 #ifndef TVM_TL_TARGET_CODEGEN_MUSA_H_
 #define TVM_TL_TARGET_CODEGEN_MUSA_H_
 
+#include "support/check.h"
 #include <tvm/target/codegen.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "backend/musa/tma_types.h"
 #include "target/source/codegen_c.h"
@@ -56,8 +59,9 @@ public:
   void VisitExpr_(const CastNode *op, std::ostream &os);
   void VisitExpr_(const MinNode *op, std::ostream &os);
   void VisitExpr_(const MaxNode *op, std::ostream &os);
+  void VisitStmt_(const BindNode *op) final;
   void VisitStmt_(const EvaluateNode *op);
-  void VisitStmt_(const AllocateNode *op);
+  void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op);
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os);
   void VisitStmt_(const BufferStoreNode *op);
@@ -152,6 +156,9 @@ private:
   const std::string mbarrier_name_ = "mbarrier";
   // The type name of the mbarrier array
   const std::string mbarrier_dtype_ = "Barrier";
+  // MUSA async barriers use user-managed IDs in [1, 63].
+  int next_mbarrier_id_{0};
+  std::unordered_map<const VarNode *, int> mbarrier_base_ids_;
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;

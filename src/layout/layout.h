@@ -6,20 +6,19 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
+#include "support/check.h"
 #include <array>
 #include <exception>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/ffi/object.h>
-#include <tvm/tir/buffer.h>
+#include <tvm/tirx/buffer.h>
 #include <utility>
-
-#include "../support/ffi_aliases.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 // Common layout-related exceptions
 class LayoutConflictException : public std::exception {
@@ -221,38 +220,7 @@ Var ReplicationPlaceholder();
 IterVar make_itervar(std::string name, PrimExpr dom);
 
 Fragment makeGemmFragment8x8();
-Fragment makeGemmFragment2x16();
-Fragment makeGemmFragment4x16();
 Fragment makeGemmFragment8x8Transposed();
-Fragment makeGemmQY2FragmentARow(const int block_m, const int block_n,
-                                 const int block_k, const int warp_m,
-                                 const int warp_n, const int element_size);
-Fragment makeGemmQY2FragmentACol(const int block_m, const int block_n,
-                                 const int block_k, const int warp_m,
-                                 const int warp_n, const int element_size);
-Fragment makeGemmQY2FragmentBRow(const int block_m, const int block_n,
-                                 const int block_k, const int warp_m,
-                                 const int warp_n, const int element_size);
-Fragment makeGemmQY2FragmentBCol(const int block_m, const int block_n,
-                                 const int block_k, const int warp_m,
-                                 const int warp_n, const int element_size);
-Fragment makeGemmQY2FragmentC(const int block_m, const int block_n,
-                              const int warp_m, const int warp_n,
-                              const int element_size);
-Fragment makeGemmQY2WmmaCLayout(const int block_m, const int block_n,
-                                const int warp_m, const int warp_n,
-                                const int element_size,
-                                const std::array<int, 3> &inst_shape);
-Fragment makeGemmQY2WmmaFragmentA(const int block_m, const int block_n,
-                                  const int block_k, const int warp_m,
-                                  const int warp_n, const int element_size,
-                                  bool transposed,
-                                  const std::array<int, 3> &inst_shape);
-Fragment makeGemmQY2WmmaFragmentB(const int block_m, const int block_n,
-                                  const int block_k, const int warp_m,
-                                  const int warp_n, const int element_size,
-                                  bool transposed,
-                                  const std::array<int, 3> &inst_shape);
 Fragment makeGemmFragmentC(const int block_m, const int block_n,
                            const int warp_m, const int warp_n,
                            const int element_size);
@@ -329,10 +297,6 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
 Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
                                     int elementsize);
 
-Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size);
-Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size);
-Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
-                                    int element_size);
 Layout makeSwizzledLayout(const Buffer &buffer, bool k_inner = true,
                           bool allow_pad = true);
 Layout makeVoltaSwizzledLayout(const Buffer &buffer, bool is_a = true,

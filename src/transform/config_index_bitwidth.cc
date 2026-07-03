@@ -1,16 +1,18 @@
+#include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include <tvm/ffi/function.h>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/data_type_rewriter.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include "tir/transforms/ir_utils.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/transform.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 using namespace arith;
 class ConfigIndexBitwidthRewriter : public IndexDataTypeRewriter {
 public:
@@ -38,7 +40,7 @@ protected:
     if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
       return IntImm(DataType::Int(_index_bitwidth_), op->value);
     }
-    return tvm::ffi::GetRef<PrimExpr>(op);
+    return GetRef<PrimExpr>(op);
   }
 
   PrimExpr VisitExpr_(const CastNode *op) final {
@@ -56,21 +58,6 @@ protected:
     auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
     is_enabled_ = is_enabled;
     return std::move(node);
-  }
-
-  Stmt VisitStmt_(const LetStmtNode *op) final {
-    // Keep LetStmt var/value dtypes consistent after mixed index-bitwidth
-    // rewrites. Some branches keep let values in int32 while vars are remapped
-    // to int64 via IndexDataTypeRewriter var-remap logic.
-    LetStmt let_stmt = Downcast<LetStmt>(DataTypeLegalizer::VisitStmt_(op));
-    Var var = Downcast<Var>(VisitExpr(let_stmt->var));
-    PrimExpr value = this->VisitExpr(let_stmt->value);
-    if (value.dtype() != var.dtype()) {
-      if (value.dtype().is_int() && var.dtype().is_int()) {
-        value = cast(var.dtype(), value);
-      }
-    }
-    return LetStmt(var, value, let_stmt->body, let_stmt->span);
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
@@ -103,23 +90,23 @@ private:
 
     PrimExpr VisitExpr_(const VarNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
-        return cast(DataType::Int(64), tvm::ffi::GetRef<Var>(op));
+        return cast(DataType::Int(64), GetRef<Var>(op));
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const IntImmNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return IntImm(DataType::Int(64), op->value);
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const CastNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return cast(DataType::Int(64), op->value);
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -180,7 +167,7 @@ private:
 };
 
 tvm::transform::Pass ConfigIndexBitwidth() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     bool disable_index_type_promotion =
@@ -206,7 +193,7 @@ tvm::transform::Pass ConfigIndexBitwidth() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.ConfigIndexBitwidth",
                         ConfigIndexBitwidth);
 }

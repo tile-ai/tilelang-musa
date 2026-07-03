@@ -4,10 +4,10 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../target/utils.h"
 #include "arith/ir_mutator_with_analyzer.h"
@@ -16,7 +16,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 using arith::IRMutatorWithAnalyzer;
 
 class LateVectorizePlanner : public IRMutatorWithAnalyzer {
@@ -193,7 +193,7 @@ private:
 };
 
 tvm::transform::Pass LateVectorizePlanner() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return LateVectorizePlanner::Substitute(std::move(f));
   };

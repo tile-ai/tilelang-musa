@@ -5,6 +5,7 @@
  */
 
 #include "runtime.h"
+#include "support/check.h"
 
 #if defined(MUSA_MAJOR_VERSION)
 #include <musa.h>
@@ -17,10 +18,12 @@
 #include <vector>
 
 #include <tvm/ffi/function.h>
-#include <tvm/node/node.h>
+#include <tvm/runtime/logging.h>
 
 namespace tvm {
 namespace tl {
+
+using namespace ffi;
 
 #if 1
 // Thread-local storage for restoring the L2 persisting cache limit

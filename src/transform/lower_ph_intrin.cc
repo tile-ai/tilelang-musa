@@ -4,11 +4,11 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <string>
 #include <unordered_map>
@@ -20,7 +20,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class LowerPHIntrin : public StmtExprMutator {
 public:
@@ -100,11 +100,11 @@ public:
     return f;
   }
 
-  Stmt VisitStmt_(const AllocateNode *op) final {
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     Array<Stmt> init_stmts;
     for (auto &desc_init : desc_inits_) {
-      if (!desc_init.emitted && desc_init.base_var == op->buffer_var.get()) {
+      if (!desc_init.emitted && desc_init.base_var == op->buffer->data.get()) {
         init_stmts.push_back(desc_init.stmt);
         desc_init.emitted = true;
       }
@@ -113,20 +113,16 @@ public:
       return stmt;
     }
 
-    auto *alloc = stmt.as<AllocateNode>();
-    ICHECK(alloc != nullptr);
     Array<Stmt> seq;
+    seq.push_back(stmt);
     for (const auto &init_stmt : init_stmts) {
       seq.push_back(init_stmt);
     }
-    seq.push_back(alloc->body);
-    auto n = CopyOnWrite(alloc);
-    n->body = SeqStmt(seq);
-    return Stmt(n);
+    return SeqStmt(seq);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key != tir::attr::thread_extent) {
+    if (op->attr_key != tirx::attr::thread_extent) {
       return StmtExprMutator::VisitStmt_(op);
     }
 
@@ -200,7 +196,7 @@ private:
     } else if (call->op.same_as(create_tma_im2col_descriptor())) {
       init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
     } else {
-      CHECK(0) << call->op;
+      ICHECK(0) << call->op;
     }
     init_desc_args.push_back(var);
     init_desc_args.insert(init_desc_args.end(), call->args.begin(),
@@ -215,7 +211,7 @@ private:
                            {StringImm("tvm_ffi_any"), 16});
     Call init_desc =
         Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
-    return LetStmt(var, alloc_desc, Evaluate(init_desc));
+    return SeqStmt({Bind(var, alloc_desc), Evaluate(init_desc)});
   }
 
   Array<Stmt> prefetch_calls_;
@@ -229,7 +225,7 @@ private:
   bool enable_tma_desc_prefetch_;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerPHIntrin() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {

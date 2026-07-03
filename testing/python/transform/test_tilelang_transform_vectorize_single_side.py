@@ -10,7 +10,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
-from tvm import tir
+from tvm import tirx as tir
 
 
 def _apply_vectorize_single_side(
@@ -23,7 +23,7 @@ def _apply_vectorize_single_side(
 ):
     if inject_assumes:
         mod = tl.transform.InjectAssumes()(mod)
-    mod = tvm.tir.transform.BindTarget(tvm.target.Target(target))(mod)
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target(target))(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     if run_vectorize_loop:
         mod = tl.transform.VectorizeLoop()(mod)
@@ -38,7 +38,7 @@ def _apply_vectorize_single_side(
 
 
 def _apply_vectorize_single_side_and_ldgstg(mod, target="musa"):
-    mod = tvm.tir.transform.BindTarget(tvm.target.Target(target))(mod)
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target(target))(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
     with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True}):

@@ -3,19 +3,20 @@
  * \brief Bind the If Stmt to each Stmt in SeqStmt
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class IfStmtBindingRewriter : public StmtExprMutator {
 public:
@@ -33,7 +34,7 @@ private:
     auto then_case = VisitStmt(op->then_case);
     Optional<Stmt> else_case = op->else_case;
     if (else_case.defined()) {
-      return tvm::ffi::GetRef<Stmt>(op);
+      return GetRef<Stmt>(op);
     }
     ICHECK(then_case.defined()) << "then_case must be defined";
     ICHECK(!else_case.defined()) << "else_case must be undefined";
@@ -51,11 +52,11 @@ private:
           Array<Stmt> seq;
           const size_t n = seq_stmt->seq.size();
           size_t i = 0;
-          for (; i < n && !seq_stmt->seq[i].as<LetStmtNode>(); ++i) {
+          for (; i < n && !seq_stmt->seq[i].as<BindNode>(); ++i) {
             seq.push_back(IfThenElse(condition, seq_stmt->seq[i], Stmt()));
           }
 
-          // A direct LetStmt is emitted as a C/CUDA declaration. Keep it and the
+          // A direct Bind is emitted as a C/CUDA declaration. Keep it and the
           // following statements in one lexical block, matching old LetStmt
           // scope semantics.
           if (i < n) {
@@ -92,7 +93,7 @@ private:
   }
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 tvm::transform::Pass IfStmtBinding() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return IfStmtBindingRewriter::Substitute(f);
@@ -101,7 +102,7 @@ tvm::transform::Pass IfStmtBinding() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.IfStmtBinding", IfStmtBinding);
 }
 

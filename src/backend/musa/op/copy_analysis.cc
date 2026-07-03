@@ -7,9 +7,12 @@
 
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "support/check.h"
 #include "target/utils.h"
 
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/transform.h>
 
 #include <sstream>
 #include <utility>
@@ -18,7 +21,8 @@ namespace tvm {
 namespace tl {
 namespace musa {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 

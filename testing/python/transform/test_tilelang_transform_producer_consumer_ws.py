@@ -1,11 +1,11 @@
 """Tests for the warp-specialized producer/consumer pass."""
 
-import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang.layout import make_swizzled_layout
+from tilelang.utils.target import determine_target
 
 
 def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16", threads=128):
@@ -31,142 +31,6 @@ def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="floa
                 T.copy(A[by * block_M, ko * block_K], A_shared)
                 T.copy(B[ko * block_K, bx * block_N], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
-
-            T.copy(C_local, C[by * block_M, bx * block_N])
-
-    return main
-
-
-def fp8_sqmma_small_pipelined(trans_a=False, trans_b=False):
-    """A small FP8 SQMMA kernel whose unsafe operand layouts must block TMA."""
-
-    M, N, K = 256, 256, 256
-    block_M, block_N, block_K = 16, 64, 32
-    dtype = "float8_e4m3"
-
-    if trans_a and trans_b:
-
-        @T.prim_func
-        def main(
-            A: T.Tensor((K, M), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
-        ):
-            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
-                bx,
-                by,
-            ):
-                A_shared = T.alloc_shared((block_K, block_M), dtype)
-                B_shared = T.alloc_shared((block_N, block_K), dtype)
-                C_local = T.alloc_fragment((block_M, block_N), "float32")
-
-                T.clear(C_local)
-                for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
-                    T.copy(A[ko * block_K, by * block_M], A_shared)
-                    T.copy(B[bx * block_N, ko * block_K], B_shared)
-                    T.gemm(
-                        A_shared,
-                        B_shared,
-                        C_local,
-                        transpose_A=True,
-                        transpose_B=True,
-                    )
-
-                T.copy(C_local, C[by * block_M, bx * block_N])
-
-        return main
-
-    assert not trans_a and not trans_b
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
-            bx,
-            by,
-        ):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), "float32")
-
-            T.clear(C_local)
-            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
-                T.copy(A[by * block_M, ko * block_K], A_shared)
-                T.copy(B[ko * block_K, bx * block_N], B_shared)
-                T.gemm(A_shared, B_shared, C_local)
-
-            T.copy(C_local, C[by * block_M, bx * block_N])
-
-    return main
-
-
-def tf32_wmma_nn_pipelined():
-    """A PH1 TF32 WMMA NN kernel whose shared/shared staging must block TMA."""
-
-    M, N, K = 256, 256, 256
-    block_M, block_N, block_K = 32, 32, 64
-    dtype = "float32"
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
-            bx,
-            by,
-        ):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), "float32")
-
-            T.clear(C_local)
-            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
-                T.copy(A[by * block_M, ko * block_K], A_shared)
-                T.copy(B[ko * block_K, bx * block_N], B_shared)
-                T.gemm(A_shared, B_shared, C_local)
-
-            T.copy(C_local, C[by * block_M, bx * block_N])
-
-    return main
-
-
-def f16_wmma_tt_small_pipelined():
-    """A PH1 F16 WMMA TT small kernel whose shared/shared staging must block TMA."""
-
-    M, N, K = 256, 256, 256
-    block_M, block_N, block_K = 16, 8, 16
-    dtype = "float16"
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((K, M), dtype),
-        B: T.Tensor((N, K), dtype),
-        C: T.Tensor((M, N), dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=32) as (
-            bx,
-            by,
-        ):
-            A_shared = T.alloc_shared((block_K, block_M), dtype)
-            B_shared = T.alloc_shared((block_N, block_K), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), "float32")
-
-            T.clear(C_local)
-            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
-                T.copy(A[ko * block_K, by * block_M], A_shared)
-                T.copy(B[bx * block_N, ko * block_K], B_shared)
-                T.gemm(
-                    A_shared,
-                    B_shared,
-                    C_local,
-                    transpose_A=True,
-                    transpose_B=True,
-                )
 
             T.copy(C_local, C[by * block_M, bx * block_N])
 
@@ -360,12 +224,12 @@ def grouped_gemm_padded_pipelined(
 
     @T.prim_func
     def main(
-        A: T.Tensor([batch_sum, K], dtype),
-        B: T.Tensor([batch_count, K, N], dtype),
-        C: T.Tensor([batch_sum, N], dtype),
-        batch_sizes_buf: T.Tensor([batch_count], "int32"),
-        batch_offsets: T.Tensor([batch_count], "int32"),
-        batch_padded_offsets: T.Tensor([batch_count], "int32"),
+        A: T.Buffer((batch_sum, K), dtype),
+        B: T.Buffer((batch_count, K, N), dtype),
+        C: T.Buffer((batch_sum, N), dtype),
+        batch_sizes_buf: T.Buffer((batch_count,), "int32"),
+        batch_offsets: T.Buffer((batch_count,), "int32"),
+        batch_padded_offsets: T.Buffer((batch_count,), "int32"),
     ):
         with T.Kernel(total_m_blocks, T.ceildiv(N, block_N), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -411,7 +275,7 @@ def grouped_gemm_reference(A, B, batch_sizes):
     return torch.cat(outputs, dim=0)
 
 
-def grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype="float16"):
+def grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype="float16", device="cuda"):
     import math
     import torch
 
@@ -422,11 +286,11 @@ def grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype="float16"):
         batch_offsets.append(batch_offsets[-1] + batch_sizes[i])
         batch_padded_offsets.append(batch_padded_offsets[-1] + math.ceil(batch_sizes[i] / block_M) * block_M)
 
-    A = torch.randn(sum(batch_sizes), K, dtype=getattr(torch, dtype), device="musa")
-    B = torch.randn(len(batch_sizes), K, N, dtype=getattr(torch, dtype), device="musa")
-    batch_sizes_t = torch.tensor(batch_sizes, dtype=torch.int32, device="musa")
-    batch_offsets_t = torch.tensor(batch_offsets, dtype=torch.int32, device="musa")
-    batch_padded_offsets_t = torch.tensor(batch_padded_offsets, dtype=torch.int32, device="musa")
+    A = torch.randn(sum(batch_sizes), K, dtype=getattr(torch, dtype), device=device)
+    B = torch.randn(len(batch_sizes), K, N, dtype=getattr(torch, dtype), device=device)
+    batch_sizes_t = torch.tensor(batch_sizes, dtype=torch.int32, device=device)
+    batch_offsets_t = torch.tensor(batch_offsets, dtype=torch.int32, device=device)
+    batch_padded_offsets_t = torch.tensor(batch_padded_offsets, dtype=torch.int32, device=device)
     return A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t
 
 
@@ -436,26 +300,35 @@ def _find_after(src, needle, start=0):
     return pos
 
 
-def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, block_N=64, block_K=32):
+def _compile_grouped_gemm_ws(
+    batch_sizes=(63, 77),
+    K=128,
+    N=128,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    target="cuda",
+):
     pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     func = grouped_gemm_padded_pipelined(batch_sizes, K, N, block_M, block_N, block_K)
-    kernel = _compile_tvm_ffi(func, pass_configs, out_idx=[2])
+    kernel = _compile_tvm_ffi(func, pass_configs, target=target, out_idx=[2])
     return kernel, batch_sizes
 
 
-def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
+def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16", device="cuda"):
     import torch
 
-    A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t = grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype)
+    A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t = grouped_gemm_inputs(
+        batch_sizes, K, N, block_M, dtype, device
+    )
     out = kernel(A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t)
     ref = grouped_gemm_reference(A.float(), B.float(), batch_sizes)
-    rtol, atol = tilelang.testing.get_tolerance(getattr(torch, dtype), profile="gemm_algorithm")
-    torch.testing.assert_close(out.float(), ref, rtol=rtol, atol=atol)
+    torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
     return out
 
 
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_stage1_dynamic_loop_start():
     """Stage-1 tiled WS should handle dynamic pipeline loop bounds."""
     import torch
@@ -472,23 +345,24 @@ def test_tiled_ws_stage1_dynamic_loop_start():
         num_stages=1,
         window_tiles=2,
     )
-    kernel = tilelang.compile(func, target="musa", out_idx=[2])
+    target = determine_target()
+    kernel = tilelang.compile(func, target=target, out_idx=[2])
     source = kernel.get_kernel_source()
 
     assert "__launch_bounds__(256, 1)" in source
 
-    A = torch.randn(M, K, dtype=torch.float16, device="musa")
-    B = torch.randn(K, N, dtype=torch.float16, device="musa")
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
     C = kernel(A, B)
 
-    ref = torch.zeros(M, N, dtype=torch.float32, device="musa")
+    ref = torch.zeros(M, N, dtype=torch.float32, device="cuda")
     num_k_tiles = (K + block_K - 1) // block_K
     num_n_tiles = (N + block_N - 1) // block_N
     for bx in range(num_n_tiles):
         start = max(0, bx - 1)
         end = min(num_k_tiles, bx + 1)
         n_slice = slice(bx * block_N, min((bx + 1) * block_N, N))
-        acc = torch.zeros(M, n_slice.stop - n_slice.start, dtype=torch.float32, device="musa")
+        acc = torch.zeros(M, n_slice.stop - n_slice.start, dtype=torch.float32, device="cuda")
         for ko in range(start, end):
             k_slice = slice(ko * block_K, min((ko + 1) * block_K, K))
             acc += A[:, k_slice].float() @ B[k_slice, n_slice].float()
@@ -497,48 +371,50 @@ def test_tiled_ws_stage1_dynamic_loop_start():
     torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
 
 
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_correctness():
     """End-to-end correctness test: pipelined GEMM via tiled WS."""
     import torch
 
     M, N, K = 256, 256, 256
     func = matmul_pipelined(M, N, K, 64, 32, 64, num_stages=2)
-    kernel = tilelang.compile(func, target="musa", out_idx=[2])
+    target = determine_target()
+    kernel = tilelang.compile(func, target=target, out_idx=[2])
 
-    A = torch.randn(M, K, dtype=torch.float16, device="musa")
-    B = torch.randn(K, N, dtype=torch.float16, device="musa")
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
     C = kernel(A, B)
 
     ref = A.float() @ B.float()
     torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
 
 
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_stage3():
     """Pipelined GEMM with 3 stages."""
     import torch
 
     M, N, K = 512, 512, 512
     func = matmul_pipelined(M, N, K, 128, 64, 128, num_stages=3)
-    kernel = tilelang.compile(func, target="musa", out_idx=[2])
+    target = determine_target()
+    kernel = tilelang.compile(func, target=target, out_idx=[2])
 
-    A = torch.randn(M, K, dtype=torch.float16, device="musa")
-    B = torch.randn(K, N, dtype=torch.float16, device="musa")
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
     C = kernel(A, B)
 
     ref = A.float() @ B.float()
     torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
 
 
-def _compile_tvm_ffi(func, pass_configs=None, **kwargs):
+def _compile_tvm_ffi(func, pass_configs=None, target="cuda", **kwargs):
     tilelang.disable_cache()
     try:
         return tilelang.compile(
             func,
-            target="musa",
+            target=target,
             execution_backend="tvm_ffi",
             pass_configs=pass_configs or {},
             **kwargs,
@@ -547,9 +423,8 @@ def _compile_tvm_ffi(func, pass_configs=None, **kwargs):
         tilelang.enable_cache()
 
 
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
-@pytest.mark.skip(reason="CUDA-style manual swizzle layout is not a MUSA PH1 TMA layout.")
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_swizzled_layout_allows_ws():
     """Swizzled layout on a TMA copy target should NOT block warp specialization.
 
@@ -591,15 +466,15 @@ def test_tiled_ws_swizzled_layout_allows_ws():
     assert "tl::tma_load" in src
 
     # Correctness check
-    A = torch.randn(M, K, dtype=torch.float16, device="musa")
-    B = torch.randn(K, N, dtype=torch.float16, device="musa")
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
     C = kernel(A, B)
     ref = A.float() @ B.float()
     torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
 
 
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_incompatible_layout_blocks_ws():
     """A non-swizzle, non-linear layout on ALL TMA copy targets should block WS.
 
@@ -638,66 +513,8 @@ def test_tiled_ws_incompatible_layout_blocks_ws():
     assert "__launch_bounds__(256, 1)" not in src
 
 
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
-@pytest.mark.parametrize("trans_a, trans_b", [(False, False), (True, True)])
-def test_tiled_ws_blocks_tma_for_fp8_sqmma_mixed_staging(trans_a, trans_b):
-    """FP8 SQMMA operands that need elementwise staging must not be split by TMA WS."""
-
-    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
-    kernel = _compile_tvm_ffi(
-        fp8_sqmma_small_pipelined(trans_a, trans_b),
-        pass_configs,
-        out_idx=[2],
-    )
-    src = kernel.get_kernel_source()
-
-    assert "tl::tma_load" not in src
-    assert "__launch_bounds__(256, 1)" not in src
-
-
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
-def test_tiled_ws_blocks_tma_for_ph1_tf32_wmma_nn_multi_warp():
-    """TF32 WMMA NN shared/shared staging must stay on the consumer copy path."""
-
-    pass_configs = {
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-        tilelang.PassConfigKey.TL_DISABLE_SQMMA: True,
-    }
-    kernel = _compile_tvm_ffi(
-        tf32_wmma_nn_pipelined(),
-        pass_configs,
-        out_idx=[2],
-    )
-    src = kernel.get_kernel_source()
-
-    assert "tl::tma_load" not in src
-    assert "__launch_bounds__(256, 1)" not in src
-
-
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
-def test_tiled_ws_blocks_tma_for_ph1_f16_wmma_tt_small_tile():
-    """F16 WMMA TT small-tile staging must stay on the consumer copy path."""
-
-    pass_configs = {
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-        tilelang.PassConfigKey.TL_DISABLE_SQMMA: True,
-    }
-    kernel = _compile_tvm_ffi(
-        f16_wmma_tt_small_pipelined(),
-        pass_configs,
-        out_idx=[2],
-    )
-    src = kernel.get_kernel_source()
-
-    assert "tl::tma_load" not in src
-    assert "__launch_bounds__(64, 1)" not in src
-
-
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
     """Pre-loop TMA loads should not emit immediate waits in the common prelude."""
 
@@ -705,11 +522,10 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
     kernel = _compile_tvm_ffi(prelude_tma_wait_sink(), pass_configs, out_idx=[3])
     src = kernel.get_kernel_source()
 
-    first_tma_load = src.find("tl::tma_load<")
-    k_load = src.find("K_in_desc", first_tma_load)
-    v_load = src.find("V_in_desc", k_load)
+    k_load = src.find("tl::tma_load(K_in_desc")
+    v_load = src.find("tl::tma_load(V_in_desc")
     branch = src.find("if (128 <= ((int)threadIdx.x))")
-    first_wait = src.find("__musa_async_wait", branch)
+    first_wait = src.find(".wait(0)")
 
     assert min(k_load, v_load, branch, first_wait) >= 0
     assert k_load < v_load < branch < first_wait
@@ -720,7 +536,8 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
 
     func = explicit_cp_async_wait_position().with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
-    mod = tvm.tir.transform.BindTarget(tvm.target.Target("cuda -arch=sm_90"))(mod)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
@@ -742,7 +559,12 @@ def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
     """Scalar binds used by common pre-loop TMA copies must stay before WS."""
 
     pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
-    kernel = _compile_tvm_ffi(prelude_tma_bound_index(), pass_configs, out_idx=[3])
+    kernel = _compile_tvm_ffi(
+        prelude_tma_bound_index(),
+        pass_configs,
+        target={"kind": "musa", "arch": "mp_31"},
+        out_idx=[3],
+    )
     src = kernel.get_kernel_source()
 
     start_bind = _find_after(src, "int start =")
@@ -760,7 +582,7 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
 
     func = guarded_prelude_tma_postloop_scalar().with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
-    mod = tvm.tir.transform.BindTarget(tvm.target.Target("musa -arch=mp_31"))(mod)
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "musa", "arch": "mp_31"}))(mod)
     mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
@@ -778,7 +600,7 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     """Shared-prelude grouped-gemm indices must stay outside WS branches."""
-    kernel, batch_sizes = _compile_grouped_gemm_ws()
+    kernel, batch_sizes = _compile_grouped_gemm_ws(target={"kind": "musa", "arch": "mp_31"})
     src = kernel.get_kernel_source()
 
     branch = _find_after(src, "256 <= ((int)threadIdx.x)")
@@ -787,11 +609,11 @@ def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     actual_rows = _find_after(src, "int actual_rows =")
 
     assert cur_batch_idx_loop < m_start < actual_rows < branch
-    _run_grouped_gemm_ws(kernel, batch_sizes)
+    _run_grouped_gemm_ws(kernel, batch_sizes, device="musa")
 
 
-@tilelang.testing.requires_musa
-@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
     """Producer branch should reuse shared local.var state instead of cloning it."""
     kernel, batch_sizes = _compile_grouped_gemm_ws()
@@ -799,11 +621,8 @@ def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
 
     assert "cur_batch_idx_producer_ws" not in src
     assert "cur_batch_size_producer_ws" not in src
-    b_tma_load = _find_after(src, "tl::tma_load<")
-    b_desc = _find_after(src, "B_desc", b_tma_load)
-    cur_batch_idx = _find_after(src, "cur_batch_idx", b_desc)
-    semicolon = _find_after(src, ");", cur_batch_idx)
-    assert b_tma_load < b_desc < cur_batch_idx < semicolon
+    assert "tl::tma_load(B_desc" in src
+    assert "cur_batch_idx);" in src
     _run_grouped_gemm_ws(kernel, batch_sizes)
 
 

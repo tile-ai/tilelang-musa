@@ -3,23 +3,24 @@
  *  \brief Lower shared.reduce_barrier buffers after warp specialization.
  */
 #include "../op/builtin.h"
+#include "support/check.h"
 #include "tvm/ir/type.h"
-#include "tvm/tir/expr.h"
-#include "tvm/tir/stmt.h"
+#include "tvm/tirx/expr.h"
+#include "tvm/tirx/stmt.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <utility>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class ReduceBarrierRewriter : public StmtExprMutator {
 public:
@@ -66,8 +67,8 @@ private:
     init_calls->push_back(Evaluate(back_call));
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = tvm::ffi::GetRef<Block>(op);
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block = tvm::ffi::GetRef<SBlock>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
 
     // Rewrite reduce barrier buffers allocated in this block.
@@ -116,12 +117,15 @@ private:
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
     new_body.push_back(block->body);
-    Stmt new_block_body = SeqStmt(new_body);
-    for (int i = static_cast<int>(barrier_id_vars.size()) - 1; i >= 0; --i) {
+    Array<Stmt> block_body;
+    block_body.reserve(barrier_id_vars.size() + 1);
+    for (int i = 0; i < static_cast<int>(barrier_id_vars.size()); ++i) {
       PrimExpr placeholder =
           Call(DataType::Int(32), barrier_id_placeholder(), {});
-      new_block_body = LetStmt(barrier_id_vars[i], placeholder, new_block_body);
+      block_body.push_back(Bind(barrier_id_vars[i], placeholder));
     }
+    block_body.push_back(SeqStmt(new_body));
+    Stmt new_block_body = SeqStmt(block_body);
 
     block.CopyOnWrite()->body = new_block_body;
 
@@ -133,7 +137,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         thread_var_ = iv;
@@ -186,7 +190,7 @@ PrimFunc LowerReduceBarrier(PrimFunc f, bool disable_shuffle_elect) {
 
 namespace transform {
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerReduceBarrier() {
   auto pass_func = [](PrimFunc f, IRModule m,

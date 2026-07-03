@@ -12,7 +12,7 @@ from tilelang import _ffi_api
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
-from tvm import tir
+from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
@@ -25,7 +25,7 @@ class GemmWMMA(GemmBase):
     def _as_const_bool(value, name: str) -> bool:
         if isinstance(value, bool):
             return value
-        if isinstance(value, tir.IntImm):
+        if isinstance(value, tirx.IntImm):
             return bool(value.value)
         if hasattr(value, "value"):
             return bool(value.value)
@@ -35,14 +35,14 @@ class GemmWMMA(GemmBase):
     def _as_const_int(value, name: str) -> int:
         if isinstance(value, int):
             return value
-        if isinstance(value, tir.IntImm):
+        if isinstance(value, tirx.IntImm):
             return int(value.value)
         if hasattr(value, "value"):
             return int(value.value)
         raise ValueError(f"{name} must be a constant integer, got {value}")
 
     def _select_wmma_inst_shape(self, block_size: int, target: Target) -> tuple[int, int, int]:
-        inst_shape = _ffi_api.GemmPySelectPH1WmmaInstShape(self.gemm_node, int(block_size), target)
+        inst_shape = _ffi_api.GemmSelectPH1WmmaInstShape(self.gemm_node, int(block_size), target)
         if len(inst_shape) != 3:
             raise ValueError("PH1 WMMA is selected but no valid instruction shape is found")
         return int(inst_shape[0]), int(inst_shape[1]), int(inst_shape[2])
@@ -158,8 +158,8 @@ class GemmWMMA(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_var: tirx.Var,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         del layout_map, thread_var, mbar_phase_expr
         if not is_fragment(self.C):
@@ -189,8 +189,8 @@ class GemmWMMA(GemmBase):
                 T.evaluate(
                     T.call_intrin(
                         "handle",
-                        tir.op.Op.get("tl.tl_gemm"),
-                        tir.StringImm(op_instance),
+                        tvm.ir.Op.get("tl.tl_gemm"),
+                        tirx.StringImm(op_instance),
                         A_ptr,
                         B_ptr,
                         C_ptr,
@@ -208,8 +208,8 @@ class GemmWMMA(GemmBase):
             T.evaluate(
                 T.call_intrin(
                     "handle",
-                    tir.op.Op.get("tl.tl_gemm"),
-                    tir.StringImm(op_instance),
+                    tvm.ir.Op.get("tl.tl_gemm"),
+                    tirx.StringImm(op_instance),
                     A_ptr,
                     B_ptr,
                     C_ptr,

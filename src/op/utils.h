@@ -8,18 +8,19 @@
 
 #include "./operator.h"
 #include "region.h"
+#include "support/check.h"
 #include "tvm/runtime/base.h"
-#include <tvm/tir/buffer.h>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/op.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 // Reverses an array (used for row-major/column-major layout conversion).
-template <typename T> Array<T> ReverseArray(Array<T> array) {
-  return Array<T>{array.rbegin(), array.rend()};
+template <typename T> ffi::Array<T> ReverseArray(ffi::Array<T> array) {
+  return ffi::Array<T>{array.rbegin(), array.rend()};
 }
 
 // Check if an PrimExpr is a buffer-like (BufferRegion/BufferLoad/tl.region)
@@ -70,7 +71,7 @@ inline Layout ExpandLayoutToMatchBuffer(const Layout &layout,
     return layout;
   }
 
-  Array<PrimExpr> leading_shape;
+  ffi::Array<PrimExpr> leading_shape;
   leading_shape.reserve(buffer_ndim - layout_ndim);
   for (size_t i = 0; i < buffer_ndim - layout_ndim; ++i) {
     leading_shape.push_back(buffer->shape[i]);

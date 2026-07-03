@@ -2,7 +2,7 @@
 import torch
 import tilelang
 from tilelang import language as T
-from tvm import tir
+from tvm import tirx as tir
 
 tilelang.disable_cache()
 
@@ -65,15 +65,12 @@ def sparse_attention_fwd_kernel_v1(
     num_stages=0,
     threads=512,
 ):
-    assert dim == tilelang.math.next_power_of_2(
-        dim), f"haven't check padding correctness yet, dim={dim}"
-    assert tail_dim == tilelang.math.next_power_of_2(
-        tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
+    assert dim == tilelang.math.next_power_of_2(dim), f"haven't check padding correctness yet, dim={dim}"
+    assert tail_dim == tilelang.math.next_power_of_2(tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
     assert is_causal == True, "non-casual is not supported"
-    assert (topk %
-            block_I == 0), "otherwise will load some index=0 thus causing wrong kv to be loaded"
+    assert topk % block_I == 0, "otherwise will load some index=0 thus causing wrong kv to be loaded"
     if sm_scale is None:
-        sm_scale = (1.0 / (dim + tail_dim))**0.5 * 1.44269504  # log2(e)
+        sm_scale = (1.0 / (dim + tail_dim)) ** 0.5 * 1.44269504  # log2(e)
     else:
         sm_scale = sm_scale * 1.44269504  # log2(e)
 
@@ -109,17 +106,16 @@ def sparse_attention_fwd_kernel_v1(
 
     @T.prim_func
     def main(
-            Q: T.Tensor(q_shape, dtype),  # type: ignore
-            KV: T.Tensor(kv_shape, dtype),  # type: ignore
-            Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
-            Output: T.Tensor(o_shape, dtype),  # type: ignore
-            Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
+        Q: T.Tensor(q_shape, dtype),  # type: ignore
+        KV: T.Tensor(kv_shape, dtype),  # type: ignore
+        Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
+        Output: T.Tensor(o_shape, dtype),  # type: ignore
+        Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
     ):
-        with T.Kernel(
-                seq_len * REPLICATE_H, kv_group, threads=threads) as (
-                    bx,
-                    by,
-                ):
+        with T.Kernel(seq_len * REPLICATE_H, kv_group, threads=threads) as (
+            bx,
+            by,
+        ):
             Q_shared = T.alloc_shared([H_per_block, D], dtype)
             Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
             KV_shared = T.alloc_shared([BI, D], dtype)
@@ -138,8 +134,7 @@ def sparse_attention_fwd_kernel_v1(
             bar_k_ready = T.alloc_barrier(arrive_count=threads)
             bar_p_ready = T.alloc_barrier(arrive_count=threads)
             bar_v_ready = T.alloc_barrier(arrive_count=threads)
-            q_robust_desc = T.make_robust_desc(
-                T.address_of(Q[0, 0, 0]), (seq_len * num_heads * (dim + tail_dim)) * 2)
+            q_robust_desc = T.make_robust_desc(T.address_of(Q[0, 0, 0]), (seq_len * num_heads * (dim + tail_dim)) * 2)
             kv_robust_desc = T.make_robust_desc(
                 T.address_of(KV[0, 0, 0]),
                 (seq_len_kv * kv_group * (dim + tail_dim)) * 2,
@@ -198,8 +193,7 @@ def sparse_attention_fwd_kernel_v1(
                     g_i,
                     i_i * block_I + ((ldg_ty) % 8) * (block_I // 8) + (ldg_ty) // 8,
                 ]
-                kperm_mask_local[0] = (
-                    kperm_indices_local[0] >= 0 and kperm_indices_local[0] < seq_len_kv)
+                kperm_mask_local[0] = kperm_indices_local[0] >= 0 and kperm_indices_local[0] < seq_len_kv
                 kperm_indices_local[0] = T.if_then_else(
                     kperm_mask_local[0],
                     kperm_indices_local[0],
@@ -208,14 +202,12 @@ def sparse_attention_fwd_kernel_v1(
 
                 for bi_i in T.Parallel(BI):
                     mask[bi_i] = (
-                        Indices[s_i, g_i, i_i * BI + bi_i % 8 * 8 + bi_i // 8] >= 0 and
-                        Indices[s_i, g_i, i_i * BI + bi_i % 8 * 8 + bi_i // 8] < seq_len_kv)
+                        Indices[s_i, g_i, i_i * BI + bi_i % 8 * 8 + bi_i // 8] >= 0
+                        and Indices[s_i, g_i, i_i * BI + bi_i % 8 * 8 + bi_i // 8] < seq_len_kv
+                    )
 
                 T.annotate_layout(
-                    {
-                        KV_shared:
-                            tilelang.layout.make_sqmma_swizzled_layout(KV_shared, k_major=True)
-                    },
+                    {KV_shared: tilelang.layout.make_sqmma_swizzled_layout(KV_shared, k_major=True)},
                     allow_reannotation=True,
                 )
 
@@ -291,11 +283,7 @@ def sparse_attention_fwd_kernel_v1(
                         S_shared[i, base + l] = acc_s_cast[i, l * 8 + t]
 
                 T.annotate_layout(
-                    {
-                        KV_shared:
-                            tilelang.layout.make_sqmma_swizzled_layout(
-                                KV_shared, continuity=64, k_major=False)
-                    },
+                    {KV_shared: tilelang.layout.make_sqmma_swizzled_layout(KV_shared, continuity=64, k_major=False)},
                     allow_reannotation=True,
                 )
                 for u in T.unroll(8):
@@ -386,15 +374,15 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, is_casual=True, 
     _, _, dim_v = v.shape
     g_index = g
     h_index = h // g
-    compressed_casual_mask = torch.arange(
-        0, sq, dtype=torch.int32, device=q.device).view(-1, 1) >= torch.arange(
-            1 - 1, sk * 1, 1, dtype=torch.int32, device=q.device).view(1, -1)
+    compressed_casual_mask = torch.arange(0, sq, dtype=torch.int32, device=q.device).view(-1, 1) >= torch.arange(
+        1 - 1, sk * 1, 1, dtype=torch.int32, device=q.device
+    ).view(1, -1)
 
     indices_clamped = torch.where(indices < 0, sk, indices)
     mask = q.new_zeros(g_index, sq, sk + 1, dtype=torch.bool).scatter(2, indices_clamped.long(), 1)
     mask = mask[..., :-1]
     mask = mask & compressed_casual_mask.view(1, sq, sk)
-    mask[:, :1 - 1, 0] = True
+    mask[:, : 1 - 1, 0] = True
     mask = mask.view(g_index, 1, sq, sk)
 
     q = q.view(sq, g, -1, dim_q)
@@ -431,7 +419,7 @@ def test_sparse_mla_fwd_v1(
     for t in range(S):
         for h in range(HKV):
             i_i = torch.randperm(max(1, t), device=device)[:topk]
-            indices[t, h, :len(i_i)] = i_i
+            indices[t, h, : len(i_i)] = i_i
 
     tl_out, _ = sparse_mla_fwd_interface(
         q,
@@ -467,16 +455,14 @@ def test_sparse_mla_fwd_v1(
         print(f"Average time: {ms:.3f} ms")
         print("fwd io bandwidth = ", (S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
         print("fwd tflops = ", (S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
-        io_bytes = (
-            S * H * DQK * 2 + S * HKV * topk * DQK * 2 + S * HKV * topk * 4 + S * H * DV * 2)
+        io_bytes = S * H * DQK * 2 + S * HKV * topk * DQK * 2 + S * HKV * topk * 4 + S * H * DV * 2
         total_flops = S * (DQK + DV) * topk * 2 * H
         bandwidth_tbps = io_bytes / (ms * 1e-3) / 1e12
         tflops = total_flops / ms * 1e-9
-        print(f"[PERF] case=sparse_mla_fwd_pipelined_v1 device={device} "
-              f"params= S={S},SKV={SKV},H={H},HKV={HKV},DQK={DQK},DV={DV},"
-              f"topk={topk}")
-        print(f"[PERF] avg_time_ms={ms:.3f} bandwidth_TBps={bandwidth_tbps:.6f} "
-              f"tflops={tflops:.6f}")
+        print(
+            f"[PERF] case=sparse_mla_fwd_pipelined_v1 device={device} params= S={S},SKV={SKV},H={H},HKV={HKV},DQK={DQK},DV={DV},topk={topk}"
+        )
+        print(f"[PERF] avg_time_ms={ms:.3f} bandwidth_TBps={bandwidth_tbps:.6f} tflops={tflops:.6f}")
         time_us = ms * 1e3
         return {
             "kernel": "modelops/sparse_mla_fwd_pipelined_v1",

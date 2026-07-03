@@ -8,9 +8,12 @@
 #include "backend/musa/op/gemm.h"
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "support/check.h"
 #include "target/utils.h"
 
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cmath>
@@ -24,7 +27,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace musa {
 
@@ -597,19 +601,20 @@ struct Gemm {
 
   static std::pair<int, int>
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
-                       int block_size, Target target, String gemm_inst,
-                       std::optional<std::array<int, 3>> mma_inst_shape) {
+                       int block_size, Target target, String gemm_inst) {
     int num_warps = block_size / TargetGetWarpSize(target);
 
     int k_m_per_warp = 4;
     int k_n_per_warp = 8;
     if (TargetIsQY2(target)) {
       if (gemm_inst == kGemmInstMusaQY2MMA) {
-        ICHECK(mma_inst_shape.has_value())
-            << "QY2 extended MMA warp partition requires an MMA instruction "
-               "shape.";
-        k_m_per_warp = (*mma_inst_shape)[0];
-        k_n_per_warp = (*mma_inst_shape)[1];
+        if (EnvString("TILELANG_MUSA_MP22_MMA_SHAPE") == "m8n32k16") {
+          k_m_per_warp = 8;
+          k_n_per_warp = 32;
+        } else {
+          k_m_per_warp = 16;
+          k_n_per_warp = 16;
+        }
       } else {
         k_m_per_warp = 32;
         k_n_per_warp = 32;

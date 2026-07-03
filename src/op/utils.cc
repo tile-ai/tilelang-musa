@@ -4,15 +4,18 @@
  */
 
 #include "utils.h"
-#include "tvm/tir/expr.h"
+#include "backend/cuda/stubs/cuda.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/expr.h>
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
+#include <tvm/tirx/builtin.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 bool IsBufferLikeExpr(const PrimExpr &expr) {
   if (expr.as<BufferLoadNode>() || expr.as<BufferRegionNode>()) {
@@ -33,7 +36,7 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
   // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
   // extent=1)
   if (const auto *load = arg.as<BufferLoadNode>()) {
-    Array<Range> ranges;
+    ffi::Array<Range> ranges;
     for (const PrimExpr &index : load->indices) {
       if (const auto *ramp = index.as<RampNode>()) {
         ICHECK(ramp->stride.as<IntImmNode>()) << "Ramp stride must be IntImm";
@@ -76,23 +79,6 @@ AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
   return {NormalizeToBufferRegion(arg), default_access_mask};
 }
 
-static std::vector<PrimExpr> GetBufferStrides(const Buffer &buf) {
-  int ndim = static_cast<int>(buf->shape.size());
-  if (!buf->strides.empty()) {
-    ICHECK_EQ(static_cast<int>(buf->strides.size()), ndim)
-        << "Buffer " << buf->name << " has mismatched shape/stride rank.";
-    return std::vector<PrimExpr>(buf->strides.begin(), buf->strides.end());
-  }
-
-  std::vector<PrimExpr> strides(ndim);
-  PrimExpr cur = make_const(buf->shape[0].dtype(), 1);
-  for (int i = ndim - 1; i >= 0; --i) {
-    strides[i] = cur;
-    cur = cur * buf->shape[i];
-  }
-  return strides;
-}
-
 PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
                                  bool require_2d) {
   Buffer buf = region->buffer;
@@ -105,10 +91,17 @@ PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
   if (ndim == 1) {
     // 1D: straightforward
     auto axis = region->region[0];
-    offset = axis->min * GetBufferStrides(buf)[0];
+    offset = axis->min;
     extent = axis->extent;
   } else {
-    std::vector<PrimExpr> strides = GetBufferStrides(buf);
+    // Compute row-major strides
+    std::vector<PrimExpr> strides(ndim);
+    PrimExpr one = make_const(buf->shape[0].dtype(), 1);
+    PrimExpr cur = one;
+    for (int i = ndim - 1; i >= 0; --i) {
+      strides[i] = cur;
+      cur = cur * buf->shape[i];
+    }
     // Offset: sum_{i in [0..ndim-3]} min_i * stride_i
     offset = make_const(buf->shape[0].dtype(), 0);
     for (int i = 0; i < ndim - 2; ++i) {
@@ -120,51 +113,111 @@ PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
   }
 
   // ptype and return handle
-  PrimExpr ptype = tir::TypeAnnotation(buf->dtype);
-  Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
-                           IntImm(DataType::Int(32), rw_mask)};
+  PrimExpr ptype = tirx::TypeAnnotation(buf->dtype);
+  ffi::Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
+                                IntImm(DataType::Int(32), rw_mask)};
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
 PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
   Buffer buf = load->buffer;
   int ndim = static_cast<int>(buf->shape.size());
-  std::vector<PrimExpr> strides = GetBufferStrides(buf);
 
+  // Compute offset using row-major layout (iterate in reverse)
   PrimExpr offset = 0;
+  PrimExpr stride = 1;
 
   for (int i = ndim - 1; i >= 0; --i) {
     const PrimExpr &index = load->indices[i];
     if (const auto *ramp = index.as<RampNode>()) {
       // For Ramp, use the base
-      offset = offset + ramp->base * strides[i];
+      offset = offset + ramp->base * stride;
     } else {
       // For scalar index (IntImm or other PrimExpr)
-      offset = offset + index * strides[i];
+      offset = offset + index * stride;
     }
+    stride = stride * buf->shape[i];
   }
 
   // Extent is 1 element for a single BufferLoad access
   PrimExpr extent = make_const(DataType::Int(32), 1);
 
   // Build access_ptr
-  PrimExpr ptype = tir::TypeAnnotation(buf->dtype);
-  Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
-                           IntImm(DataType::Int(32), rw_mask)};
+  PrimExpr ptype = tirx::TypeAnnotation(buf->dtype);
+  ffi::Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
+                                IntImm(DataType::Int(32), rw_mask)};
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
-PrimExpr TestingMakeAccessPtrFromRegionOffset(const BufferRegion &region) {
-  Call access_ptr =
-      Downcast<Call>(MakeAccessPtrFromRegion(region, /*rw_mask=*/1,
-                                             /*require_2d=*/false));
-  return access_ptr->args[2];
-}
+// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
+int to_CUtensorMapDataType(DataType dtype) {
+  // CUDA 13 adds packed U4 TensorMap formats. The vendored CUDA stub may lag
+  // the installed toolkit, so keep the enum value by CUDA's documented order.
+  constexpr int kTensorMapDataType16U4Align8B = 13;
+  if (dtype.is_float4_e2m1fn()) {
+    return kTensorMapDataType16U4Align8B;
+  }
 
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.op._TestingMakeAccessPtrFromRegionOffset",
-                        TestingMakeAccessPtrFromRegionOffset);
+  CUtensorMapDataType tp;
+  if (dtype.is_float()) {
+    switch (dtype.bits()) {
+    case 64:
+      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT64;
+      break;
+    case 32:
+      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+      break;
+    case 16:
+      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
+      break;
+    case 8:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      break;
+    default:
+      ICHECK(0) << dtype;
+    }
+  } else if (dtype.is_bfloat16()) {
+    tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+  } else if (dtype.is_float8()) {
+    tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+  } else if (dtype.is_int()) {
+    switch (dtype.bits()) {
+    case 64:
+      tp = CU_TENSOR_MAP_DATA_TYPE_INT64;
+      break;
+    case 32:
+      tp = CU_TENSOR_MAP_DATA_TYPE_INT32;
+      break;
+    case 16:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
+      break;
+    case 8:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      break;
+    default:
+      ICHECK(0) << dtype;
+    }
+  } else if (dtype.is_uint()) {
+    switch (dtype.bits()) {
+    case 64:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT64;
+      break;
+    case 32:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT32;
+      break;
+    case 16:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
+      break;
+    case 8:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      break;
+    default:
+      ICHECK(0) << dtype;
+    }
+  } else {
+    ICHECK(0) << dtype;
+  }
+  return static_cast<int>(tp);
 }
 
 } // namespace tl

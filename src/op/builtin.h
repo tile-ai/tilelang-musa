@@ -8,7 +8,10 @@
 #define TVM_TL_OP_BUILTIN_H_
 
 #include "operator.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
+#include <tvm/runtime/logging.h>
 
 namespace tvm {
 /*!
@@ -53,7 +56,7 @@ static constexpr const char *kMusaReduceBarrierInit =
     "tl.musa_reduce_barrier_init";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.
-// Type: Array<tir::Var>
+// Type: ffi::Array<tirx::Var>
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 // A PrimFunc-level attribute carrying the minimum number of thread blocks
 // per SM (multiprocessor).  When present it is emitted as the second
@@ -70,8 +73,8 @@ static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 } // namespace attr
 
-inline Optional<PrimExpr>
-GetAnnotatedMbarPhaseExpr(const Map<String, ObjectRef> &annotations) {
+inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
+    const ffi::Map<ffi::String, ffi::ObjectRef> &annotations) {
   if (auto val = annotations.Get(attr::kPipelineMbarPhaseExpr)) {
     if (val.value()->IsInstance<PrimExprNode>()) {
       return Downcast<PrimExpr>(val.value());
@@ -80,7 +83,7 @@ GetAnnotatedMbarPhaseExpr(const Map<String, ObjectRef> &annotations) {
                << "` expects a PrimExpr value, but got "
                << val.value().GetTypeKey();
   }
-  return Optional<PrimExpr>();
+  return ffi::Optional<PrimExpr>();
 }
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
@@ -208,6 +211,16 @@ static constexpr const char *kDisableOutOfBoundWarning =
 static constexpr const char *kEnableDumpIR = "tl.enable_dump_ir";
 static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 static constexpr const char *kGemmInst = "tl.gemm_inst";
+static constexpr const char *kGemmInstCudaMMA = "cuda.mma";
+static constexpr const char *kGemmInstCudaWGMMA = "cuda.wgmma";
+static constexpr const char *kGemmInstCudaTCGEN05 = "cuda.tcgen05";
+static constexpr const char *kGemmInstROCmMFMA = "rocm.mfma";
+static constexpr const char *kGemmInstCPUScalar = "cpu.scalar";
+static constexpr const char *kGemmInstMusaMMA = "musa.mma";
+static constexpr const char *kGemmInstMusaQY2MMA = "musa.qy2mma";
+static constexpr const char *kGemmInstMusaSQMMA = "musa.sqmma";
+static constexpr const char *kGemmInstMusaPH1WMMA = "musa.ph1wmma";
+static constexpr const char *kGemmInstMusaFMA = "musa.fma";
 
 /*!
  * \brief Get the type of the CUDA tensor map
@@ -336,6 +349,14 @@ TVM_DLL const Op &partial_barrier_sync();
 TVM_DLL const Op &tma_load();
 
 /*!
+ * \brief TMA multicast load from a tensor descriptor to cluster shared memory.
+ *
+ * tma_load_multicast(descriptor, mbarrier, smem_data, multicast_mask,
+ *                    coord_0, coord_1, ..., eviction_policy)
+ */
+TVM_DLL const Op &tma_load_multicast();
+
+/*!
  * \brief tvm intrinsics for loading image from global tensor to columns in
  * shared memory
  *
@@ -353,6 +374,13 @@ TVM_DLL const Op &tma_load_im2col();
  *
  */
 TVM_DLL const Op &tma_store();
+
+/*!
+ * \brief Bulk async shared::cluster store to another CTA.
+ *
+ * tma_store_cluster(dst_ptr, src_ptr, dst_cta, size_bytes, bar_ref)
+ */
+TVM_DLL const Op &tma_store_cluster();
 TVM_DLL const Op &musa_cp_async_robust();
 
 /*!
@@ -433,6 +461,16 @@ TVM_DLL const Op &ptx_tcgen05_mma_ss();
  * \brief tvm intrinsic for tcgen05 mma tensor-shared instructions.
  */
 TVM_DLL const Op &ptx_tcgen05_mma_ts();
+
+/*!
+ * \brief Frontend TMEM deallocation marker.
+ *
+ * deallocate_tmem(tmem_buffer_data)
+ *
+ * This op is produced by the TileLang Python frontend and must be lowered by
+ * LowerSharedTmem into ptx_deallocate_tensor_memory(access_ptr, num_cols).
+ */
+TVM_DLL const Op &deallocate_tmem();
 
 /*!
  * \brief tvm intrinsics for initializing tensor memory

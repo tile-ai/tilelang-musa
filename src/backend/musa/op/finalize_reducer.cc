@@ -5,6 +5,7 @@
 
 #include "backend/common/op/finalize_reducer.h"
 
+#include "support/check.h"
 #include "target/utils.h"
 
 #include <sstream>
@@ -12,7 +13,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace musa {
 

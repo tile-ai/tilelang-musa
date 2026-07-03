@@ -4,14 +4,15 @@
  */
 
 #include "op/gemm.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
 #include "target/utils.h"
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cmath>
@@ -22,11 +23,16 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace cuda {
 
 namespace {
+
+constexpr const char *kCudaMMA = "cuda.mma";
+constexpr const char *kCudaWGMMA = "cuda.wgmma";
+constexpr const char *kCudaTCGEN05 = "cuda.tcgen05";
 
 bool CheckWgmma(const GemmNode &op) {
   if (op.b_.scope() != "shared.dyn" && op.b_.scope() != "shared") {
@@ -236,26 +242,24 @@ std::pair<int, int> ComputeWgmmaWarpPartition(const GemmWarpPolicyNode &policy,
 struct Gemm {
   static String SelectInst(const GemmNode &op, int block_size, Target target) {
     if (AllowTcgen5Mma(op, target)) {
-      return kGemmInstCudaTCGEN05;
+      return kCudaTCGEN05;
     }
     if (AllowWgmma(op, block_size, target)) {
-      return kGemmInstCudaWGMMA;
+      return kCudaWGMMA;
     }
-    return kGemmInstCudaMMA;
+    return kCudaMMA;
   }
 
   static std::pair<int, int>
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
-                       int block_size, Target target, String gemm_inst,
-                       std::optional<std::array<int, 3>> mma_inst_shape) {
-    (void)mma_inst_shape;
+                       int block_size, Target target, String gemm_inst) {
     int num_warps = block_size / TargetGetWarpSize(target);
-    if (gemm_inst == kGemmInstCudaTCGEN05) {
+    if (gemm_inst == kCudaTCGEN05) {
       policy.m_warp = 1;
       policy.n_warp = num_warps;
       return {1, num_warps};
     }
-    if (gemm_inst == kGemmInstCudaWGMMA) {
+    if (gemm_inst == kCudaWGMMA) {
       return ComputeWgmmaWarpPartition(policy, M, N, num_warps);
     }
     int k_n_per_warp = TargetIsVolta(target) ? 16 : 8;
@@ -263,17 +267,17 @@ struct Gemm {
   }
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
-    return gemm_inst == kGemmInstCudaMMA;
+    return gemm_inst == kCudaMMA;
   }
 
   static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kGemmInstCudaWGMMA) {
+    if (gemm_inst == kCudaWGMMA) {
       return "wgmma";
     }
-    if (gemm_inst == kGemmInstCudaTCGEN05) {
+    if (gemm_inst == kCudaTCGEN05) {
       return "tcgen5mma";
     }
-    if (gemm_inst == kGemmInstCudaMMA) {
+    if (gemm_inst == kCudaMMA) {
       return "mma";
     }
     return "unknown";
@@ -305,7 +309,7 @@ const bool cuda_gemm_registered = RegisterCudaGemm();
 } // namespace
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def(
       "tl.get_tcgen5_mma_meta",
       [](int M, int N, int K, DataType ab_dtype, DataType c_dtype) {

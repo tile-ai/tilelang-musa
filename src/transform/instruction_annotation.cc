@@ -19,9 +19,6 @@
  *   - "tcgen5mma"  : Blackwell TCGEN5 MMA
  *   - "mma"        : Volta/Ampere tensor-core MMA
  *   - "mfma"       : AMD CDNA matrix fused multiply-add
- *   - "sqmma"      : MUSA PH1 SQMMA
- *   - "wmma"       : MUSA PH1 WMMA
- *   - "fma"        : MUSA scalar FMA
  *   - "scalar"     : scalar fallback
  *
  * Because this pass runs before layout inference it intentionally uses only
@@ -29,15 +26,14 @@
  * depend on the inferred memory layout.
  */
 
-#include <tvm/arith/analyzer.h>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../backend/cuda/op/copy.h"
-#include "../backend/musa/op/copy.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/gemm.h"
@@ -48,7 +44,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace {
 
@@ -63,23 +59,16 @@ static constexpr const char *kInstructionKind = "tl_instruction_kind";
  * \brief Determine the coarse instruction kind for a CopyNode.
  *
  * The classification does **not** depend on layout_map (which is unavailable
- * at this point). CUDA/MUSA use backend-local copy analysis.
+ * at this point).  For CUDA targets it mirrors CUDA copy instruction
+ * selection but collapses BulkLoad/BulkLoad1D/BulkStore/BulkStore1D into
+ * "tma" and skips checks that require layout information.
  */
-std::string ClassifyCopy(const CopyNode *copy, Target target, bool in_pipeline,
-                         arith::Analyzer *analyzer) {
+std::string ClassifyCopy(const CopyNode *copy, Target target,
+                         bool in_pipeline) {
   if (copy == nullptr) {
     return "sync";
   }
-  if (TargetIsCuda(target) || TargetIsCuTeDSL(target)) {
-    return cuda::ClassifyCopyForInstructionAnnotation(*copy, target,
-                                                      in_pipeline);
-  }
-  if (TargetIsMusa(target)) {
-    return musa::ClassifyCopyForInstructionAnnotation(*copy, target,
-                                                      in_pipeline);
-  }
-
-  return "sync";
+  return cuda::ClassifyCopyForInstructionAnnotation(*copy, target, in_pipeline);
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +100,7 @@ public:
 private:
   // Track threadIdx.x extent for gemm instruction selection.
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         if (auto *int_imm = op->value.as<IntImmNode>()) {
@@ -148,7 +137,7 @@ private:
     std::string kind;
 
     if (auto *copy_node = tile_op.as<CopyNode>()) {
-      kind = ClassifyCopy(copy_node, target_, in_pipeline_, &analyzer_);
+      kind = ClassifyCopy(copy_node, target_, in_pipeline_);
     } else if (auto *gemm_node = tile_op.as<GemmNode>()) {
       kind = ClassifyGemm(gemm_node, block_size_, target_);
     } else {
@@ -165,7 +154,6 @@ private:
   Target target_;
   bool in_pipeline_{false};
   int block_size_{0};
-  arith::Analyzer analyzer_;
 };
 
 } // namespace
@@ -175,7 +163,7 @@ private:
 // ---------------------------------------------------------------------------
 
 tvm::transform::Pass InstructionAnnotation() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return InstructionAnnotator::Annotate(std::move(f));
   };

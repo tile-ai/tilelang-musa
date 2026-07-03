@@ -3,11 +3,12 @@
  * \brief Legalize negative indices in buffer load/store expressions.
  */
 
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <unordered_map>
 #include <variant>
@@ -19,7 +20,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 using arith::IRVisitorWithAnalyzer;
 
 enum class IndexSignState { kNonNegative, kNegative, kUnknown };
@@ -35,8 +37,8 @@ public:
       : result_(result) {}
 
 private:
-  std::vector<IndexSignState> ProcessIdx(const ffi::Array<PrimExpr> &indices,
-                                         ffi::String buffer_name) {
+  std::vector<IndexSignState> ProcessIdx(const Array<PrimExpr> &indices,
+                                         String buffer_name) {
     std::vector<IndexSignState> states;
     states.reserve(indices.size());
 
@@ -200,7 +202,7 @@ private:
     ICHECK_EQ(state_vec.size(), indices.size())
         << "State vector size mismatch for buffer load/store indices ("
         << indices << ")";
-    ffi::Array<PrimExpr> new_indices = indices;
+    Array<PrimExpr> new_indices = indices;
     for (size_t i = 0; i < indices.size(); ++i) {
       if (state_vec[i] == IndexSignState::kNegative) {
         new_indices.Set(i, analyzer_->Simplify(buffer_shape[i] + indices[i]));
@@ -237,9 +239,10 @@ private:
     return BufferStore(store->buffer, store->value, indices, store->predicate);
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
-    BlockNode *n = block.CopyOnWrite();
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block =
+        Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    SBlockNode *n = block.CopyOnWrite();
     n->reads.MutateByApply(
         [this](BufferRegion region) { return UpdateRegion(region); });
     n->writes.MutateByApply(
@@ -267,7 +270,7 @@ PrimFunc LegalizeNegativeIndex(PrimFunc func) {
 }
 
 tvm::transform::Pass LegalizeNegativeIndexPass() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [](PrimFunc f, const IRModule &, PassContext) {
     return LegalizeNegativeIndex(std::move(f));
   };
@@ -275,7 +278,7 @@ tvm::transform::Pass LegalizeNegativeIndexPass() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LegalizeNegativeIndex",
                         LegalizeNegativeIndexPass);
 }

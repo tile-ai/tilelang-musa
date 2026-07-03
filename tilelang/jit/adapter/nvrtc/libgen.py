@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 if is_nvrtc_available:
     import cuda.bindings.driver as cuda
-    from tilelang.contrib.nvrtc import compile_cuda
+    from tilelang.contrib.nvrtc import compile_cuda, get_nvrtc_version
 else:
     raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
 
@@ -183,12 +183,12 @@ class NVRTCLibraryGenerator(LibraryGenerator):
                 tl_template_path = TILELANG_TEMPLATE_PATH
 
             cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
-            __CUDACC_VER_MAJOR__ = cuda.CUDA_VERSION // 1000
 
             # Determine target architecture
             machine = platform.machine()
             target_arch = "sbsa-linux" if machine in ("aarch64", "arm64") else "x86_64-linux"
 
+            __CUDACC_VER_MAJOR__ = get_nvrtc_version()[0]
             options = [
                 f"-I{tl_template_path}",
                 f"-I{cutlass_path}",

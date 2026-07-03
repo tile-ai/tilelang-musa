@@ -2,8 +2,8 @@ from tilelang import tvm
 from tvm import ir
 import torch
 from typing import Generic, TypeVar, TYPE_CHECKING
-from tvm import tir
-import tvm.script.ir_builder.tir._ffi_api as tb_ffi
+from tvm import tirx
+import tvm.tirx.script.builder._ffi_api as tb_ffi
 import numpy as np
 from tilelang import logger
 
@@ -140,31 +140,14 @@ _STR_TO_TVM_DTYPE_CALL = {
 int_ = int
 
 
-def __dtype_eq__(self: dtype, other: AnyDType):
-    if isinstance(other, str):
-        return str.__eq__(self, _CANONICAL_TO_DISPLAY_STR.get(other, other))
-    if other in _DTYPE_TO_STR:
-        return str.__eq__(self, _DTYPE_TO_STR[other])
-    return NotImplemented
-
-
-def __dtype_ne__(self: dtype, other: AnyDType):
-    if isinstance(other, str):
-        return str.__ne__(self, _CANONICAL_TO_DISPLAY_STR.get(other, other))
-    if other in _DTYPE_TO_STR:
-        return str.__ne__(self, _DTYPE_TO_STR[other])
-    return NotImplemented
-
-
-def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
-    # Pack multiple scalar lanes into a vector dtype, e.g.
-    # T.bfloat16x2(a, b) -> tir.Shuffle([a, b], [0, 1]).
+def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
+    # When called with multiple args, pack the scalars into a vector via Shuffle.
+    # e.g. T.bfloat16x2(a, b) -> tirx.Shuffle([a, b], [0, 1]) : bfloat16x2
     if len(args) > 1:
-        return tir.Shuffle(list(args), list(range(len(args))))
-
+        return tirx.Shuffle(list(args), list(range(len(args))))
     expr = args[0] if args else None
     if isinstance(expr, int_):
-        return tvm.tir.const(expr, dtype=self)
+        return tvm.tirx.const(expr, dtype=self)
     if self in _STR_TO_TVM_DTYPE_CALL:
         attr = _STR_TO_TVM_DTYPE_CALL[self]
         call = getattr(tb_ffi, attr, None)
@@ -187,9 +170,7 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
         val = first + second.upper()
     call = getattr(tb_ffi, val, None)
     if call is None:
-        raise TypeError(
-            f"Convert to datatype `{self}` is not supported by tvm\ncalling failed on `tvm.script.ir_builder.tir._ffi_api.{val}`"
-        )
+        raise TypeError(f"Convert to datatype `{self}` is not supported by tvm\ncalling failed on `tvm.tirx.script.builder._ffi_api.{val}`")
     return call(expr, is_size_var)
 
 
@@ -267,10 +248,6 @@ def __dtype_bytes__(self: dtype) -> int:
 
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
-dtype.__eq__ = __dtype_eq__
-dtype.__req__ = __dtype_eq__
-dtype.__ne__ = __dtype_ne__
-dtype.__rne__ = __dtype_ne__
 dtype.as_torch = __dtype_as_torch__
 dtype.bytes = property(__dtype_bytes__)
 

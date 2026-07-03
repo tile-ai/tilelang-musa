@@ -6,19 +6,21 @@
 #pragma once
 
 #include "arith/ir_visitor_with_analyzer.h"
+#include "support/check.h"
 #include "tir/analysis/var_use_def_analysis.h"
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../../op/builtin.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class ThreadTagChecker : public StmtExprVisitor {
 public:
@@ -36,9 +38,9 @@ public:
 
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iter_var = Downcast<IterVar>(op->node);
-      String thread_tag = iter_var->thread_tag;
+      ffi::String thread_tag = iter_var->thread_tag;
       bool is_y_or_z =
           thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
 
@@ -52,7 +54,7 @@ private:
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kThreadBinding) {
       ICHECK(op->thread_binding.defined());
-      String thread_tag = op->thread_binding.value()->thread_tag;
+      ffi::String thread_tag = op->thread_binding.value()->thread_tag;
       if (thread_tag == "threadIdx.x") {
         thread_var_ = Downcast<IterVar>(op->thread_binding);
       }

@@ -1,38 +1,36 @@
-from __future__ import annotations
-
 from tilelang import tvm as tvm
-from tvm import tir
+from tvm import tirx
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
-from tilelang.tileop.gemm.registry import resolve_gemm_impl
+from .registry import resolve_gemm_impl
 from tilelang import _ffi_api
 
 
-@tvm_ffi.register_global_func("tl.gemm_py.infer_layout")
-def gemm_py_infer_layout(gemm_py, target: Target, thread_bounds: Range):
+@tvm_ffi.register_global_func("tl.gemm.infer_layout")
+def gemm_infer_layout(gemm, target: Target, thread_bounds: Range):
     thread_nums = thread_bounds.extent
-    return gemm_py.infer_layout(target, thread_nums)
+    return gemm.infer_layout(target, thread_nums)
 
 
-@tvm_ffi.register_global_func("tl.gemm_py.lower")
-def gemm_py_lower(
-    gemm_py,
+@tvm_ffi.register_global_func("tl.gemm.lower")
+def gemm_lower(
+    gemm,
     layout_map,
     target: Target,
     thread_bounds: Range,
-    thread_var: tir.Var,
-    mbar_phase_expr: tir.PrimExpr,
+    thread_var: tirx.Var,
+    mbar_phase_expr: tirx.PrimExpr,
 ):
     # We pass thread_bounds rather than thread_extents because tcgen5mma need to check this
-    stmt = gemm_py.lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
+    stmt = gemm.lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
     return stmt
 
 
-@tvm_ffi.register_object("tl.GemmPy")
-class GemmPy(Node, Scriptable):
+@tvm_ffi.register_object("tl.Gemm")
+class Gemm(Node, Scriptable):
     # FFI fields (LLVM/MLIR-style lowerCamel via reflection):
     # a, b, c, aPtr, bPtr, cPtr, m, n, k, transA, transB,
     # strideA, strideB, offsetA, offsetB, clearAccum, kPack, wgWait, policy
@@ -112,6 +110,18 @@ class GemmPy(Node, Scriptable):
     def wg_wait(self):
         return self.wgWait
 
+    @property
+    def is_tcgen05(self):
+        return getattr(self, "isTcgen05", False)
+
+    @property
+    def sf_a_id(self):
+        return self.sfAId
+
+    @property
+    def sf_b_id(self):
+        return self.sfBId
+
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
@@ -123,8 +133,8 @@ class GemmPy(Node, Scriptable):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_var: tirx.Var,
+        mbar_phase_expr: tirx.PrimExpr,
     ):
         """Lower the GEMM operation to TIR statements based on target architecture."""
         thread_nums = thread_bounds.extent
@@ -135,7 +145,7 @@ class GemmPy(Node, Scriptable):
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
         """Select the appropriate GEMM instruction key based on target and thread configuration.
 
-        The selection logic follows this priority:
+        The selection logic chooses:
         1. TCGEN5MMA for Blackwell architecture
         2. WGMMA for Hopper architecture with sufficient matrix size and warp count
         3. MFMA for CDNA (AMD) architecture
@@ -149,7 +159,7 @@ class GemmPy(Node, Scriptable):
         Returns:
             The selected backend-specific GEMM instruction key.
         """
-        return str(_ffi_api.GemmPyGemmInstructionKey(self, int(thread_nums), target))
+        return str(_ffi_api.GemmGetGemmInstructionKey(self, int(thread_nums), target))
 
     def _get_implementation_class(self, gemm_inst: str, target: Target):
         """Get the appropriate implementation class for the given GEMM instruction key.

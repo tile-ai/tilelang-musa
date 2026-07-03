@@ -11,8 +11,7 @@
  * 2. Converts Ramp-based global BufferStore to stg intrinsics
  * 3. Supports predicated loads (if_then_else with else=0)
  * 4. Supports predicated stores (if_then_else with empty then case)
- * 5. Skips lowering inside force_async_copy / source_robust_desc scopes
- * 6. Only enabled for CUDA and MUSA targets
+ * 5. Only enabled for CUDA targets
  *
  * Pass configurations:
  * - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default:
@@ -21,13 +20,14 @@
  * (default: OFF)
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
@@ -37,7 +37,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class LowerLDGSTGRewriter : public StmtExprMutator {
 public:
@@ -46,29 +46,7 @@ public:
       : enable_non_predicated_(enable_non_predicated),
         enable_predicated_(enable_predicated) {}
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tl::attr::kSourceRobustDesc) {
-      bool previous_in_source_robust_desc = in_source_robust_desc_;
-      in_source_robust_desc_ = true;
-      Stmt body = this->VisitStmt(op->body);
-      in_source_robust_desc_ = previous_in_source_robust_desc;
-      return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
-    }
-    if (op->attr_key == tl::attr::kForceAsyncCopy) {
-      bool previous_in_force_async_copy = in_force_async_copy_;
-      in_force_async_copy_ = true;
-      Stmt body = this->VisitStmt(op->body);
-      in_force_async_copy_ = previous_in_force_async_copy;
-      return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
   Stmt VisitStmt_(const BufferStoreNode *store) final {
-    if (ShouldSkipLowering()) {
-      return StmtExprMutator::VisitStmt_(store);
-    }
-
     // Skip if non-predicated lowering is disabled
     if (!enable_non_predicated_) {
       return StmtExprMutator::VisitStmt_(store);
@@ -118,10 +96,6 @@ public:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *if_stmt) final {
-    if (ShouldSkipLowering()) {
-      return StmtExprMutator::VisitStmt_(if_stmt);
-    }
-
     // Skip if predicated lowering is disabled
     if (!enable_predicated_) {
       return StmtExprMutator::VisitStmt_(if_stmt);
@@ -187,10 +161,6 @@ public:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *load) final {
-    if (ShouldSkipLowering()) {
-      return StmtExprMutator::VisitExpr_(load);
-    }
-
     // Only handle global memory loads
     if (load->buffer.scope() != "global") {
       return StmtExprMutator::VisitExpr_(load);
@@ -250,10 +220,6 @@ public:
   }
 
   PrimExpr VisitExpr_(const CallNode *call) final {
-    if (ShouldSkipLowering()) {
-      return StmtExprMutator::VisitExpr_(call);
-    }
-
     // Skip if predicated lowering is disabled
     if (!enable_predicated_) {
       return StmtExprMutator::VisitExpr_(call);
@@ -326,14 +292,8 @@ public:
 private:
   bool enable_non_predicated_{false};
   bool enable_predicated_{true};
-  bool in_force_async_copy_{false};
-  bool in_source_robust_desc_{false};
-  Optional<PrimExpr>
+  ffi::Optional<PrimExpr>
       current_predicate_; // Track predicate context for nested loads
-
-  bool ShouldSkipLowering() const {
-    return in_force_async_copy_ || in_source_robust_desc_;
-  }
 
   // Create access pointer for the buffer at given base offset
   PrimExpr CreateAccessPtr(const Buffer &buffer, const PrimExpr &base,
@@ -459,7 +419,7 @@ private:
     PrimExpr ptr = CreateAccessPtr(store->buffer, base, 2);
 
     // Set predicate context so that nested loads also use predicated version
-    Optional<PrimExpr> old_predicate = current_predicate_;
+    ffi::Optional<PrimExpr> old_predicate = current_predicate_;
     current_predicate_ = predicate;
 
     // Get the value to store (loads inside will use predicated version)
@@ -503,20 +463,19 @@ private:
   }
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerLDGSTG() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    // Check if target is a backend that supports tl.ldg*/tl.stg* codegen.
+    // Check if target is CUDA
     auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
     if (!target_opt.defined()) {
       // No target bound, skip this pass
       return f;
     }
     Target target = target_opt.value();
-    String target_kind = target->kind->name;
-    if (target_kind != "cuda" && target_kind != "musa") {
-      // Not a supported target, skip
+    if (target->kind->name != "cuda") {
+      // Not a CUDA target, skip
       return f;
     }
 

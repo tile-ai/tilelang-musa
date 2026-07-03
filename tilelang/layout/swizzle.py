@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import tvm
-from tvm import tir
+from tvm import tirx
 from tilelang import _ffi_api
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple
 from .layout import Layout
 
 
-def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tir.Buffer, list[int], str]:
+def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tirx.Buffer, list[int], str]:
     """
     Extract buffer, shape, and dtype from BufferLikeType.
 
@@ -20,7 +20,7 @@ def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tir.Buff
     Returns:
         tuple: (buffer, shape, dtype)
     """
-    if isinstance(buffer_or_load_or_region, tir.Buffer):
+    if isinstance(buffer_or_load_or_region, tirx.Buffer):
         return buffer_or_load_or_region, buffer_or_load_or_region.shape, buffer_or_load_or_region.dtype
     elif isinstance(buffer_or_load_or_region, BufferLikeTypeTuple):
         buf = buffer_or_load_or_region.buffer
@@ -85,10 +85,12 @@ def make_wgmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k
 
 # for SQMMA Intrinsics (PH1)
 def make_sqmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
-    if isinstance(buffer, tir.Buffer):
+    if isinstance(buffer, tirx.Buffer):
         shape = list(buffer.shape)
-        stride = int(shape[0])
-        continuous = int(shape[1])
+        if len(shape) < 2:
+            raise ValueError(f"make_sqmma_swizzled_layout requires at least 2D buffer, got shape={shape}")
+        stride = int(shape[-2])
+        continuous = int(shape[-1])
         if continuity is None:
             continuity = continuous
         base = _ffi_api.make_sqmma_swizzled_layout(
@@ -98,9 +100,11 @@ def make_sqmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k
             int(tvm.DataType(buffer.dtype).bits),
             k_major,
         )
-        return base.reshape(shape)
+        if len(shape) == 2:
+            return base
+        return base.expand(shape[:-2])
 
-    if isinstance(buffer, tir.BufferRegion):
+    if isinstance(buffer, tirx.BufferRegion):
         region_shape = [r.extent for r in buffer.region]
         if len(region_shape) < 2:
             raise ValueError(f"make_sqmma_swizzled_layout requires at least 2D region, got shape={region_shape}")
@@ -148,8 +152,8 @@ def make_sqmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k
 
 
 # no-swizzle layout with 1:1 index mapping and no dimension change.
-def make_no_swizzled_layout(buffer: tvm.tir.Buffer):
-    if isinstance(buffer, tvm.tir.Buffer):
+def make_no_swizzled_layout(buffer: tvm.tirx.Buffer):
+    if isinstance(buffer, tvm.tirx.Buffer):
         target_shape = list(buffer.shape)
 
         def forward_fn(*indices):
@@ -157,7 +161,7 @@ def make_no_swizzled_layout(buffer: tvm.tir.Buffer):
 
         return Layout(target_shape, forward_fn)
 
-    if isinstance(buffer, tvm.tir.BufferRegion):
+    if isinstance(buffer, tvm.tirx.BufferRegion):
         region_shape = [r.extent for r in buffer.region]
         if len(region_shape) < 2:
             raise ValueError(f"make_no_swizzled_layout requires at least 2D region, got shape={region_shape}")

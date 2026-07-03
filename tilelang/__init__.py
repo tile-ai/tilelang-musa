@@ -1,6 +1,5 @@
 import contextlib
 import ctypes
-import atexit
 import logging
 import os
 import sys
@@ -35,10 +34,10 @@ def _compute_version() -> str:
     try:
         from importlib.metadata import version as _dist_version  # py3.8+
 
-        return _dist_version("tilelang_musa")
+        return _dist_version("tilelang")
     except Exception as exc:
         warnings.warn(
-            f"tilelang_musa version metadata unavailable ({exc!r}); using development version.",
+            f"tilelang version metadata unavailable ({exc!r}); using development version.",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -107,9 +106,33 @@ if not env.is_light_import():
 del _init_logger
 
 
+def _disable_rocm_tvm_ffi_torch_c_dlpack(torch_module):
+    if getattr(torch_module.version, "hip", None) is None:
+        return
+
+    os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
+    try:
+        from tvm_ffi import _optional_torch_c_dlpack
+    except Exception:
+        return
+
+    # TVM Relax calls this loader directly while importing, bypassing the
+    # tvm-ffi module-level env guard.
+    def _disabled_torch_c_dlpack_extension(*_args, **_kwargs):
+        return None
+
+    _optional_torch_c_dlpack.load_torch_c_dlpack_extension = _disabled_torch_c_dlpack_extension
+
+
 @contextlib.contextmanager
 def _lazy_load_lib():
-    import torch  # noqa: F401 # preload torch to avoid dlopen errors
+    import torch  # preload torch to avoid dlopen errors
+
+    _disable_rocm_tvm_ffi_torch_c_dlpack(torch)
+
+    if sys.platform.startswith("win32"):
+        yield
+        return
 
     old_flags = sys.getdlopenflags()
     old_init = ctypes.CDLL.__init__
@@ -129,38 +152,36 @@ def _lazy_load_lib():
 # Skip heavy imports in light import mode
 if not env.is_light_import():
     with _lazy_load_lib():
-        from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
+        from .env import (  # noqa: F401
+            enable_cache,
+            disable_cache,
+            is_cache_enabled,
+            get_windows_runtime_dll_dirs,
+            prepend_dll_search_path,
+        )
+        from . import libinfo
+
+        if sys.platform.startswith("win32"):
+            # Make sibling-package DLLs (tvm_ffi, z3) discoverable via PATH,
+            # then register all native dependency dirs with the secure DLL
+            # loader used by Python 3.8+ for absolute-path DLL loads.
+            runtime_dll_dirs = get_windows_runtime_dll_dirs()
+            prepend_dll_search_path(runtime_dll_dirs)
+            dll_dirs = dict.fromkeys([*libinfo.get_dll_directories(), *runtime_dll_dirs])
+            _dll_handles = [os.add_dll_directory(p) for p in dll_dirs]
 
         import tvm
         import tvm.base  # noqa: F401
         from tvm import DataType  # noqa: F401
 
-        # Setup tvm search path before importing tvm
-        from . import libinfo
-
         def _load_tile_lang_lib():
             """Load Tile Lang lib"""
-            if sys.platform.startswith("win32") and sys.version_info >= (3, 8):
-                for path in libinfo.get_dll_directories():
-                    os.add_dll_directory(path)
             lib_path = libinfo.find_lib_path("tilelang")
             return ctypes.CDLL(lib_path), lib_path
 
         # only load once here
         if env.SKIP_LOADING_TILELANG_SO == "0":
             _LIB, _LIB_PATH = _load_tile_lang_lib()
-
-        def _mark_musa_runtime_shutdown():
-            try:
-                mark_shutdown = tvm.get_global_func("runtime.musa.mark_shutdown", allow_missing=True)
-                if mark_shutdown is not None:
-                    mark_shutdown()
-            except Exception:
-                # Best-effort only: shutdown hooks must never make interpreter
-                # teardown fail.
-                pass
-
-        atexit.register(_mark_musa_runtime_shutdown)
 
     from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
     from .profiler import Profiler  # noqa: F401

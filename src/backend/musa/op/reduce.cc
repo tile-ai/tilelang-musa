@@ -5,6 +5,7 @@
 
 #include "backend/common/op/reduce.h"
 
+#include "support/check.h"
 #include "target/utils.h"
 
 #include <sstream>
@@ -12,11 +13,16 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace musa {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
+  static int GetPreferedVectorizedSize(DataType dtype, Target) {
+    return backend::reduce::GetPreferedVectorizedSize(dtype);
+  }
+
   static bool SupportsFp16Bf16NanReduce(Target target) {
     return TargetIsMusa(target);
   }

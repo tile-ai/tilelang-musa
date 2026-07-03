@@ -2,19 +2,22 @@
  * \brief Lower eligible global->shared copies into PTX cp.async
  * \file lower_ptx_async_copy.cc
  */
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "../op/builtin.h"
@@ -22,12 +25,13 @@
 #include "../target/utils.h"
 #include "ptx_async_copy_injector.h"
 #include "tir/ir/buffer_common.h"
-#include "tvm/tir/stmt.h"
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
@@ -78,7 +82,7 @@ public:
       in_force_async_copy_ = previous_force_async_copy;
       return AttrStmt(op->node, op->attr_key, op->value, body);
     }
-    if (op->attr_key == tir::attr::async_scope) {
+    if (op->attr_key == s_tir::attr::async_scope) {
       ++explicit_async_scope_depth_;
       Stmt body = this->VisitStmt(op->body);
       --explicit_async_scope_depth_;
@@ -96,8 +100,8 @@ public:
     // => tl.ptx_cp_async(dst_base, src_base, elem_count * k)
     //
     // TileLang records logical element counts in tl.ptx_cp_async. The final
-    // target byte width is derived later from the access_ptr dtype, so
-    // subbyte dtypes such as int4/fp4/int2/int1 remain representable here.
+    // PTX byte width is derived later from the access_ptr dtype, so subbyte
+    // dtypes such as int4/fp4/int2/int1 remain representable here.
     int previous_vectorized_lanes = current_vectorized_lanes_;
     bool pushed_vectorized_loop = false;
     if (op->kind == ForKind::kVectorized) {
@@ -128,7 +132,7 @@ public:
     // Pipeline:
     // 1) Analyze source/destination indices and transfer width eligibility.
     // 2) Build tl.ptx_cp_async with scalar/vectorized base offsets when the
-    //    eventual byte width is representable.
+    //    eventual PTX byte width is representable.
     std::optional<CopyIndexInfo> index_info = PrepareCopyIndexInfo(load, store);
     if (!index_info.has_value()) {
       return Optional<Stmt>();
@@ -292,7 +296,7 @@ public:
       uncommitted_sync_copies_ = false;
       if (then_case.same_as(op->then_case) &&
           (!else_case.defined() || else_case.same_as(op->else_case))) {
-        return tvm::ffi::GetRef<Stmt>(op);
+        return GetRef<Stmt>(op);
       }
       return IfThenElse(op->condition, then_case, else_case);
     }
@@ -319,7 +323,7 @@ public:
 
     if (then_case.same_as(op->then_case) &&
         (!else_case.defined() || else_case.same_as(op->else_case))) {
-      return tvm::ffi::GetRef<Stmt>(op);
+      return GetRef<Stmt>(op);
     }
     return IfThenElse(op->condition, then_case, else_case);
   }
@@ -426,11 +430,10 @@ private:
   }
 
   static Optional<PrimExpr>
-  FlattenToLinearOffset(const Buffer &buf,
-                        const ffi::Array<PrimExpr> &indices) {
+  FlattenToLinearOffset(const Buffer &buf, const Array<PrimExpr> &indices) {
     // Convert N-D indices (potentially with axis_separators) into a single
     // row-major linear element offset.
-    ffi::Array<PrimExpr> physical = buf.OffsetOf(indices);
+    Array<PrimExpr> physical = buf.OffsetOf(indices);
     Buffer flattened_buf = buf.GetFlattenedBuffer();
     if (physical.size() != flattened_buf->shape.size() || physical.empty()) {
       return Optional<PrimExpr>();
@@ -476,6 +479,9 @@ private:
     const int per_access_bits = effective_lanes * load->dtype.bits();
     const int total_bits = static_cast<int>(per_access_bits) *
                            static_cast<int>(current_vectorized_lanes_);
+    // PTX cp.async is byte-granular. `tl.ptx_cp_async` stores logical element
+    // counts, but we still need to know that the eventual vectorized transfer
+    // can map to a legal byte width without over-copying packed subbyte data.
     if (total_bits % 8 != 0) {
       return std::nullopt;
     }
@@ -521,7 +527,7 @@ private:
         return PrimExpr();
       }
       if (const auto *rhs_broadcast = rhs.as<BroadcastNode>()) {
-        return tir::Add(lhs_ramp->base, rhs_broadcast->value);
+        return tirx::Add(lhs_ramp->base, rhs_broadcast->value);
       }
     }
     if (const auto *rhs_ramp = rhs.as<RampNode>()) {
@@ -529,7 +535,7 @@ private:
         return PrimExpr();
       }
       if (const auto *lhs_broadcast = lhs.as<BroadcastNode>()) {
-        return tir::Add(rhs_ramp->base, lhs_broadcast->value);
+        return tirx::Add(rhs_ramp->base, lhs_broadcast->value);
       }
     }
     return PrimExpr();
@@ -564,32 +570,32 @@ private:
       if (!value.defined() || value.dtype().lanes() != 1) {
         return PrimExpr();
       }
-      return tir::Cast(cast->dtype.with_lanes(1), value);
+      return tirx::Cast(cast->dtype.with_lanes(1), value);
     }
     if (const auto *add = expr.as<AddNode>()) {
       PrimExpr a = ExtractLaneInvariantScalar(add->a);
       PrimExpr b = ExtractLaneInvariantScalar(add->b);
-      return a.defined() && b.defined() ? tir::Add(a, b) : PrimExpr();
+      return a.defined() && b.defined() ? tirx::Add(a, b) : PrimExpr();
     }
     if (const auto *sub = expr.as<SubNode>()) {
       PrimExpr a = ExtractLaneInvariantScalar(sub->a);
       PrimExpr b = ExtractLaneInvariantScalar(sub->b);
-      return a.defined() && b.defined() ? tir::Sub(a, b) : PrimExpr();
+      return a.defined() && b.defined() ? tirx::Sub(a, b) : PrimExpr();
     }
     if (const auto *mul = expr.as<MulNode>()) {
       PrimExpr a = ExtractLaneInvariantScalar(mul->a);
       PrimExpr b = ExtractLaneInvariantScalar(mul->b);
-      return a.defined() && b.defined() ? tir::Mul(a, b) : PrimExpr();
+      return a.defined() && b.defined() ? tirx::Mul(a, b) : PrimExpr();
     }
     if (const auto *div = expr.as<FloorDivNode>()) {
       PrimExpr a = ExtractLaneInvariantScalar(div->a);
       PrimExpr b = ExtractLaneInvariantScalar(div->b);
-      return a.defined() && b.defined() ? tir::FloorDiv(a, b) : PrimExpr();
+      return a.defined() && b.defined() ? tirx::FloorDiv(a, b) : PrimExpr();
     }
     if (const auto *mod = expr.as<FloorModNode>()) {
       PrimExpr a = ExtractLaneInvariantScalar(mod->a);
       PrimExpr b = ExtractLaneInvariantScalar(mod->b);
-      return a.defined() && b.defined() ? tir::FloorMod(a, b) : PrimExpr();
+      return a.defined() && b.defined() ? tirx::FloorMod(a, b) : PrimExpr();
     }
     if (const auto *call = expr.as<CallNode>()) {
       if (!IsLaneWiseScalarizableCall(call)) {
@@ -604,8 +610,8 @@ private:
         }
         args.push_back(scalar_arg);
       }
-      return tir::Call(call->dtype.with_lanes(1), call->op, args,
-                       call->annotations);
+      return tirx::Call(call->dtype.with_lanes(1), call->op, args,
+                        call->annotations);
     }
     return PrimExpr();
   }
@@ -627,7 +633,7 @@ private:
     if (lhs_base.defined()) {
       PrimExpr rhs_offset = ExtractLaneInvariantScalar(add->b);
       if (rhs_offset.defined()) {
-        return tir::Add(lhs_base, rhs_offset);
+        return tirx::Add(lhs_base, rhs_offset);
       }
     }
 
@@ -635,7 +641,7 @@ private:
     if (rhs_base.defined()) {
       PrimExpr lhs_offset = ExtractLaneInvariantScalar(add->a);
       if (lhs_offset.defined()) {
-        return tir::Add(rhs_base, lhs_offset);
+        return tirx::Add(rhs_base, lhs_offset);
       }
     }
 
@@ -695,7 +701,7 @@ private:
       const BufferLoad &dst_base_load, const BufferLoad &src_base_load,
       int num_elems, int bytes, bool predicated,
       const PrimExpr &predicate_value, const PrimExpr &robust_desc) const {
-    ffi::Array<PrimExpr> cp_async_args;
+    Array<PrimExpr> cp_async_args;
     Op op = tvm::tl::ptx_cp_async();
     if (robust_desc.defined()) {
       ICHECK(ptr_info.has_value())
@@ -861,8 +867,10 @@ private:
       out.is_pure_copy_region = false;
       return out;
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return AnalyzeCopyRegion(let->body);
+    if (stmt.as<BindNode>()) {
+      CopyRegionAnalysis out;
+      out.is_pure_copy_region = false;
+      return out;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       return AnalyzeCopyRegion(attr->body);
@@ -870,7 +878,7 @@ private:
     if (const auto *loop = stmt.as<ForNode>()) {
       return AnalyzeCopyRegion(loop->body);
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
+    if (const auto *block = stmt.as<SBlockNode>()) {
       if (block->init.defined()) {
         out = MergeCopyRegionAnalysis(out,
                                       AnalyzeCopyRegion(block->init.value()));
@@ -878,11 +886,11 @@ private:
       out = MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(block->body));
       return out;
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
       // Treat the predicate as pure control flow (no side effects). We only
       // care whether the realized body is a pure copy region so we can hoist
       // the final commit+wait out of sequential loop nests.
-      const BlockNode *block = realize->block.get();
+      const SBlockNode *block = realize->block.get();
       if (block->init.defined()) {
         out = MergeCopyRegionAnalysis(out,
                                       AnalyzeCopyRegion(block->init.value()));
@@ -944,7 +952,7 @@ private:
   bool uncommitted_sync_copies_{false};
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
@@ -990,7 +998,7 @@ tvm::transform::Pass LowerPTXAsyncCopy() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerPTXAsyncCopy", LowerPTXAsyncCopy);
 }
 

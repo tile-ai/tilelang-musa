@@ -2,22 +2,22 @@
 
 from tilelang import tvm as tvm
 import tilelang.testing
-from tvm.script import tir as T
+from tvm.script import tirx as T
 
 
-def run_passes(func: tvm.tir.PrimFunc):
+def run_passes(func: tvm.tirx.PrimFunc):
     mod = tvm.IRModule.from_expr(func)
 
-    musa_target = tvm.target.Target("musa", host="llvm")
+    cuda_target = tvm.target.Target("cuda", host="llvm")
 
-    mod = tvm.tir.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": musa_target}))(mod)
+    mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
 
-    mod = tvm.tir.transform.AnnotateDeviceRegions()(mod)
-    mod = tvm.tir.transform.SplitHostDevice()(mod)
+    mod = tvm.tirx.transform.AnnotateDeviceRegions()(mod)
+    mod = tvm.tirx.transform.SplitHostDevice()(mod)
     return tilelang.transform.ThreadSync("shared")(mod)
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_no_sync_between_atomic_adds_to_shared():
     """Atomic WAW (and RMW) should not trigger thread-level sync insertion.
 
@@ -37,7 +37,7 @@ def test_no_sync_between_atomic_adds_to_shared():
             T.evaluate(
                 T.call_intrin(
                     "float32",
-                    tvm.tir.op.Op.get("tl.atomic_add_elem_op"),
+                    tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
                     T.tvm_access_ptr(
                         T.type_annotation("float32"),
                         A_shared.data,
@@ -56,7 +56,7 @@ def test_no_sync_between_atomic_adds_to_shared():
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync inserted for atomic ops:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_thread_sync_handles_int64_tvm_access_ptr_offset():
     """Regression: shared/shared.dyn pointer offsets may be int64.
 
@@ -75,7 +75,7 @@ def test_thread_sync_handles_int64_tvm_access_ptr_offset():
         T.evaluate(
             T.call_intrin(
                 "float32",
-                tvm.tir.op.Op.get("tl.atomic_add_elem_op"),
+                tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
                 T.tvm_access_ptr(
                     T.type_annotation("float32"),
                     A_shared.data,
@@ -94,14 +94,14 @@ def test_thread_sync_handles_int64_tvm_access_ptr_offset():
     assert 'T.tvm_storage_sync("shared.dyn")' not in s, f"Unexpected sync inserted for single atomic op:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_if_with_same_index():
     @T.prim_func(check_well_formed=False)
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
         threadIdx_y = T.env_thread("threadIdx.y")
         blockIdx_x = T.env_thread("blockIdx.x")
-        p0 = T.Buffer([2], dtype="float32", data=p0_arg.data)
+        p0 = T.decl_buffer([2], dtype="float32", data=p0_arg.data)
         result_local = T.alloc_buffer([1], dtype="float32", scope="local")
         temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
         T.launch_thread(blockIdx_x, 8)
@@ -118,7 +118,7 @@ def test_sync_if_with_same_index():
     assert "T.tvm_storage_sync" in str(mod.script())
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_if_with_same_index_with_modulo_if():
     @T.prim_func(check_well_formed=False)
     def func() -> None:
@@ -140,13 +140,13 @@ def test_sync_if_with_same_index_with_modulo_if():
     assert "T.tvm_storage_sync" in str(mod.script())
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_read_thread_id_independent_location():
     @T.prim_func
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
         blockIdx_x = T.env_thread("blockIdx.x")
-        p0 = T.Buffer([2], dtype="float32", data=p0_arg.data)
+        p0 = T.decl_buffer([2], dtype="float32", data=p0_arg.data)
         result_local = T.alloc_buffer([1], dtype="float32", scope="local")
         temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
         T.launch_thread(blockIdx_x, 8)
@@ -165,44 +165,44 @@ def test_sync_read_thread_id_independent_location():
     assert "T.tvm_storage_sync" in str(mod.script())
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_shared():
     @T.prim_func(private=True)
     def func(A: T.Buffer((4, 4), "float32"), E: T.Buffer((4, 4), "float32")):
         blockIdx_x = T.launch_thread("blockIdx.x", 1)
-        B = T.allocate([24], "float32", "shared")
-        C = T.allocate([1], "float32", "local")
-        D = T.allocate([16], "float32", "shared")
+        B = T.alloc_buffer((24,), "float32", scope="shared")
+        C = T.alloc_buffer((1,), "float32", scope="local")
+        D = T.alloc_buffer((16,), "float32", scope="shared")
         threadIdx_x = T.launch_thread("threadIdx.x", 16)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        B_1 = T.Buffer((24,), data=B, scope="shared")
-        A_1 = T.Buffer((16,), data=A.data)
+        B_1 = T.decl_buffer((24,), data=B.data, scope="shared")
+        A_1 = T.decl_buffer((16,), data=A.data)
         B_1[threadIdx_x // 4 * 6 + threadIdx_x % 4] = A_1[threadIdx_x]
-        C_1 = T.Buffer((1,), data=C, scope="local")
+        C_1 = T.decl_buffer((1,), data=C.data, scope="local")
         C_1[0] = B_1[threadIdx_x // 4 * 6 + threadIdx_x % 4]
-        D_1 = T.Buffer((16,), data=D, scope="shared")
+        D_1 = T.decl_buffer((16,), data=D.data, scope="shared")
         D_1[threadIdx_x] = C_1[0]
-        E_1 = T.Buffer((16,), data=E.data)
+        E_1 = T.decl_buffer((16,), data=E.data)
         E_1[threadIdx_x] = D_1[threadIdx_x]
 
     @T.prim_func(private=True)
     def expected(A: T.Buffer((4, 4), "float32"), E: T.Buffer((4, 4), "float32")):
         blockIdx_x = T.launch_thread("blockIdx.x", 1)
-        B_1 = T.allocate([24], "float32", "shared")
-        C_1 = T.allocate([1], "float32", "local")
-        D_1 = T.allocate([16], "float32", "shared")
+        B_1 = T.alloc_buffer((24,), "float32", scope="shared")
+        C_1 = T.alloc_buffer((1,), "float32", scope="local")
+        D_1 = T.alloc_buffer((16,), "float32", scope="shared")
         threadIdx_x = T.launch_thread("threadIdx.x", 16)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        B_1_1 = T.Buffer((24,), data=B_1, scope="shared")
-        A_1 = T.Buffer((16,), data=A.data)
+        B_1_1 = T.decl_buffer((24,), data=B_1.data, scope="shared")
+        A_1 = T.decl_buffer((16,), data=A.data)
         B_1_1[threadIdx_x // 4 * 6 + threadIdx_x % 4] = A_1[threadIdx_x]
-        C_1_1 = T.Buffer((1,), data=C_1, scope="local")
+        C_1_1 = T.decl_buffer((1,), data=C_1.data, scope="local")
         C_1_1[0] = B_1_1[threadIdx_x // 4 * 6 + threadIdx_x % 4]
-        D_1_1 = T.Buffer((16,), data=D_1, scope="shared")
+        D_1_1 = T.decl_buffer((16,), data=D_1.data, scope="shared")
         D_1_1[threadIdx_x] = C_1_1[0]
-        E_1 = T.Buffer((16,), data=E.data)
+        E_1 = T.decl_buffer((16,), data=E.data)
         E_1[threadIdx_x] = D_1_1[threadIdx_x]
 
     mod = tvm.IRModule({"main": func})
@@ -210,31 +210,31 @@ def test_sync_shared():
     tvm.ir.assert_structural_equal(mod["main"], expected)
 
 
-@tilelang.testing.requires_musa
+@tvm.testing.requires_cuda
 def test_sync_let_stmt():
     @T.prim_func(private=True)
     def func(A: T.Buffer((16 * 512), "float32")):
         blockIdx_x = T.launch_thread("blockIdx.x", 16)
-        A_shared = T.allocate([512], "float32", "shared")
-        in_thread_A_temp = T.allocate([1], "float32", "local")
-        cross_thread_A_temp = T.allocate([1], "float32", "local")
+        A_shared = T.alloc_buffer((512,), "float32", scope="shared")
+        in_thread_A_temp = T.alloc_buffer((1,), "float32", scope="local")
+        cross_thread_A_temp = T.alloc_buffer((1,), "float32", scope="local")
         threadIdx_x = T.launch_thread("threadIdx.x", 128)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        A_shared_1 = T.Buffer((512,), data=A_shared, scope="shared")
+        A_shared_1 = T.decl_buffer((512,), data=A_shared.data, scope="shared")
         for ax0 in range(512):
             A_shared_1[ax0] = A[blockIdx_x * 512 + ax0]
-        in_thread_A_temp_1 = T.Buffer((1,), data=in_thread_A_temp, scope="local")
+        in_thread_A_temp_1 = T.decl_buffer((1,), data=in_thread_A_temp.data, scope="local")
         in_thread_A_temp_1[0] = T.float32(0)
-        with T.LetStmt(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x]) as A_temp:
-            in_thread_A_temp_1[0] = A_temp
-        with T.LetStmt(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x + 128]) as A_temp:
-            in_thread_A_temp_1[0] = A_temp
-        with T.LetStmt(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x + 256]) as A_temp:
-            in_thread_A_temp_1[0] = A_temp
-        with T.LetStmt(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x + 384]) as A_temp:
-            in_thread_A_temp_1[0] = A_temp
-        cross_thread_A_temp_1 = T.Buffer((1,), data=cross_thread_A_temp, scope="local")
+        A_temp_0 = T.bind(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x])
+        in_thread_A_temp_1[0] = A_temp_0
+        A_temp_1 = T.bind(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x + 128])
+        in_thread_A_temp_1[0] = A_temp_1
+        A_temp_2 = T.bind(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x + 256])
+        in_thread_A_temp_1[0] = A_temp_2
+        A_temp_3 = T.bind(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x + 384])
+        in_thread_A_temp_1[0] = A_temp_3
+        cross_thread_A_temp_1 = T.decl_buffer((1,), data=cross_thread_A_temp.data, scope="local")
         with T.attr(
             T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
             "reduce_scope",
@@ -251,32 +251,32 @@ def test_sync_let_stmt():
     @T.prim_func(private=True)
     def expected(A: T.Buffer((8192,), "float32")):
         blockIdx_x = T.launch_thread("blockIdx.x", 16)
-        A_shared_1 = T.allocate([512], "float32", "shared")
-        in_thread_A_temp_1 = T.allocate([1], "float32", "local")
-        cross_thread_A_temp_1 = T.allocate([1], "float32", "local")
+        A_shared_1 = T.alloc_buffer((512,), "float32", scope="shared")
+        in_thread_A_temp_1 = T.alloc_buffer((1,), "float32", scope="local")
+        cross_thread_A_temp_1 = T.alloc_buffer((1,), "float32", scope="local")
         threadIdx_x = T.launch_thread("threadIdx.x", 128)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        A_shared_1_1 = T.Buffer((512,), data=A_shared_1, scope="shared")
+        A_shared_1_1 = T.decl_buffer((512,), data=A_shared_1.data, scope="shared")
         for ax0 in range(512):
             A_shared_1_1[ax0] = A[blockIdx_x * 512 + ax0]
-        in_thread_A_temp_1_1 = T.Buffer((1,), data=in_thread_A_temp_1, scope="local")
+        in_thread_A_temp_1_1 = T.decl_buffer((1,), data=in_thread_A_temp_1.data, scope="local")
         in_thread_A_temp_1_1[0] = T.float32(0)
         T.tvm_storage_sync("shared")
-        with T.LetStmt(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x]) as A_temp:
-            in_thread_A_temp_1_1[0] = A_temp
-        with T.LetStmt(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x + 128]) as A_temp:
-            in_thread_A_temp_1_1[0] = A_temp
-        with T.LetStmt(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x + 256]) as A_temp:
-            in_thread_A_temp_1_1[0] = A_temp
-        with T.LetStmt(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x + 384]) as A_temp:
-            in_thread_A_temp_1_1[0] = A_temp
+        A_temp_0 = T.bind(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x])
+        in_thread_A_temp_1_1[0] = A_temp_0
+        A_temp_1 = T.bind(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x + 128])
+        in_thread_A_temp_1_1[0] = A_temp_1
+        A_temp_2 = T.bind(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x + 256])
+        in_thread_A_temp_1_1[0] = A_temp_2
+        A_temp_3 = T.bind(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x + 384])
+        in_thread_A_temp_1_1[0] = A_temp_3
+        cross_thread_A_temp_1_1 = T.decl_buffer((1,), data=cross_thread_A_temp_1.data, scope="local")
         T.attr(
             T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
             "reduce_scope",
             T.reinterpret(T.uint64(0), dtype="handle"),
         )
-        cross_thread_A_temp_1_1 = T.Buffer((1,), data=cross_thread_A_temp_1, scope="local")
         T.tvm_thread_allreduce(
             T.uint32(1),
             in_thread_A_temp_1_1[0],
@@ -290,7 +290,7 @@ def test_sync_let_stmt():
     tvm.ir.assert_structural_equal(mod["main"], expected)
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_shared_dyn_stmatrix_loop_hoist():
     @T.prim_func
     def func():
@@ -310,7 +310,7 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
             T.evaluate(
                 T.call_intrin(
                     "handle",
-                    tvm.tir.op.Op.get("tl.ptx_stmatrix"),
+                    tvm.tirx.op.Op.get("tl.ptx_stmatrix"),
                     T.int32(0),
                     T.int32(4),
                     T.tvm_access_ptr(
@@ -332,7 +332,7 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
     assert s.index('T.tvm_storage_sync("shared.dyn")') < s.index("for i in T.unroll(8)")
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_loop_carry_no_dependency_same_index():
     """Test that A[i] write followed by A[i] read in a loop does NOT need barrier.
 
@@ -366,7 +366,7 @@ def test_loop_carry_no_dependency_same_index():
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync in loop:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_loop_carry_with_cross_thread_dependency():
     """Test loop-carried dependency where different threads access overlapping locations.
 
@@ -405,7 +405,7 @@ def test_loop_carry_with_cross_thread_dependency():
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync for cross-thread dependency:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_loop_carry_modulo_buffering():
     """Test that A[i%2] write followed by A[i%2] read does NOT need barrier (double buffering).
 
@@ -439,7 +439,7 @@ def test_loop_carry_modulo_buffering():
     print(f"Modulo buffering result:\n{s}")
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_loop_carry_different_indices():
     """Test that A[i] write followed by A[i+1] read does NOT need barrier.
 
@@ -476,7 +476,7 @@ def test_loop_carry_different_indices():
 # =============================================================================
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_hoist_non_uniform_if_with_threadidx():
     """Test that sync is hoisted when if condition directly depends on threadIdx.
 
@@ -514,7 +514,7 @@ def test_sync_hoist_non_uniform_if_with_threadidx():
     assert sync_pos < if_pos, f"Sync should be before if statement:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_hoist_non_uniform_if_shared_memory_condition():
     """Test sync hoisting when if condition reads from shared memory with thread-dependent index.
 
@@ -554,7 +554,7 @@ def test_sync_hoist_non_uniform_if_shared_memory_condition():
     assert sync_pos < if_pos, f"Sync should be hoisted before non-uniform if:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_inside_uniform_if_blockidx():
     """Test that sync can stay inside if when condition is uniform (blockIdx).
 
@@ -586,7 +586,7 @@ def test_sync_inside_uniform_if_blockidx():
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_inside_uniform_if_runtime_block_uniform_condition():
     """Runtime-loaded but block-uniform conditions should keep syncs in the if."""
 
@@ -612,7 +612,7 @@ def test_sync_inside_uniform_if_runtime_block_uniform_condition():
     assert sync_pos > if_pos, f"Block-uniform runtime condition should keep sync inside if:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_hoist_nested_non_uniform_if():
     """Test sync hoisting with nested if statements where outer is non-uniform."""
 
@@ -644,7 +644,7 @@ def test_sync_hoist_nested_non_uniform_if():
     assert sync_pos < if_pos, f"Sync should be hoisted before outer if:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_hoist_non_uniform_if_in_loop():
     """Test sync hoisting when non-uniform if is inside a loop."""
 
@@ -673,7 +673,7 @@ def test_sync_hoist_non_uniform_if_in_loop():
     # This ensures all threads can reach the sync point
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_no_sync_needed_uniform_accesses():
     """Test that no extra sync is added when accesses are already safe.
 
@@ -702,7 +702,7 @@ def test_no_sync_needed_uniform_accesses():
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
     """Test sync hoisting when non-uniform if is inside a loop with shared memory."""
 

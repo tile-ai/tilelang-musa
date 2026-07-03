@@ -258,5 +258,5 @@ class Hint:
         # Always merge dynamic shared memory
         if self.shared_scope == "shared.dyn":
             merge_static_smem = True
-        self.pass_context = {"tir.merge_static_smem": merge_static_smem}
+        self.pass_context = {"tirx.merge_static_smem": merge_static_smem}
         return self

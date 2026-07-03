@@ -7,8 +7,9 @@
 #define TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 
 #include "op/finalize_reducer.h"
+#include "support/check.h"
 
-#include <tvm/tir/builtin.h>
+#include <tvm/tirx/builtin.h>
 
 #include <array>
 #include <cstdint>
@@ -18,7 +19,8 @@ namespace tvm {
 namespace tl {
 namespace backend {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 template <typename Impl> struct FinalizeReducerLowerer {
   static Stmt Lower(const FinalizeReducerOpNode &op, const LowerArgs &T,
@@ -64,10 +66,10 @@ template <typename Impl> struct FinalizeReducerLowerer {
     int64_t effective_batch = static_cast<int64_t>(op.batch);
 
     if (effective_batch > 1 && layout_batch_size > 0) {
-      CHECK_LE(effective_batch, layout_batch_size)
+      ICHECK_LE(effective_batch, layout_batch_size)
           << "finalize_reducer: batch (" << effective_batch
           << ") exceeds total output elements (" << layout_batch_size << ")";
-      CHECK_EQ(layout_batch_size % effective_batch, 0)
+      ICHECK_EQ(layout_batch_size % effective_batch, 0)
           << "finalize_reducer: batch (" << effective_batch
           << ") must evenly divide total output elements (" << layout_batch_size
           << ")";
@@ -78,9 +80,16 @@ template <typename Impl> struct FinalizeReducerLowerer {
     const bool use_sync_barrier =
         Impl::UseSyncBarrier(T.target, reducing_threads);
     Buffer sync_barrier;
+    int sync_barrier_id = 0;
     if (use_sync_barrier) {
       auto all_threads = T.thread_bounds->extent;
-      sync_barrier = T.AddBarrier(*as_const_int(all_threads));
+      ICHECK(T.AllocMBarrier)
+          << "finalize_reducer requires an mbarrier allocator for named "
+             "barrier synchronization";
+      ICHECK(T.mbarrier_buffer != nullptr);
+      sync_barrier_id = T.AllocMBarrier(*as_const_int(all_threads));
+      sync_barrier = T.mbarrier_buffer->value();
+      ICHECK(sync_barrier.defined());
     }
 
     if (use_batch) {
@@ -93,8 +102,8 @@ template <typename Impl> struct FinalizeReducerLowerer {
       PrimExpr workspace = T.AddWorkspace(ws_size, buffer->dtype);
       Array<PrimExpr> args = {StringImm(allreduce), buffer->data};
       if (use_sync_barrier) {
-        PrimExpr barrier_id =
-            BufferLoad(sync_barrier, {IntImm(DataType::Int(32), 0)});
+        PrimExpr barrier_id = BufferLoad(
+            sync_barrier, {IntImm(DataType::Int(32), sync_barrier_id)});
         args.push_back(barrier_id);
       }
       args.push_back(workspace);
@@ -107,8 +116,8 @@ template <typename Impl> struct FinalizeReducerLowerer {
     Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
                                           BufferLoad(buffer, indices_0)};
     if (use_sync_barrier) {
-      PrimExpr barrier_id =
-          BufferLoad(sync_barrier, {IntImm(DataType::Int(32), 0)});
+      PrimExpr barrier_id = BufferLoad(
+          sync_barrier, {IntImm(DataType::Int(32), sync_barrier_id)});
       thread_reduce_args.push_back(barrier_id);
     }
     if (reducing_threads >= 32) {

@@ -4,6 +4,8 @@
  */
 
 #include "op/gemm.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 #include "target/utils.h"
 
@@ -14,11 +16,14 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace rocm {
 
 namespace {
+
+constexpr const char *kROCmMFMA = "rocm.mfma";
+constexpr const char *kROCmWMMA = "rocm.wmma";
 
 std::pair<int, int>
 ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
@@ -61,12 +66,14 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
     float best_balance = std::numeric_limits<float>::max();
     for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
       int n = num_warps / m;
+
       float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
       float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
       if (m_per_warp < 1 || n_per_warp < 1)
         continue;
       if (m * n != num_warps)
         continue;
+
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
       if (balance < best_balance) {
         best_balance = balance;
@@ -74,6 +81,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
         best_n = n;
       }
     }
+
     m_warp = best_m;
     n_warp = best_n;
   } else {
@@ -91,32 +99,40 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
 } // namespace
 
 struct Gemm {
-  static String SelectInst(const GemmNode &op, int block_size, Target target) {
+  static ffi::String SelectInst(const GemmNode &op, int block_size,
+                                Target target) {
     (void)op;
     (void)block_size;
-    ICHECK(TargetIsCDNA(target))
-        << "Unsupported ROCm target for gemm: " << target->str();
-    return kGemmInstROCmMFMA;
+
+    if (TargetIsCDNA(target)) {
+      return kROCmMFMA;
+    }
+    if (TargetIsRDNA(target)) {
+      return kROCmWMMA;
+    }
+    LOG(FATAL) << "Unsupported ROCm target for gemm: " << target->str();
+    return kROCmMFMA;
   }
 
   static std::pair<int, int>
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
-                       int block_size, Target target, String gemm_inst,
-                       std::optional<std::array<int, 3>> mma_inst_shape) {
+                       int block_size, Target target, ffi::String gemm_inst) {
     (void)gemm_inst;
-    (void)mma_inst_shape;
     int num_warps = block_size / TargetGetWarpSize(target);
     return ComputeDefaultWarpPartition(policy, M, N, num_warps);
   }
 
-  static bool ReuseExistingSharedLayout(String gemm_inst) {
+  static bool ReuseExistingSharedLayout(ffi::String gemm_inst) {
     (void)gemm_inst;
     return false;
   }
 
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kGemmInstROCmMFMA) {
+  static ffi::String InstructionKind(ffi::String gemm_inst) {
+    if (gemm_inst == kROCmMFMA) {
       return "mfma";
+    }
+    if (gemm_inst == kROCmWMMA) {
+      return "wmma";
     }
     return "unknown";
   }

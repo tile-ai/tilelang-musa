@@ -5,11 +5,11 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <cstdint>
 #include <optional>
@@ -18,11 +18,12 @@
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace {
 
@@ -378,8 +379,8 @@ tvm::transform::Pass MergeAsyncCopy() {
     n->body = merger(std::move(n->body));
     return f;
   };
-  return tvm::tir::transform::CreatePrimFuncPass(pass_func, 0,
-                                                 "tl.MergeAsyncCopy", {});
+  return tvm::tirx::transform::CreatePrimFuncPass(pass_func, 0,
+                                                  "tl.MergeAsyncCopy", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

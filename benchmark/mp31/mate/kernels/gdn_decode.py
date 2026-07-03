@@ -11,7 +11,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from tvm import tir
+from tvm import tirx as tir
 
 __all__ = ["run_gated_delta_rule_decode_vk_fp32"]
 

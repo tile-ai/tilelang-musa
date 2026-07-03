@@ -12,7 +12,7 @@ from tilelang import tvm as tvm
 from tilelang import env
 from tilelang.jit import JITImpl
 from tilelang.jit.kernel import JITKernel
-from tvm.tir import PrimFunc, Var
+from tvm.tirx import PrimFunc, Var
 from tvm.target import Target
 import inspect
 from functools import partial
@@ -315,7 +315,9 @@ class AutoTuner:
                     elif isinstance(device, str):
                         target_device = torch.device(device)
                     else:
-                        target_device = torch.device(f"{device_kind}:{device}") if self._is_torch_device_available(device_kind) else torch.device("cpu")
+                        target_device = (
+                            torch.device(f"{device_kind}:{device}") if self._is_torch_device_available(device_kind) else torch.device("cpu")
+                        )
                     _cached_tensors_by_device[device] = [
                         tensor.to(device=target_device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
                     ]

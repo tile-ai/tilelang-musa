@@ -11,7 +11,7 @@ import torch
 
 def get_arch(target: str | Target = "cuda") -> TileDevice:
     if isinstance(target, str):
-        target = Target(target)
+        target = determine_target(target, return_object=True)
 
     if target.kind.name == "cuda":
         return CUDA(target)

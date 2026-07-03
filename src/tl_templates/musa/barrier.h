@@ -2,6 +2,16 @@
 
 #include "common.h"
 
+struct alignas(uint64_t) Barrier {
+  uint64_t storage;
+
+  TL_DEVICE operator uint32_t() { return cast_smem_ptr_to_uint(&storage); }
+  TL_DEVICE operator uint32_t() const {
+    return cast_smem_ptr_to_uint(&storage);
+  }
+};
+static_assert(sizeof(Barrier) == sizeof(uint64_t));
+
 namespace tl {
 TL_DEVICE void
 mbarrier_init(uint32_t barrier_id, // 32 bits user-managed barrier's id
@@ -34,6 +44,10 @@ TL_DEVICE void mbarrier_arrive_expect_tx(uint32_t barrier_id,
   __musa_async_arrive(barrier_id);
 #endif
 }
+
+TL_DEVICE void fence_proxy_async() { asm volatile("" : : : "memory"); }
+
+TL_DEVICE void fence_barrier_init() { asm volatile("" : : : "memory"); }
 
 TL_DEVICE void tma_store_arrive() { __musa_tme_store_commit(); }
 

@@ -12,13 +12,17 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace cuda {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
   static bool SupportsFp16Bf16NanReduce(Target target) {
     return TargetIsCuda(target);
+  }
+
+  static int GetPreferedVectorizedSize(DataType dt, Target) {
+    return backend::reduce::GetPreferedVectorizedSize(dt);
   }
 
   static bool UseSyncBarrier(Target, int) { return false; }

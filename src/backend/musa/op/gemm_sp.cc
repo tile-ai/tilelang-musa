@@ -5,7 +5,10 @@
 
 #include "op/gemm_sp.h"
 
+#include "support/check.h"
 #include "target/utils.h"
+
+#include <tvm/runtime/logging.h>
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +18,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace musa {
 
@@ -38,10 +42,8 @@ bool CheckMMASP(const GemmSPNode &op) {
   }
 
   if (op.C->dtype == DataType::Int(32)) {
-    if ((op.A->dtype == DataType::Int(8) ||
-         op.A->dtype == DataType::UInt(8)) &&
-        (op.B->dtype == DataType::Int(8) ||
-         op.B->dtype == DataType::UInt(8))) {
+    if ((op.A->dtype == DataType::Int(8) || op.A->dtype == DataType::UInt(8)) &&
+        (op.B->dtype == DataType::Int(8) || op.B->dtype == DataType::UInt(8))) {
       return op.K % 64 == 0;
     }
   }
@@ -55,8 +57,8 @@ void FatalUnavailable(const GemmSPNode &op, Target target) {
              << ", dtype=" << op.A->dtype << "), E(scope=" << op.E.scope()
              << ", dtype=" << op.E->dtype << "), B(scope=" << op.B.scope()
              << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
-             << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N="
-             << op.N << ", K=" << op.K << ".";
+             << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
+             << ", K=" << op.K << ".";
 }
 
 std::pair<int, int>

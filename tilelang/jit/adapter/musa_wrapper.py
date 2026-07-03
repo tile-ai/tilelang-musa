@@ -5,7 +5,7 @@ from tilelang import tvm as tvm
 from typing import Any
 import re
 from .utils import match_declare_kernel, get_annotated_mod, pythonic_expr
-from tvm.tir.stmt_functor import post_order_visit
+from tvm.tirx.stmt_functor import post_order_visit
 
 PREDEF_INIT_FUNC = """
 #define ERROR_BUF_SIZE 1024
@@ -170,7 +170,7 @@ class TLMUSASourceWrapper:
         self.libpath: str | None = None
         self.lib_code: str | None = self.update_lib_code(source)
 
-    def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
+    def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         return pythonic_expr(expr, self._TYPE_MAP)
 
     def _lookup_type(self, dtype: str | Any) -> str:
@@ -200,7 +200,7 @@ class TLMUSASourceWrapper:
                         "type": self._lookup_type(buffer.dtype) + "* __restrict__",
                     }
                 )
-            elif isinstance(param, tvm.tir.Var):
+            elif isinstance(param, tvm.tirx.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
@@ -219,7 +219,7 @@ class TLMUSASourceWrapper:
             function_args,
             function_params,
             desc_name_map: dict[str, str] | None = None,
-            desc_name_var_map: dict[str, tvm.tir.Var] | None = None,
+            desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
         ):
             # Extract the function call arguments matching the function definition
             def maybe_desc(name: str, matches: list[str], i: int):
@@ -261,7 +261,7 @@ class TLMUSASourceWrapper:
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE
         desc_name_map: dict[str, str] = {}
-        desc_name_var_map: dict[str, tvm.tir.Var] = {}
+        desc_name_var_map: dict[str, tvm.tirx.Var] = {}
         for function_name, function_info in function_informations.items():
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
@@ -335,7 +335,7 @@ class TLMUSASourceWrapper:
 
         return init_l2_persistent_map
 
-    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
+    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tirx.Var]) -> str:
         tma_descripter_init = ""
         if self.tma_descriptor_args is None:
             return tma_descripter_init
@@ -534,7 +534,7 @@ class TLMUSASourceWrapper:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tir.Var):
+                    if isinstance(dim, tvm.tirx.Var):
                         unique_push_back(dim.name)
 
         # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
@@ -542,7 +542,7 @@ class TLMUSASourceWrapper:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for stride in buffer.strides:
-                    if isinstance(stride, tvm.tir.Var):
+                    if isinstance(stride, tvm.tirx.Var):
                         unique_push_back(stride.name)
 
         return dynamic_symbolic_set
@@ -580,8 +580,8 @@ class TLMUSASourceWrapper:
 
             def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
                 nonlocal function_params
-                if isinstance(node, tvm.tir.Call):
-                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tir.tvm_call_packed")):
+                if isinstance(node, tvm.tirx.Call):
+                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tirx.tvm_call_packed")):
                         return
                     args = node.args
                     if not args or args[0] != fn:

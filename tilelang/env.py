@@ -60,6 +60,20 @@ for lib in TL_LIBS:
         sys.path.insert(0, lib)
 
 
+def prepend_dll_search_path(paths: list[str]) -> None:
+    """Prepend ``paths`` to ``%PATH%`` on Windows, skipping existing entries."""
+    if not sys.platform.startswith("win32") or not paths:
+        return
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    seen = {os.path.normcase(os.path.abspath(p)) for p in path_entries if p}
+    fresh = [p for p in paths if p and os.path.normcase(os.path.abspath(p)) not in seen]
+    if fresh:
+        os.environ["PATH"] = os.pathsep.join(fresh + path_entries)
+
+
+prepend_dll_search_path(TL_LIBS)
+
+
 def _get_package_version(pkg: str) -> str | None:
     try:
         return importlib.metadata.version(pkg)
@@ -418,6 +432,32 @@ is_cache_enabled = env.is_cache_enabled  # CacheState.is_enabled
 CUDA_HOME = env.CUDA_HOME
 ROCM_HOME = env.ROCM_HOME
 MUSA_HOME = env.MUSA_HOME
+
+
+def get_windows_runtime_dll_dirs() -> list[str]:
+    """Return Windows-only DLL dirs needed by sibling runtime packages."""
+    if not sys.platform.startswith("win32"):
+        return []
+    dirs: list[str] = []
+    try:
+        from tvm_ffi import libinfo as tvm_ffi_libinfo
+
+        dirs.append(os.path.dirname(tvm_ffi_libinfo.find_libtvm_ffi()))
+    except Exception:
+        pass
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("z3")
+    except (ImportError, AttributeError, ValueError):
+        spec = None
+    if spec and spec.submodule_search_locations:
+        z3_root = next(iter(spec.submodule_search_locations), None)
+        if z3_root:
+            z3_lib = os.path.join(z3_root, "lib")
+            if os.path.isdir(z3_lib):
+                dirs.append(z3_lib)
+    return dirs
 
 
 def env_enabled_or_path(name: str) -> bool:

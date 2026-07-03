@@ -7,7 +7,7 @@ import pytest
 
 
 def get_mathop_lines(source, mathop_name):
-    """Extract lines containing the mathop from MUSA source for debugging"""
+    """Extract lines containing the mathop from CUDA source for debugging"""
     lines = source.split("\n")
     relevant_lines = []
     for i, line in enumerate(lines):
@@ -23,7 +23,7 @@ def get_mathop_lines(source, mathop_name):
 def check_fastmath_usage(source, mathop_name, expect_fastmath=False):
     """Check source for fastmath/non-fastmath versions"""
     fastmath_pattern = rf"__({mathop_name}f?)\b"
-    non_fastmath_pattern = rf"(?<!_)_?{mathop_name}"
+    non_fastmath_pattern = rf"(?<!__)({mathop_name}f?)\b"
 
     fastmath_matches = re.findall(fastmath_pattern, source)
     non_fastmath_matches = re.findall(non_fastmath_pattern, source)
@@ -50,7 +50,16 @@ def check_non_fastmath_usage(source, mathop_name):
     check_fastmath_usage(source, mathop_name, expect_fastmath=False)
 
 
-def run_single_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, block_N=32, dtype=T.float32):
+def run_single_arg_mathop_test(
+    mathop_name,
+    mathop_func,
+    M=32,
+    N=32,
+    block_M=32,
+    block_N=32,
+    dtype=T.float32,
+    cuda_mathop_name=None,
+):
     """
     Test single-argument mathops.
     T.exp should generate expf (non-fastmath), T.__exp should generate __expf (fastmath)
@@ -69,26 +78,26 @@ def run_single_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32,
     kernel_no_fastmath = tilelang.compile(
         main,
         out_idx=[1],
-        target="musa",
+        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
         },
     )
-
     source_no_fastmath = kernel_no_fastmath.get_kernel_source()
 
     print(f"\n=== Testing {mathop_name} ===")
     print("FAST_MATH=False:")
 
     # Our tl.* intrinsics actually generate fastmath versions (e.g., __expf)
-    check_fastmath_usage(source_no_fastmath, mathop_name, expect_fastmath=False)
+    cuda_mathop_name = cuda_mathop_name or mathop_name
+    check_fastmath_usage(source_no_fastmath, cuda_mathop_name, expect_fastmath=False)
 
     print(f"✓ {mathop_name} compilation and execution test passed")
 
 
 def run_two_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, block_N=32, dtype=T.float32):
     """
-    Test two-argument mathops to ensure they generate non-fastmath MUSA code.
+    Test two-argument mathops to ensure they generate non-fastmath CUDA code.
     """
 
     @T.prim_func
@@ -107,7 +116,7 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, bl
     kernel_no_fastmath = tilelang.compile(
         main,
         out_idx=[2],
-        target="musa",
+        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
         },
@@ -117,7 +126,7 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, bl
     kernel_fastmath = tilelang.compile(
         main,
         out_idx=[2],
-        target="musa",
+        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         },
@@ -135,8 +144,8 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, bl
 
     # Test numerical correctness
     torch_dtype = dtype.as_torch()
-    a = torch.randn(M, N, device="musa", dtype=torch_dtype)
-    b = torch.randn(M, N, device="musa", dtype=torch_dtype)
+    a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
+    b = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
     # Ensure positive values for functions that need them
     if mathop_name == "pow":
@@ -154,7 +163,7 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, bl
 
 
 def run_abs_test():
-    """Test that abs correctly maps to fabs (not __fabsf) in generated MUSA code"""
+    """Test that abs correctly maps to fabs (not __fabsf) in generated CUDA code"""
     M, N = 32, 32
     block_M, block_N = 32, 32
 
@@ -170,7 +179,7 @@ def run_abs_test():
     kernel = tilelang.compile(
         main,
         out_idx=[1],
-        target="musa",
+        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
         },
@@ -181,7 +190,7 @@ def run_abs_test():
     check_non_fastmath_usage(source, "fabs")
 
     # Test numerical correctness
-    a = torch.randn(M, N, device="musa", dtype=torch.float32)
+    a = torch.randn(M, N, device="cuda", dtype=torch.float32)
     b = kernel(a)
     expected = torch.abs(a)
 
@@ -191,7 +200,7 @@ def run_abs_test():
 
 def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, block_N=32, dtype=T.float32):
     """
-    Test fastmath mathops to ensure they generate fastmath MUSA code (with __ prefix).
+    Test fastmath mathops to ensure they generate fastmath CUDA code (with __ prefix).
     """
 
     @T.prim_func
@@ -207,7 +216,7 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, b
     kernel_fastmath = tilelang.compile(
         main,
         out_idx=[1],
-        target="musa",
+        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         },
@@ -217,24 +226,24 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, b
 
     print(f"\n=== Testing {mathop_name} (fastmath version) ===")
     print("FAST_MATH=True:")
-    # Strip the __ prefix for checking in the MUSA source
-    musa_mathop_name = mathop_name.lstrip("_")
-    check_fastmath_usage(source_fastmath, musa_mathop_name, expect_fastmath=True)
+    # Strip the __ prefix for checking in the CUDA source
+    cuda_mathop_name = mathop_name.lstrip("_")
+    check_fastmath_usage(source_fastmath, cuda_mathop_name, expect_fastmath=True)
 
     # Test numerical correctness
     torch_dtype = dtype.as_torch()
-    a = torch.randn(M, N, device="musa", dtype=torch_dtype)
+    a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
     # Ensure positive values for functions that need them
-    if musa_mathop_name in ["sqrt", "rsqrt", "log", "log2", "log10"]:
+    if cuda_mathop_name in ["sqrt", "rsqrt", "log", "log2", "log10"]:
         a = torch.abs(a) + 0.1
 
     b_fastmath = kernel_fastmath(a)
 
     # Compare with reference implementation
-    if musa_mathop_name == "exp":
+    if cuda_mathop_name == "exp":
         expected = torch.exp(a)
-    elif musa_mathop_name == "log":
+    elif cuda_mathop_name == "log":
         expected = torch.log(a)
     else:
         expected = b_fastmath  # Just check compilation works
@@ -279,15 +288,14 @@ SINGLE_ARG_MATHOPS = [
     ("floor", T.floor),
     ("ceil", T.ceil),
     ("trunc", T.trunc),
-    ("round", T.round),
     ("nearbyint", T.nearbyint),
 ]
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(("name", "func"), SINGLE_ARG_MATHOPS, ids=[name for name, _ in SINGLE_ARG_MATHOPS])
 def test_mathops_generate_no_fastmath(name, func):
-    """Test that our tl.* mathops generate fastmath MUSA code (__expf etc.)"""
+    """Test that our tl.* mathops generate fastmath CUDA code (__expf etc.)"""
     # Based on test results, our tl.* intrinsics actually generate
     # no fastmath versions
     # This appears to be the intended behavior
@@ -295,23 +303,41 @@ def test_mathops_generate_no_fastmath(name, func):
     print(f"✓ {name} test passed")
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("rounding_mode", "func", "cuda_mathop_name"),
+    [
+        ("ties-to-even", lambda x: T.round(x), "nearbyint"),
+        ("ties-away-from-zero", lambda x: T.round(x, "ties-away-from-zero"), "round"),
+    ],
+    ids=["ties-to-even", "ties-away-from-zero"],
+)
+def test_round_modes(rounding_mode, func, cuda_mathop_name):
+    run_single_arg_mathop_test(
+        f"round[{rounding_mode}]",
+        func,
+        dtype=T.float32,
+        cuda_mathop_name=cuda_mathop_name,
+    )
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(("name", "func"), TWO_ARG_MATHOPS, ids=[name for name, _ in TWO_ARG_MATHOPS])
 def test_two_arg_mathops_fastmath(name, func):
     """Test all two-argument mathops"""
     run_two_arg_mathop_test(name, func, dtype=T.float32)
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 def test_abs_maps_to_fabs():
     """Test that abs correctly maps to fabs"""
     run_abs_test()
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(("name", "func"), FASTMATH_MATHOPS, ids=[name for name, _ in FASTMATH_MATHOPS])
 def test_fastmath_versions(name, func):
-    """Test that __exp, __exp10, __log, __log2, __log10, __tan, __cos, __sin generate fastmath MUSA code"""
+    """Test that __exp, __exp10, __log, __log2, __log10, __tan, __cos, __sin generate fastmath CUDA code"""
     run_fastmath_mathop_test(name, func, dtype=T.float32)
     print(f"✓ {name} test passed")
 

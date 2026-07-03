@@ -10,7 +10,7 @@ _make_access_ptr_offset = tvm.get_global_func("tl.op._TestingMakeAccessPtrFromRe
 
 
 def _shared_buffer(shape, strides=None):
-    return tvm.tir.decl_buffer(shape, "float16", strides=strides, scope="shared")
+    return tvm.tirx.decl_buffer(shape, "float16", strides=strides, scope="shared")
 
 
 def _shape_values(shape):
@@ -111,7 +111,7 @@ def test_stride_preserving_remap_keeps_stage_gap_after_rank_collapse():
 
 def test_access_ptr_from_region_uses_buffer_strides():
     buffer = _shared_buffer((2, 16, 16), strides=[2048, 16, 1])
-    region = tvm.tir.BufferRegion(
+    region = tvm.tirx.BufferRegion(
         buffer,
         [
             tvm.ir.Range.from_min_extent(1, 1),

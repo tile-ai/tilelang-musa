@@ -1,7 +1,7 @@
 """Explicit accelerated operations exposed on the TileLang language surface."""
 
-from tvm import tir
-from tvm.tir import PrimExpr
+from tvm import tirx as tir
+from tvm.tirx import PrimExpr
 
 
 def _buffer_region_to_load(region: tir.BufferRegion) -> tir.BufferLoad:

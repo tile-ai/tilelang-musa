@@ -4,13 +4,15 @@
 
 #include "codegen_cutedsl.h"
 #include "backend/cuda/codegen/ptx.h"
+#include "support/check.h"
 #include "target/codegen_utils.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/function.h>
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/index_map.h>
-#include <tvm/tir/op.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/index_map.h>
+#include <tvm/tirx/op.h>
 
 #include <cmath>
 #include <cstdint>
@@ -24,11 +26,13 @@
 
 namespace tvm {
 namespace codegen {
+
+using namespace ffi;
 namespace {
 
 // Helper to check if a statement subtree contains loop break ops
 // (either tl::loop_break() or builtin::break_loop())
-class LoopBreakDetector : public tir::StmtExprVisitor {
+class LoopBreakDetector : public tirx::StmtExprVisitor {
 public:
   bool found = false;
   void VisitExpr_(const CallNode *op) override {
@@ -123,7 +127,8 @@ int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
 
   int64_t total_bytes = dst_total_bits / 8;
   ICHECK(IsValidCPAsyncTransferBytes(total_bytes))
-      << "tl::ptx_cp_async requires a final byte width in {4, 8, 16}, but got "
+      << "tl::ptx_cp_async requires a final PTX byte width in {4, 8, 16}, but "
+         "got "
       << total_bytes;
   return static_cast<int>(total_bytes);
 }
@@ -241,8 +246,8 @@ std::string DTypeToString(DataType t) {
 
 void CodeGenTileLangCuTeDSL::PrintType(DataType t,
                                        std::ostream &os) { // NOLINT(*)
-  CHECK(t.is_scalar()) << "Should not print a non-scalar type in CuTeDSL: "
-                       << t;
+  ICHECK(t.is_scalar()) << "Should not print a non-scalar type in CuTeDSL: "
+                        << t;
   os << DTypeToString(t);
 }
 
@@ -291,7 +296,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
       // For CuTeDSL, use Python's float.fromhex() with hexfloat for full
       // precision
       PrintType(op->dtype, temp);
-      temp << "(float.fromhex('" << std::hexfloat << op->value << "'))";
+      temp << "(float.fromhex('" << FlexibleHexFormat(op->value) << "'))";
     }
     MarkConst(temp.str());
     os << temp.str();
@@ -436,7 +441,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const MaxNode *op,
  * - Emits to `os` and the internal codegen output stream.
  * - May set internal feature flags (e.g., need_cooperative_groups_).
  * - May open/close SSA scopes and mutate internal variable mappings.
- * - May call LOG(FATAL) / CHECK / ICHECK on invalid or unsupported argument
+ * - May call LOG(FATAL) / ICHECK on invalid or unsupported argument
  *   patterns.
  *
  * @param op The call node to generate code for; the function inspects op->op
@@ -592,8 +597,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // do nothing
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
-    ICHECK_GE(op->args.size(), 5);
-    auto pol = op->args[op->args.size() - 3].as<IntImmNode>();
+    ICHECK_GE(op->args.size(), 2);
+    auto pol = op->args[op->args.size() - 1].as<IntImmNode>();
     ICHECK(pol) << "Eviction policy must be IntImm";
     ICHECK_GE(pol->value, 0);
     ICHECK_LT(static_cast<size_t>(pol->value), eviction_policy_names_.size());
@@ -609,7 +614,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ss << PrintExpr_(desc) << ", ";
     ss << PrintExpr_(op->args[1]) << ", ";
     ss << PrintExpr_(op->args[2]) << ", (";
-    for (size_t i = 3; i < op->args.size() - 3; i++) {
+    for (size_t i = 3; i < op->args.size() - 1; i++) {
       if (i > 3)
         ss << ", ";
       ss << PrintExpr_(op->args[i]);
@@ -622,18 +627,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tma_store())) {
     std::stringstream ss;
     // Check minimum argument count (desc, data, at least one coord,
-    // need_reduce, eviction, inner cache policy, outer cache policy)
-    ICHECK_GE(op->args.size(), 6) << "tma_store requires at least 6 arguments "
+    // need_reduce, eviction)
+    ICHECK_GE(op->args.size(), 4) << "tma_store requires at least 4 arguments "
                                      "(desc, data, coords..., need_reduce, "
-                                     "eviction_policy, inner_cache_policy, "
-                                     "outer_cache_policy), got "
+                                     "eviction_policy), got "
                                   << op->args.size();
 
     // Safely extract need_reduce flag
-    auto need_reduce_ptr = op->args[op->args.size() - 4].as<IntImmNode>();
+    auto need_reduce_ptr = op->args[op->args.size() - 2].as<IntImmNode>();
     ICHECK(need_reduce_ptr)
-        << "tma_store need_reduce flag (args[-4]) must be IntImm, got "
-        << op->args[op->args.size() - 4]->GetTypeKey();
+        << "tma_store need_reduce flag (args[-2]) must be IntImm, got "
+        << op->args[op->args.size() - 2]->GetTypeKey();
     auto need_reduce = need_reduce_ptr->value;
     if (need_reduce) {
       // Use tma_reduce for reduce mode
@@ -641,7 +645,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       auto desc = op->args[0];
       ss << PrintExpr_(desc) << ", ";
       ss << PrintExpr_(op->args[1]) << ", (";
-      for (size_t i = 2; i < op->args.size() - 4; i++) {
+      for (size_t i = 2; i < op->args.size() - 2; i++) {
         if (i > 2)
           ss << ", ";
         ss << PrintExpr_(op->args[i]);
@@ -653,10 +657,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     }
 
     // Safely extract and validate eviction policy index
-    auto eviction_idx_ptr = op->args[op->args.size() - 3].as<IntImmNode>();
+    auto eviction_idx_ptr = op->args[op->args.size() - 1].as<IntImmNode>();
     ICHECK(eviction_idx_ptr)
-        << "tma_store eviction policy (args[-3]) must be IntImm, got "
-        << op->args[op->args.size() - 3]->GetTypeKey();
+        << "tma_store eviction policy (args[-1]) must be IntImm, got "
+        << op->args[op->args.size() - 1]->GetTypeKey();
     ICHECK_GE(eviction_idx_ptr->value, 0)
         << "tma_store eviction policy index must be >= 0, got "
         << eviction_idx_ptr->value;
@@ -670,7 +674,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     auto desc = op->args[0];
     ss << PrintExpr_(desc) << ", ";
     ss << PrintExpr_(op->args[1]) << ", (";
-    for (size_t i = 2; i < op->args.size() - 4; i++) {
+    for (size_t i = 2; i < op->args.size() - 2; i++) {
       if (i > 2)
         ss << ", ";
       ss << PrintExpr_(op->args[i]);
@@ -723,6 +727,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string func_name =
         is_inc ? "tl.warpgroup_reg_alloc" : "tl.warpgroup_reg_dealloc";
     stream << func_name << "(" << nreg << ")\n";
+  } else if (op->op.same_as(tl::annotate_producer_reg_dealloc()) ||
+             op->op.same_as(tl::annotate_consumer_reg_alloc())) {
+    return;
   } else if (op->op.same_as(tl::wait_wgmma())) {
     PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
@@ -733,6 +740,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::sync_grid())) {
     PrintIndent();
     stream << "tl.sync_grid()\n";
+  } else if (op->op.same_as(tl::pdl_trigger())) {
+    PrintIndent();
+    stream << "tl.griddepcontrol_launch_dependents()\n";
+  } else if (op->op.same_as(tl::pdl_sync())) {
+    PrintIndent();
+    stream << "tl.griddepcontrol_wait()\n";
   } else if (op->op.same_as(tl::loop_break()) ||
              op->op.same_as(builtin::break_loop())) {
     if (in_break_loop_) {
@@ -962,10 +975,44 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << "[0] + " << c_offset << ", " << desc_val << ", " << scale_out
            << ", " << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
            << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_ld())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool pack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = PrintExpr_(op->args[3]);
+    std::string col_offset = PrintExpr_(op->args[4]);
+    std::string dst_ptr = PrintExpr_(op->args[5]);
+    PrintIndent();
+    stream << "tl.tcgen05_ld_32dp" << inst_bits << "bNx(" << chunks << ", "
+           << (pack16 ? "True" : "False") << ", " << tmem_start_col << ", "
+           << col_offset << ", " << dst_ptr << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_st())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool unpack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = PrintExpr_(op->args[3]);
+    std::string col_offset = PrintExpr_(op->args[4]);
+    std::string src_ptr = PrintExpr_(op->args[5]);
+    PrintIndent();
+    stream << "tl.tcgen05_st_32dp" << inst_bits << "bNx(" << chunks << ", "
+           << (unpack16 ? "True" : "False") << ", " << tmem_start_col << ", "
+           << col_offset << ", " << src_ptr << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     PrintIndent();
     stream << "tl.tcgen05_mma_arrive(" << PrintExpr_(op->args[0]) << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_before_thread_sync())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_before_thread_sync expects no arguments";
+    PrintIndent();
+    stream << "tl.tcgen05_before_thread_sync()\n";
+  } else if (op->op.same_as(tl::tcgen05_after_thread_sync())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_after_thread_sync expects no arguments";
+    PrintIndent();
+    stream << "tl.tcgen05_after_thread_sync()\n";
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -1016,7 +1063,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       PrimExpr index = load->indices[0];
       if (const RampNode *node = index.as<RampNode>(); node) {
         auto *p_stride = as_const_int(node->stride);
-        CHECK(p_stride);
+        ICHECK(p_stride);
         ICHECK_EQ(*p_stride, 1) << "reinterpret expects contiguous elements";
         index = node->base;
       }
@@ -1040,8 +1087,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
                                  << op->args.size();
 
     auto op_instance = Downcast<StringImm>(op->args[0]);
-    PrintCallExtern_(GetType(tvm::ffi::GetRef<PrimExpr>(op)),
-                     op_instance->value, op->args, true, os);
+    PrintCallExtern_(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                     op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::get_lane_idx())) {
@@ -1438,7 +1485,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
       true_expr = sel->true_value;
       false_expr = sel->false_value;
     } else if (auto call = expr.as<CallNode>();
-               call && call->op.same_as(tir::builtin::if_then_else())) {
+               call && call->op.same_as(tirx::builtin::if_then_else())) {
       value_is_conditional = true;
       cond_expr = call->args[0];
       true_expr = call->args[1];
@@ -1678,12 +1725,12 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   }
 }
 
-void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
-  ICHECK(!is_zero(op->condition));
-  std::string vid = AllocVarID(op->buffer_var.get());
+void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
+  DataType alloc_dtype = op->buffer->dtype;
+  std::string vid = AllocVarID(op->buffer->data.get());
   PrintIndent();
-  std::string scope = GetPtrStorageScope(op->buffer_var);
-  alloc_storage_scope_[op->buffer_var.get()] = scope;
+  std::string scope = GetPtrStorageScope(op->buffer->data);
+  alloc_storage_scope_[op->buffer->data.get()] = scope;
 
   if (scope == "local.descriptor.wgmma") {
     stream << vid << " = tl.GmmaDescriptor()\n";
@@ -1693,33 +1740,36 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     stream << vid << " = 0\n";
   } else if (scope == "shared.dyn") {
     stream << vid << " = tl.make_tensor(tl.get_dyn_smem(";
-    PrintType(op->dtype, stream);
+    PrintType(alloc_dtype, stream);
     // there is no bound check for Tensor access, so just set shape to 1
     stream << ", alignment=1024), (1,))\n";
   } else {
-    size_t constant_size = op->ConstantAllocationSize();
-    ICHECK_GT(constant_size, 0)
+    std::optional<int64_t> opt_size =
+        GetRef<AllocBuffer>(op).ConstantAllocationSize();
+    ICHECK(opt_size.has_value() && opt_size.value() > 0)
         << "Can only handle constant size stack allocation for now, but get "
-        << constant_size << " for " << op->buffer_var->name_hint;
+        << (opt_size.has_value() ? opt_size.value() : 0) << " for "
+        << op->buffer->data->name_hint;
+    size_t constant_size = static_cast<size_t>(opt_size.value());
 
     if (scope == "shared") {
       stream << vid << " = tl.make_tensor(tl.alloc_smem(";
-      PrintType(op->dtype, stream);
+      PrintType(alloc_dtype, stream);
       stream << ", " << constant_size << "), (" << constant_size << ",))\n";
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
       stream << vid << " = tl.alloc_smem(cutlass.Uint64, size_in_elems="
              << constant_size << ")\n";
     } else if (scope == "local") {
       stream << vid << " = tl.make_rmem_tensor((" << constant_size << "),";
-      PrintType(op->dtype, stream);
+      PrintType(alloc_dtype, stream);
       stream << ")\n";
     } else if (scope == "local.var") {
-      PrimExpr init = tir::make_const(op->dtype, 0);
+      PrimExpr init = tirx::make_const(alloc_dtype, 0);
       auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
       if (init_it != op->annotations.end()) {
         PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
-        if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
-          user_init = tir::Cast(op->dtype, user_init);
+        if (!user_init.dtype().is_void() && user_init.dtype() != alloc_dtype) {
+          user_init = tirx::Cast(alloc_dtype, user_init);
         }
         init = user_init;
       }
@@ -1729,12 +1779,11 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     }
   }
 
-  RegisterHandleType_(op->buffer_var.get(), op->dtype);
-  PrintStmt_(op->body);
+  RegisterHandleType_(op->buffer->data.get(), alloc_dtype);
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tir::attr::thread_extent) {
+  if (op->attr_key == tirx::attr::thread_extent) {
     IterVar iv = Downcast<IterVar>(op->node);
     if (!iv->thread_tag.empty()) {
       if (!var_idmap_.count(iv->var.get())) {
@@ -1744,14 +1793,23 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
     VisitStmt(op->body);
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
-    const StringImmNode *pattern = op->value.as<StringImmNode>();
-    ICHECK(pattern);
-    std::string call_str = pattern->value;
-    // replace :: with . and replace < with ( and replace > with )
-    ReplaceAll(call_str, "::", ".");
-    ReplaceAll(call_str, "<", "(");
-    ReplaceAll(call_str, ">", ")");
-    this->stream << "blockIdx = " << call_str << "\n";
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tirx::builtin::tvm_tuple()) &&
+          call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        ICHECK(name_node && size_node) << "threadblock_swizzle_pattern expects "
+                                          "tvm_tuple(device_func, panel_size)";
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    }
+    ICHECK(!func_name.empty() && panel_size > 0)
+        << "threadblock_swizzle_pattern: failed to extract func_name and "
+           "panel_size";
+    this->stream << "blockIdx = tl." << func_name << "(" << panel_size << ")\n";
     this->VisitStmt(op->body);
   } else if (op->attr_key == "pragma_unroll_factor") {
     const IntImmNode *factor = op->value.as<IntImmNode>();
@@ -1809,7 +1867,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
     return;
   }
 
-  if (op->kind != tir::ForKind::kUnrolled) {
+  if (op->kind != tirx::ForKind::kUnrolled) {
     CodeGenTileLangPY::VisitStmt_(op);
     return;
   }
@@ -1904,9 +1962,6 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const EvaluateNode *op) {
   if (is_const_int(op->value))
     return;
   const CallNode *call = op->value.as<CallNode>();
-  if (call && call->op.same_as(builtin::tvm_global_barrier_kinit())) {
-    LOG(FATAL) << "Currently unsupported op: " << call->op;
-  }
   if (call && (call->op.same_as(tvm::tl::device_assert()))) {
     std::string cond = RemoveOutermostParentheses(PrintExpr_(call->args[0]));
     PrintIndent();
@@ -2015,8 +2070,8 @@ void CodeGenTileLangCuTeDSL::PrintBinaryIntrinsic_(
 }
 
 void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
-                                              ffi::String global_symbol,
-                                              const ffi::Array<PrimExpr> &args,
+                                              String global_symbol,
+                                              const Array<PrimExpr> &args,
                                               bool skip_first_arg,
                                               std::ostream &os) { // NOLINT(*)
   DataType ret_dtype = GetRuntimeDataType(ret_type);

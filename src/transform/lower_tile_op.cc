@@ -3,14 +3,16 @@
  * \brief Lower the tile op for further codegen.
  */
 
-#include <optional>
+#include "support/check.h"
 #include <string>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 #include <unordered_map>
 #include <vector>
 
@@ -33,218 +35,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
-
-static bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
-                        arith::Analyzer *analyzer) {
-  if (lhs.size() != rhs.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < lhs.size(); ++i) {
-    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-static bool ShapesStructurallyEqual(const Array<PrimExpr> &lhs,
-                                    const Array<PrimExpr> &rhs) {
-  if (lhs.size() != rhs.size()) {
-    return false;
-  }
-  StructuralEqual equal;
-  for (size_t i = 0; i < lhs.size(); ++i) {
-    if (!equal(lhs[i], rhs[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-static bool IsProvenSubdomainShape(const Array<PrimExpr> &sub_shape,
-                                   const Array<PrimExpr> &base_shape,
-                                   arith::Analyzer *analyzer) {
-  if (sub_shape.size() != base_shape.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < sub_shape.size(); ++i) {
-    if (analyzer->CanProveEqual(sub_shape[i], base_shape[i])) {
-      continue;
-    }
-    if (!analyzer->CanProve(sub_shape[i] <= base_shape[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-static std::optional<int64_t> ConstProductShape(const Array<PrimExpr> &shape);
-
-static bool IsSharedLayoutOutputExtentCompatible(const Buffer &buffer,
-                                                 const Layout &layout) {
-  if (!IsSharedBuffer(buffer)) {
-    return true;
-  }
-  auto buffer_extent = ConstProductShape(buffer->shape);
-  auto layout_extent = ConstProductShape(layout->OutputShape());
-  if (!buffer_extent.has_value() || !layout_extent.has_value() ||
-      layout_extent.value() <= 0) {
-    return false;
-  }
-  if (layout_extent.value() > buffer_extent.value()) {
-    return false;
-  }
-  return buffer_extent.value() % layout_extent.value() == 0;
-}
-
-static Layout ExpandLayoutToBufferSubdomain(const Buffer &buffer,
-                                            const Layout &layout,
-                                            size_t leading_ndim) {
-  Array<PrimExpr> expanded_forward;
-  expanded_forward.reserve(leading_ndim + layout->GetForwardIndex().size());
-  for (size_t i = 0; i < leading_ndim; ++i) {
-    expanded_forward.push_back(InputPlaceholder(i));
-  }
-
-  Map<Var, PrimExpr> shifted_vars;
-  for (size_t i = 0; i < layout->InputShape().size(); ++i) {
-    shifted_vars.Set(InputPlaceholder(i), InputPlaceholder(i + leading_ndim));
-  }
-  for (const auto &e : layout->GetForwardIndex()) {
-    expanded_forward.push_back(Substitute(e, shifted_vars));
-  }
-  return Layout(buffer->shape, expanded_forward);
-}
-
-static Layout ExpandLayoutToBufferShape(const Buffer &buffer,
-                                        const Layout &layout) {
-  if (IsFragmentBuffer(buffer)) {
-    return layout;
-  }
-  if (!layout.defined() ||
-      buffer->shape.size() <= layout->InputShape().size()) {
-    if (layout.defined() && buffer->shape.size() > 2 &&
-        buffer->shape.size() == layout->InputShape().size()) {
-      arith::Analyzer analyzer;
-      auto input_elems = ConstProductShape(layout->InputShape());
-      auto output_elems = ConstProductShape(layout->OutputShape());
-      bool output_preserves_stage =
-          !layout->OutputShape().empty() &&
-          StructuralEqual()(layout->OutputShape()[0], buffer->shape[0]);
-      if (input_elems.has_value() && output_elems.has_value() &&
-          output_elems.value() < input_elems.value() &&
-          !output_preserves_stage &&
-          IsProvenSubdomainShape(buffer->shape, layout->InputShape(),
-                                 &analyzer)) {
-        Array<PrimExpr> lifted_forward;
-        lifted_forward.push_back(InputPlaceholder(0));
-        for (const auto &e : layout->GetForwardIndex()) {
-          lifted_forward.push_back(e);
-        }
-        Layout lifted_layout = Layout(layout->InputShape(), lifted_forward);
-        if (IsSharedLayoutOutputExtentCompatible(buffer, lifted_layout)) {
-          return lifted_layout;
-        }
-      }
-    }
-    return layout;
-  }
-
-  size_t leading_ndim = buffer->shape.size() - layout->InputShape().size();
-  Array<PrimExpr> leading_shape;
-  Array<PrimExpr> trailing_shape;
-  for (size_t i = 0; i < leading_ndim; ++i) {
-    leading_shape.push_back(buffer->shape[i]);
-  }
-  for (size_t i = leading_ndim; i < buffer->shape.size(); ++i) {
-    trailing_shape.push_back(buffer->shape[i]);
-  }
-
-  arith::Analyzer analyzer;
-  if (!ShapesEqual(trailing_shape, layout->InputShape(), &analyzer)) {
-    if (IsProvenSubdomainShape(trailing_shape, layout->InputShape(),
-                               &analyzer)) {
-      Layout expanded_layout =
-          ExpandLayoutToBufferSubdomain(buffer, layout, leading_ndim);
-      if (IsSharedLayoutOutputExtentCompatible(buffer, expanded_layout)) {
-        return expanded_layout;
-      }
-    }
-    return layout;
-  }
-  Layout expanded_layout = layout->Expand(leading_shape);
-  if (!IsSharedLayoutOutputExtentCompatible(buffer, expanded_layout)) {
-    return layout;
-  }
-  return expanded_layout;
-}
-
-static PrimExpr ProductShape(const Array<PrimExpr> &shape, size_t begin,
-                             size_t end) {
-  PrimExpr product = Integer(1);
-  for (size_t i = begin; i < end; ++i) {
-    product = product * shape[i];
-  }
-  return product;
-}
-
-static std::optional<int64_t> ConstProductShape(const Array<PrimExpr> &shape) {
-  int64_t product = 1;
-  for (const PrimExpr &dim : shape) {
-    const auto *imm = dim.as<IntImmNode>();
-    if (imm == nullptr) {
-      return std::nullopt;
-    }
-    product *= imm->value;
-  }
-  return product;
-}
-
-static std::optional<Array<PrimExpr>>
-PreserveSharedStageStrides(const Buffer &buffer,
-                           const Array<PrimExpr> &output_shape) {
-  if (!IsSharedBuffer(buffer) || buffer->strides.empty()) {
-    return std::nullopt;
-  }
-  if (buffer->strides.size() == output_shape.size() &&
-      ShapesStructurallyEqual(buffer->shape, output_shape)) {
-    return buffer->strides;
-  }
-  if (buffer->shape.empty() || output_shape.size() < 2 ||
-      buffer->strides.empty() ||
-      !StructuralEqual()(buffer->shape[0], output_shape[0])) {
-    return std::nullopt;
-  }
-
-  Array<PrimExpr> tail_shape;
-  tail_shape.reserve(output_shape.size() - 1);
-  for (size_t i = 1; i < output_shape.size(); ++i) {
-    tail_shape.push_back(output_shape[i]);
-  }
-  auto tail_extent = ConstProductShape(tail_shape);
-  if (!tail_extent.has_value() || tail_extent.value() <= 0) {
-    return std::nullopt;
-  }
-  const auto *stage_stride = buffer->strides[0].as<IntImmNode>();
-  if (stage_stride != nullptr && stage_stride->value < tail_extent.value()) {
-    return std::nullopt;
-  }
-
-  Array<PrimExpr> output_strides;
-  output_strides.reserve(output_shape.size());
-  output_strides.push_back(buffer->strides[0]);
-  std::vector<PrimExpr> tail_strides(output_shape.size() - 1);
-  PrimExpr stride = Integer(1);
-  for (int i = static_cast<int>(output_shape.size()) - 1; i >= 1; --i) {
-    tail_strides[i - 1] = stride;
-    stride = stride * output_shape[i];
-  }
-  for (const PrimExpr &tail_stride : tail_strides) {
-    output_strides.push_back(tail_stride);
-  }
-  return output_strides;
-}
+using namespace tirx;
+using namespace ffi;
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
@@ -271,13 +63,12 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
   if (IsSharedBuffer(buffer)) {
+    int replicate_extent = 1;
     Array<PrimExpr> buffer_shape = buffer->shape;
-    int64_t buffer_extent = 1;
-    int64_t layout_extent = 1;
+    int buffer_extent = 1;
+    int layout_extent = 1;
     for (size_t i = 0; i < buffer_shape.size(); i++) {
       auto shape = buffer_shape[i].as<IntImmNode>();
-      ICHECK(shape) << "Shared buffer shape must be constant integer, but got: "
-                    << buffer_shape[i];
       buffer_extent *= shape->value;
     }
     for (size_t i = 0; i < layout_shape.size(); i++) {
@@ -286,29 +77,14 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                     << layout_shape[i];
       layout_extent *= shape->value;
     }
-
-    ICHECK_GT(layout_extent, 0);
-    int64_t replicate_extent = 1;
-    if (buffer_extent > layout_extent) {
-      ICHECK_EQ(buffer_extent % layout_extent, 0)
-          << "Shared layout output extent must divide buffer extent, buffer "
-          << buffer->name << " has extent " << buffer_extent
-          << ", layout extent " << layout_extent;
-      replicate_extent = buffer_extent / layout_extent;
-    }
+    replicate_extent = buffer_extent / layout_extent;
     if (replicate_extent > 1) {
-      output_shape.insert(output_shape.begin(),
-                          IntImm(DataType::Int(32), replicate_extent));
+      output_shape.insert(output_shape.begin(), replicate_extent);
     }
   }
-  Array<PrimExpr> output_strides;
-  if (auto preserved_strides =
-          PreserveSharedStageStrides(buffer, output_shape)) {
-    output_strides = preserved_strides.value();
-  }
-  return Buffer(new_var, buffer->dtype, output_shape, output_strides,
-                buffer->elem_offset, buffer->name, buffer->data_alignment,
-                buffer->offset_factor, buffer->buffer_type);
+  return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
+                buffer->name, buffer->data_alignment, buffer->offset_factor,
+                buffer->buffer_type);
 }
 
 // The function `makeBufferWithLayout` creates a new Buffer object based on the
@@ -329,8 +105,8 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
-  Stmt VisitStmt_(const BlockNode *op) final {
-    auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    auto block = Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     if (op->annotations.count(attr::kLayoutMap)) {
       block.CopyOnWrite()->annotations.Set(attr::kLayoutMap, layout_remap_);
     }
@@ -338,75 +114,6 @@ private:
   }
 
   Map<Buffer, Layout> layout_remap_;
-};
-
-class BufferGemmCollector : public StmtExprVisitor {
-public:
-  BufferGemmCollector() { Clear(); }
-
-  void Clear() { buffer_var_gemm_.clear(); }
-
-  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
-
-  Array<Var> GetBufferVarGemm() { return buffer_var_gemm_; }
-
-private:
-  Optional<Var> ExtractBufferVarFromArg(const PrimExpr &arg) const {
-    if (const auto *call = arg.as<CallNode>()) {
-      // Legacy path: T.tvm_access_ptr(dtype, data, offset, extent, rw_mask)
-      if (call->op.same_as(builtin::tvm_access_ptr())) {
-        if (const auto *var = call->args[1].as<VarNode>()) {
-          return tvm::ffi::GetRef<Var>(var);
-        }
-      }
-      // Compatibility path: tl.access_ptr(BufferLoad(...), extent, rw_mask)
-      if (call->op.same_as(tl::access_ptr())) {
-        if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-          return load->buffer->data;
-        }
-      }
-      // Compatibility path: address_of(BufferLoad(...))
-      if (call->op.same_as(builtin::address_of())) {
-        if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-          return load->buffer->data;
-        }
-      }
-    }
-
-    // Current GEMM path: BufferLoad/BufferRegion/tl.region(...)
-    if (IsBufferLikeExpr(arg)) {
-      BufferRegion region = NormalizeToBufferRegion(arg);
-      return region->buffer->data;
-    }
-    return Optional<Var>();
-  }
-
-  void VisitStmt_(const EvaluateNode *op) final {
-    const CallNode *call_node = op->value.as<CallNode>();
-    if (!call_node) {
-      return;
-    }
-    auto call = Downcast<Call>(call_node);
-    if (call->op.same_as(Gemm::Get()) || call->op.same_as(GemmSP::Get())) {
-      ICHECK_GE(call->args.size(), 3U)
-          << "GEMM call expects at least 3 args, but got " << call->args.size();
-
-      Optional<Var> srcA_buffer_var = ExtractBufferVarFromArg(call->args[0]);
-      Optional<Var> srcB_buffer_var = ExtractBufferVarFromArg(call->args[1]);
-      Optional<Var> dst_buffer_var = ExtractBufferVarFromArg(call->args[2]);
-      ICHECK(srcA_buffer_var.defined())
-          << "Unable to resolve GEMM arg0 to a buffer var: " << call->args[0];
-      ICHECK(srcB_buffer_var.defined())
-          << "Unable to resolve GEMM arg1 to a buffer var: " << call->args[1];
-      ICHECK(dst_buffer_var.defined())
-          << "Unable to resolve GEMM arg2 to a buffer var: " << call->args[2];
-      buffer_var_gemm_.push_back(srcA_buffer_var.value());
-      buffer_var_gemm_.push_back(srcB_buffer_var.value());
-      buffer_var_gemm_.push_back(dst_buffer_var.value());
-    }
-  }
-
-  Array<Var> buffer_var_gemm_;
 };
 
 /*!
@@ -427,26 +134,21 @@ public:
   static Stmt Substitute(const Stmt &stmt, Map<Buffer, Buffer> buffer_remap) {
     arith::Analyzer analyzer;
     RemapBufferRewriter substituter(&analyzer);
-    substituter.buffer_remap_ = std::move(buffer_remap);
+    substituter.remap_ = std::move(buffer_remap);
     return substituter.VisitStmt(stmt);
   }
 
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     if (op->annotations.count(attr::kSafeValueMap)) {
       return RewritePaddingMap(op);
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  /*!
-   * \brief Rewrite the padding map annotation of a block.
-   * \param op The block node to rewrite.
-   * \return The rewritten block.
-   */
-  Stmt RewritePaddingMap(const BlockNode *op) {
+  Stmt RewritePaddingMap(const SBlockNode *op) {
     auto safe_value_map = op->annotations.Get(attr::kSafeValueMap);
     if (!safe_value_map) {
       LOG(FATAL) << "Padding map annotation is missing";
@@ -456,30 +158,20 @@ private:
     Map<Var, PrimExpr> new_safe_value_map = RemapPaddingMap(
         Downcast<Map<Var, PrimExpr>>(safe_value_map.value()), var_remap);
 
-    auto block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
     block_ptr->annotations.Set(attr::kSafeValueMap, new_safe_value_map);
     return block;
   }
 
-  /*!
-   * \brief Create a mapping from old variables to new variables based on buffer
-   * remapping. \return A map from old variables to new variables.
-   */
   Map<Var, Var> CreateVarRemap() const {
     Map<Var, Var> var_remap;
-    for (const auto &[buffer, buffer_remap] : buffer_remap_) {
-      var_remap.Set(buffer->data, buffer_remap->data);
+    for (const auto &[buffer, remapped] : remap_) {
+      var_remap.Set(buffer->data, remapped->data);
     }
     return var_remap;
   }
 
-  /*!
-   * \brief Remap the padding map using the variable remapping.
-   * \param safe_value_map The original padding map.
-   * \param var_remap The variable remapping.
-   * \return The remapped padding map.
-   */
   Map<Var, PrimExpr> RemapPaddingMap(const Map<Var, PrimExpr> &safe_value_map,
                                      const Map<Var, Var> &var_remap) const {
     Map<Var, PrimExpr> new_safe_value_map;
@@ -493,7 +185,7 @@ private:
     return new_safe_value_map;
   }
 
-  Map<Buffer, Buffer> buffer_remap_;
+  Map<Buffer, Buffer> remap_;
 };
 
 /*! \brief Rewrite the synthetic CPU fallback thread variable to a constant.
@@ -545,11 +237,6 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
-    // Track GEMM-related buffers so copy lowering can avoid incompatible
-    // one-dimensional TMA paths for swizzled GEMM tensors.
-    BufferGemmCollector collector;
-    collector.Collect(f->body);
-    substituter.buffer_var_gemm_ = collector.GetBufferVarGemm();
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -580,10 +267,10 @@ public:
 
       Array<PrimExpr> counts;
       counts.reserve(substituter.mbarrier_count_);
-      for (auto c : substituter.mbarrier_arrive_counts_) {
+      for (auto c : substituter.mbarrier_arrive_counts_)
         counts.push_back(IntImm(DataType::Int(32), c));
-      }
-      // Walk the body to find the inner "tilelang_root" BlockRealize
+
+      // Walk the body to find the inner "tilelang_root" SBlockRealize
       // (inside the threadIdx.x scope) and inject the barrier buffer
       // + barrier_init annotation.
       struct RootBlockInjector : public StmtMutator {
@@ -591,14 +278,14 @@ public:
         Array<PrimExpr> arrive_counts;
         bool injected{false};
 
-        Stmt VisitStmt_(const BlockRealizeNode *op) final {
+        Stmt VisitStmt_(const SBlockRealizeNode *op) final {
           if (injected)
             return StmtMutator::VisitStmt_(op);
           if (op->block->name_hint == "root") {
             return StmtMutator::VisitStmt_(op);
           }
           injected = true;
-          Block block = op->block;
+          SBlock block = op->block;
           auto block_ptr = block.CopyOnWrite();
           block_ptr->alloc_buffers.push_back(barrier_buf);
           Map<Var, Array<PrimExpr>> barrier_init_map;
@@ -608,18 +295,19 @@ public:
           }
           barrier_init_map.Set(barrier_buf->data, arrive_counts);
           block_ptr->annotations.Set("barrier_init", barrier_init_map);
-          auto realize = tvm::ffi::GetRef<BlockRealize>(op);
+          auto realize = GetRef<SBlockRealize>(op);
           auto realize_ptr = realize.CopyOnWrite();
           realize_ptr->block = block;
           return realize;
         }
       };
+
       RootBlockInjector injector;
       injector.barrier_buf = mbar_buf;
       injector.arrive_counts = counts;
       fptr->body = injector(fptr->body);
       ICHECK(injector.injected)
-          << "Failed to find root BlockRealize for barrier injection";
+          << "Failed to find root SBlockRealize for barrier injection";
     }
 
     if (TargetIsCPU(substituter.target_)) {
@@ -636,64 +324,7 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
-  void SetLayoutSQMMAOne(const Layout &layout, Bool is_sqmma) {
-    if (layout_sqmma_.count(layout)) {
-      ICHECK(layout_sqmma_[layout]->value == is_sqmma->value)
-          << "sqmma mismatch for layout " << layout->DebugOutput();
-    } else {
-      layout_sqmma_.Set(layout, is_sqmma);
-    }
-  }
-
-  void SetLayoutSQMMA(const Layout &layout, Bool is_sqmma) {
-    SetLayoutSQMMAOne(layout, is_sqmma);
-    for (const auto &[original, expanded] : layout_aliases_) {
-      if (original.same_as(layout)) {
-        SetLayoutSQMMAOne(expanded, is_sqmma);
-      }
-    }
-  }
-
-  void SetLayoutKMajorOne(const Layout &layout, Bool k_major) {
-    if (layout_k_major_.count(layout)) {
-      ICHECK(layout_k_major_[layout]->value == k_major->value)
-          << "k_major mismatch for layout " << layout->DebugOutput();
-    } else {
-      layout_k_major_.Set(layout, k_major);
-    }
-  }
-
-  void SetLayoutKMajor(const Layout &layout, Bool k_major) {
-    SetLayoutKMajorOne(layout, k_major);
-    for (const auto &[original, expanded] : layout_aliases_) {
-      if (original.same_as(layout)) {
-        SetLayoutKMajorOne(expanded, k_major);
-      }
-    }
-  }
-
-  void SetLayoutExprHint(Map<Layout, PrimExpr> *dst, const Layout &layout,
-                         PrimExpr value, const char *hint_name) {
-    if (dst->count(layout)) {
-      ICHECK(StructuralEqual()((*dst)[layout], value))
-          << hint_name << " mismatch for layout " << layout->DebugOutput();
-    } else {
-      dst->Set(layout, value);
-    }
-  }
-
-  void SetLayoutExprHintWithAliases(Map<Layout, PrimExpr> *dst,
-                                    const Layout &layout, PrimExpr value,
-                                    const char *hint_name) {
-    SetLayoutExprHint(dst, layout, value, hint_name);
-    for (const auto &[original, expanded] : layout_aliases_) {
-      if (original.same_as(layout)) {
-        SetLayoutExprHint(dst, expanded, value, hint_name);
-      }
-    }
-  }
-
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
       buffer_map_.insert({buffer->data, buffer});
@@ -704,18 +335,15 @@ private:
     for (auto buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
+    Map<Var, Layout> vmap;
     if (op->annotations.count(attr::kLayoutMap)) {
       auto layout_map = op->annotations.at(attr::kLayoutMap)
                             .as<Map<Buffer, Layout>>()
                             .value();
       for (auto [buffer, layout] : layout_map) {
-        Layout expanded_layout = ExpandLayoutToBufferShape(buffer, layout);
-        if (!StructuralEqual()(expanded_layout, layout)) {
-          layout_aliases_.push_back({layout, expanded_layout});
-        }
-        buffer_remap_.Set(
-            buffer, makeBufferWithLayout(buffer, expanded_layout, var_remap_));
-        layout_map_.Set(buffer, expanded_layout);
+        buffer_remap_.Set(buffer,
+                          makeBufferWithLayout(buffer, layout, var_remap_));
+        layout_map_.Set(buffer, layout);
       }
     }
     if (op->annotations.count("layout_override_seq")) {
@@ -736,39 +364,54 @@ private:
       }
     }
     if (op->annotations.count(attr::kKMajorMap)) {
-      auto k_major_map =
-          op->annotations.at(attr::kKMajorMap).as<Map<Layout, Bool>>().value();
-      for (const auto &[layout, k_major] : k_major_map) {
-        SetLayoutKMajor(layout, k_major);
-      }
+      layout_k_major_ =
+          Downcast<Map<Layout, Bool>>(op->annotations.at(attr::kKMajorMap));
     }
     if (op->annotations.count(attr::kSqmmaMap)) {
-      auto sqmma_map =
-          op->annotations.at(attr::kSqmmaMap).as<Map<Layout, Bool>>().value();
-      for (const auto &[layout, is_sqmma] : sqmma_map) {
-        SetLayoutSQMMA(layout, is_sqmma);
-      }
+      layout_sqmma_ =
+          Downcast<Map<Layout, Bool>>(op->annotations.at(attr::kSqmmaMap));
     }
     if (op->annotations.count(attr::kSqmmaInstSplitMap)) {
-      auto inst_split_map = op->annotations.at(attr::kSqmmaInstSplitMap)
-                                .as<Map<Layout, PrimExpr>>()
-                                .value();
-      for (const auto &[layout, inst_split] : inst_split_map) {
-        SetLayoutExprHintWithAliases(&layout_sqmma_inst_split_, layout,
-                                     inst_split, "sqmma inst split");
+      layout_sqmma_inst_split_ = Downcast<Map<Layout, PrimExpr>>(
+          op->annotations.at(attr::kSqmmaInstSplitMap));
+    }
+    // Extract cluster_size from cluster_dims annotation
+    if (op->annotations.count("cluster_dims")) {
+      if (auto arr =
+              op->annotations.Get("cluster_dims")->try_cast<Array<Integer>>()) {
+        int sz = 1;
+        for (auto d : arr.value())
+          sz *= static_cast<int>(d->value);
+        cluster_size_ = sz;
       }
     }
     // Begin a new workspace collection frame for this block scope
     workspace_stack_.emplace_back();
 
-    auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto block = Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
     block_ptr->annotations.erase("layout_override_seq");
     for (size_t i = 0; i < block->alloc_buffers.size(); i++) {
       auto buffer = block->alloc_buffers[i];
-      Optional<Buffer> remap_key = FindRemapBuffer(buffer);
-      if (remap_key.defined() && buffer_remap_.count(remap_key.value())) {
-        block_ptr->alloc_buffers.Set(i, buffer_remap_[remap_key.value()]);
+      if (buffer_remap_.count(buffer)) {
+        block_ptr->alloc_buffers.Set(i, buffer_remap_[buffer]);
+      } else if (IsFragmentBuffer(buffer)) {
+        const auto *ptr_type =
+            TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
+        Type new_type = PointerType(ptr_type->element_type, "local");
+        Var new_var;
+        if (var_remap_.count(buffer->data)) {
+          new_var = var_remap_[buffer->data];
+        } else {
+          new_var = Var(buffer->data->name_hint, new_type);
+          var_remap_.Set(buffer->data, new_var);
+        }
+        Buffer new_buf(new_var, buffer->dtype, buffer->shape, buffer->strides,
+                       buffer->elem_offset, buffer->name,
+                       buffer->data_alignment, buffer->offset_factor,
+                       buffer->buffer_type);
+        buffer_remap_.Set(buffer, new_buf);
+        block_ptr->alloc_buffers.Set(i, new_buf);
       }
     }
     // Attach any workspaces requested within this block to its alloc_buffers
@@ -778,11 +421,38 @@ private:
       }
       workspace_stack_.pop_back();
     }
+
+    // Apply arrive-count overrides before LowerSharedBarrier consumes them.
+    if (!barrier_arrive_updates_.empty() &&
+        block->annotations.count("barrier_init")) {
+      auto barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+          block->annotations.Get("barrier_init").value());
+      bool updated = false;
+      for (auto it = barrier_arrive_updates_.begin();
+           it != barrier_arrive_updates_.end();) {
+        if (barrier_init_map.count(it->first)) {
+          auto old_counts = barrier_init_map.at(it->first);
+          Array<PrimExpr> new_counts;
+          for (size_t i = 0; i < old_counts.size(); i++) {
+            new_counts.push_back(it->second);
+          }
+          barrier_init_map.Set(it->first, new_counts);
+          updated = true;
+          it = barrier_arrive_updates_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      if (updated) {
+        block_ptr->annotations.Set("barrier_init", barrier_init_map);
+      }
+    }
+
     return block;
   }
 
   int CheckAndGetBufferRowSize(const Buffer &buffer) {
-    CHECK(buffer->shape.size() >= 2)
+    ICHECK(buffer->shape.size() >= 2)
         << "The dimension of Buffer \"" << buffer->name << "\" with shape "
         << buffer->shape << " should be at least 2";
 
@@ -796,87 +466,6 @@ private:
     bool rewritten{false};
   };
 
-  PrimExpr LinearizeIndicesForBuffer(const Buffer &buffer,
-                                     const Array<PrimExpr> &indices) const {
-    ICHECK_EQ(indices.size(), buffer->shape.size())
-        << "Indices size and shape size must match for buffer " << buffer->name;
-    PrimExpr elem_offset =
-        make_const(indices.empty() ? DataType::Int(32) : indices[0].dtype(), 0);
-    if (!buffer->strides.empty()) {
-      ICHECK_EQ(buffer->strides.size(), indices.size())
-          << "Buffer " << buffer->name << " has mismatched shape/stride rank.";
-      for (size_t i = 0; i < indices.size(); ++i) {
-        elem_offset = elem_offset + indices[i] * buffer->strides[i];
-      }
-      return analyzer_->Simplify(elem_offset);
-    }
-
-    PrimExpr stride = 1;
-    for (int i = static_cast<int>(indices.size()) - 1; i >= 0; --i) {
-      elem_offset = elem_offset + indices[i] * stride;
-      stride = stride * buffer->shape[i];
-    }
-    return analyzer_->Simplify(elem_offset);
-  }
-
-  Array<PrimExpr> OffsetToIndicesForBuffer(const Buffer &buffer,
-                                           PrimExpr elem_offset) const {
-    Array<PrimExpr> indices;
-    const Array<PrimExpr> &shape = buffer->shape;
-    if (!buffer->strides.empty()) {
-      ICHECK_EQ(buffer->strides.size(), shape.size())
-          << "Buffer " << buffer->name << " has mismatched shape/stride rank.";
-      PrimExpr remaining_offset = elem_offset;
-      for (size_t i = 0; i < shape.size(); ++i) {
-        PrimExpr index =
-            analyzer_->Simplify(floordiv(remaining_offset, buffer->strides[i]));
-        indices.push_back(index);
-        remaining_offset =
-            analyzer_->Simplify(remaining_offset - index * buffer->strides[i]);
-      }
-      return indices;
-    }
-
-    PrimExpr remaining_offset = elem_offset;
-    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
-      indices.insert(indices.begin(),
-                     analyzer_->Simplify(floormod(remaining_offset, shape[i])));
-      remaining_offset =
-          analyzer_->Simplify(floordiv(remaining_offset, shape[i]));
-    }
-    return indices;
-  }
-
-  PrimExpr AdjustTmaOffsetForLeadingLayout(const Buffer &original_buffer,
-                                           const Buffer &new_buffer,
-                                           PrimExpr elem_offset) const {
-    const Array<PrimExpr> &old_shape = original_buffer->shape;
-    const Array<PrimExpr> &new_shape = new_buffer->shape;
-    size_t leading_ndim = 0;
-    while (leading_ndim < old_shape.size() && leading_ndim < new_shape.size() &&
-           analyzer_->CanProveEqual(old_shape[leading_ndim],
-                                    new_shape[leading_ndim])) {
-      ++leading_ndim;
-    }
-
-    if (leading_ndim == 0 || leading_ndim >= old_shape.size() ||
-        leading_ndim >= new_shape.size()) {
-      return elem_offset;
-    }
-
-    PrimExpr logical_tail =
-        ProductShape(old_shape, leading_ndim, old_shape.size());
-    PrimExpr physical_tail =
-        ProductShape(new_shape, leading_ndim, new_shape.size());
-    if (analyzer_->CanProveEqual(logical_tail, physical_tail)) {
-      return elem_offset;
-    }
-
-    PrimExpr leading_index = floordiv(elem_offset, logical_tail);
-    PrimExpr inner_offset = floormod(elem_offset, logical_tail);
-    return analyzer_->Simplify(leading_index * physical_tail + inner_offset);
-  }
-
   AccessPtrResult
   HandleAccessPtrAndOffset(const PrimExpr &access_ptr,
                            const Optional<PrimExpr> &offset = std::nullopt,
@@ -884,7 +473,7 @@ private:
     AccessPtrResult result{access_ptr, false};
     // The 2th arg of T.tvm_access_ptr call is offset, we set it to 0 and
     // accumulate it to smem_offset
-    CHECK(access_ptr->IsInstance<CallNode>())
+    ICHECK(access_ptr->IsInstance<CallNode>())
         << "Invalid access ptr for permuted layout: " << access_ptr;
     auto access_ptr_call = Downcast<Call>(access_ptr);
     if (access_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
@@ -917,30 +506,6 @@ private:
 
       Layout layout = layout_map_[original_buffer];
       Buffer new_buffer = buffer_remap_[original_buffer];
-      bool use_leading_layout_offset =
-          original_buffer->shape.size() > 2 &&
-          new_buffer->shape.size() > original_buffer->shape.size() &&
-          layout->InputShape().size() != original_buffer->shape.size() &&
-          analyzer_->CanProveEqual(original_buffer->shape[0],
-                                   new_buffer->shape[0]);
-
-      if (use_leading_layout_offset) {
-        PrimExpr elem_offset = access_ptr_call->args[2];
-        if (offset.defined()) {
-          elem_offset = elem_offset + offset.value();
-        }
-        elem_offset = AdjustTmaOffsetForLeadingLayout(
-            original_buffer, new_buffer, analyzer_->Simplify(elem_offset));
-        Array<PrimExpr> new_args = access_ptr_call->args;
-        new_args.Set(1, new_buffer->data);
-        new_args.Set(2, elem_offset);
-        layout_remap_.Set(new_buffer, layout);
-        result.rewritten = true;
-        result.expr =
-            Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
-                 access_ptr_call->annotations, access_ptr_call->span);
-        return result;
-      }
 
       // In TMA context, swizzle is encoded in TMA descriptor parameters
       // rather than in memory indices, so we only update buffer data
@@ -948,13 +513,6 @@ private:
       if (in_tma_context_) {
         Array<PrimExpr> new_args = access_ptr_call->args;
         new_args.Set(1, new_buffer->data); // Only replace data var
-        PrimExpr elem_offset = access_ptr_call->args[2];
-        if (offset.defined()) {
-          elem_offset = elem_offset + offset.value();
-        }
-        elem_offset = AdjustTmaOffsetForLeadingLayout(
-            original_buffer, new_buffer, analyzer_->Simplify(elem_offset));
-        new_args.Set(2, elem_offset);
         layout_remap_.Set(new_buffer, layout);
         result.rewritten = true;
         result.expr =
@@ -968,12 +526,29 @@ private:
       if (offset.defined()) {
         elem_offset = elem_offset + offset.value();
       }
-      Array<PrimExpr> multi_dim_indices =
-          OffsetToIndicesForBuffer(original_buffer, elem_offset);
+      // Get original and new buffer shapes
+      Array<PrimExpr> old_shape = original_buffer->shape;
+      Array<PrimExpr> new_shape = new_buffer->shape;
+      // Convert linear offset to multi-dimensional indices
+      Array<PrimExpr> multi_dim_indices;
+      PrimExpr remaining_offset = elem_offset;
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+        multi_dim_indices.insert(
+            multi_dim_indices.begin(),
+            analyzer_->Simplify(floormod(remaining_offset, old_shape[i])));
+        remaining_offset =
+            analyzer_->Simplify(floordiv(remaining_offset, old_shape[i]));
+      }
       // Apply layout transformation
       auto forward_indices = layout->Forward(multi_dim_indices);
-      PrimExpr new_offset =
-          LinearizeIndicesForBuffer(new_buffer, forward_indices);
+      PrimExpr new_offset = 0;
+      PrimExpr stride_offset = 1;
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_offset += forward_indices[i] * stride_offset;
+        stride_offset *= new_shape[i];
+      }
+      new_offset = analyzer_->Simplify(new_offset);
+      Array<PrimExpr> new_indices;
       layout_remap_.Set(new_buffer, layout);
 
       // Build new tvm_access_ptr call with new buffer and offset
@@ -1000,7 +575,7 @@ private:
       Array<PrimExpr> indices = load->indices;
       Array<PrimExpr> old_shape = load->buffer->shape;
 
-      CHECK_EQ(indices.size(), old_shape.size())
+      ICHECK_EQ(indices.size(), old_shape.size())
           << "Indices size and shape size must match for general N-dimensional "
              "buffer "
           << "but got indices size: " << indices.size()
@@ -1032,7 +607,12 @@ private:
       }
 
       PrimExpr elem_offset = 0;
-      elem_offset = LinearizeIndicesForBuffer(load->buffer, indices);
+      PrimExpr stride = 1;
+
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+        elem_offset += indices[i] * stride;
+        stride *= old_shape[i];
+      }
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
@@ -1042,14 +622,31 @@ private:
       int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
       (void)buffer_row_size;
 
-      Array<PrimExpr> multi_dim_indices =
-          OffsetToIndicesForBuffer(load->buffer, smem_offset);
+      // Convert offset to target-dimension, reindex it and convert it back
+      Array<PrimExpr> multi_dim_indices;
+      PrimExpr remaining_offset = smem_offset;
+
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+        multi_dim_indices.insert(multi_dim_indices.begin(),
+                                 floormod(remaining_offset, old_shape[i]));
+        remaining_offset = floordiv(remaining_offset, old_shape[i]);
+      }
 
       auto forward_indices = layout.value()->Forward(multi_dim_indices);
-      PrimExpr new_offset =
-          LinearizeIndicesForBuffer(new_buffer, forward_indices);
-      Array<PrimExpr> new_indices =
-          OffsetToIndicesForBuffer(new_buffer, new_offset);
+      PrimExpr new_offset = 0;
+      PrimExpr stride_offset = 1;
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_offset += forward_indices[i] * stride_offset;
+        stride_offset *= new_shape[i];
+      }
+      new_offset = analyzer_->Simplify(new_offset);
+
+      Array<PrimExpr> new_indices;
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_indices.insert(new_indices.begin(),
+                           floormod(new_offset, new_shape[i]));
+        new_offset = floordiv(new_offset, new_shape[i]);
+      }
 
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices)};
       if (buffer_remap_.count(remap_key)) {
@@ -1083,7 +680,7 @@ private:
       Array<PrimExpr> indices = load->indices;
       Array<PrimExpr> old_shape = load->buffer->shape;
 
-      CHECK_EQ(indices.size(), old_shape.size())
+      ICHECK_EQ(indices.size(), old_shape.size())
           << "Indices size and shape size must match for general N-dimensional "
              "buffer "
           << "but got indices size: " << indices.size()
@@ -1116,7 +713,11 @@ private:
       }
 
       PrimExpr elem_offset = 0;
-      elem_offset = LinearizeIndicesForBuffer(load->buffer, indices);
+      PrimExpr stride = 1;
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+        elem_offset += indices[i] * stride;
+        stride *= old_shape[i];
+      }
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
@@ -1125,14 +726,30 @@ private:
       int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
       (void)buffer_row_size;
 
-      Array<PrimExpr> multi_dim_indices =
-          OffsetToIndicesForBuffer(load->buffer, smem_offset);
+      // Convert offset to target-dimension, reindex it and convert it back
+      Array<PrimExpr> multi_dim_indices;
+      PrimExpr remaining_offset = smem_offset;
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+        multi_dim_indices.insert(multi_dim_indices.begin(),
+                                 floormod(remaining_offset, old_shape[i]));
+        remaining_offset = floordiv(remaining_offset, old_shape[i]);
+      }
 
       auto forward_indices = layout.value()->Forward(multi_dim_indices);
-      PrimExpr new_offset =
-          LinearizeIndicesForBuffer(new_buffer, forward_indices);
-      Array<PrimExpr> new_indices =
-          OffsetToIndicesForBuffer(new_buffer, new_offset);
+      PrimExpr new_offset = 0;
+      PrimExpr stride_offset = 1;
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_offset += forward_indices[i] * stride_offset;
+        stride_offset *= new_shape[i];
+      }
+      new_offset = analyzer_->Simplify(new_offset);
+
+      Array<PrimExpr> new_indices;
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_indices.insert(new_indices.begin(),
+                           floormod(new_offset, new_shape[i]));
+        new_offset = floordiv(new_offset, new_shape[i]);
+      }
 
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices), extent,
                                   rw_mask};
@@ -1155,7 +772,7 @@ private:
       return expr;
     }
     if (const auto *var_node = expr.as<VarNode>()) {
-      Var var = tvm::ffi::GetRef<Var>(var_node);
+      Var var = GetRef<Var>(var_node);
       auto it = let_bindings_.find(var);
       if (it != let_bindings_.end()) {
         return it->second;
@@ -1202,9 +819,10 @@ private:
     return Optional<Layout>();
   }
 
-  PrimExpr VisitExpr_(const tir::CallNode *op) final {
+  PrimExpr VisitExpr_(const tirx::CallNode *op) final {
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_load_multicast()) ||
         op->op.same_as(tl::tma_store())) {
       // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
@@ -1212,6 +830,12 @@ private:
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       in_tma_context_ = false;
       return call;
+    }
+    if (op->op.same_as(tl::tma_store_cluster())) {
+      // SM-to-SM bulk async copy does not use a tensor-map descriptor, so
+      // shared-memory swizzle must still be reflected in pointer/index
+      // remapping.
+      return Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
 
     if (is_ptx_) {
@@ -1462,7 +1086,7 @@ private:
     return var;
   }
 
-  Stmt VisitStmt_(const LetStmtNode *op) final {
+  Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
     bool recorded = false;
     if (value->IsInstance<BufferLoadNode>()) {
@@ -1472,16 +1096,11 @@ private:
     if (SideEffect(value) <= CallEffectKind::kPure) {
       analyzer_->Bind(op->var, value);
     }
-    Stmt body = this->VisitStmt(op->body);
-    if (recorded) {
-      let_bindings_.erase(op->var);
-    }
-    if (value.same_as(op->value) && body.same_as(op->body)) {
-      return tvm::ffi::GetRef<Stmt>(op);
+    if (value.same_as(op->value)) {
+      return GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = value;
-      n->body = body;
       return Stmt(n);
     }
   }
@@ -1512,6 +1131,35 @@ private:
    * @return Stmt The (possibly transformed) statement after lowering or base
    * visitor processing.
    */
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
+    auto buffer = op->buffer;
+    if (buffer_remap_.count(buffer)) {
+      auto node = Downcast<AllocBuffer>(IRMutatorWithAnalyzer::VisitStmt_(op));
+      node.CopyOnWrite()->buffer = buffer_remap_[buffer];
+      return std::move(node);
+    }
+    if (IsFragmentBuffer(buffer)) {
+      const auto *ptr_type =
+          TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
+      Type new_type = PointerType(ptr_type->element_type, "local");
+      Var new_var;
+      if (var_remap_.count(buffer->data)) {
+        new_var = var_remap_[buffer->data];
+      } else {
+        new_var = Var(buffer->data->name_hint, new_type);
+        var_remap_.Set(buffer->data, new_var);
+      }
+      Buffer new_buf(new_var, buffer->dtype, buffer->shape, buffer->strides,
+                     buffer->elem_offset, buffer->name, buffer->data_alignment,
+                     buffer->offset_factor, buffer->buffer_type);
+      buffer_remap_.Set(buffer, new_buf);
+      auto node = Downcast<AllocBuffer>(IRMutatorWithAnalyzer::VisitStmt_(op));
+      node.CopyOnWrite()->buffer = new_buf;
+      return std::move(node);
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const CallNode *call = op->value.as<CallNode>();
     // Do not analysis the call node to the global function.
@@ -1535,7 +1183,7 @@ private:
       return Evaluate(IntImm(DataType::Int(32), 0));
     }
 
-    auto tile_op = ParseOperator(tvm::ffi::GetRef<Stmt>(op));
+    auto tile_op = ParseOperator(GetRef<Stmt>(op));
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
@@ -1551,18 +1199,6 @@ private:
         workspace_stack_.emplace_back(Array<Buffer>{workspace});
       }
       return workspace.access_ptr(2); // write
-    };
-    AddBarrierCallback barrier_callback = [this](int64_t arrive_count) {
-      auto count = IntImm(DataType::Int(32), static_cast<int>(arrive_count));
-      auto barrier =
-          decl_buffer({count}, DataType::UInt(64), "reduce_sync_barrier",
-                      "shared.reduce_barrier");
-      if (!workspace_stack_.empty()) {
-        workspace_stack_.back().push_back(barrier);
-      } else {
-        workspace_stack_.emplace_back(Array<Buffer>{barrier});
-      }
-      return barrier;
     };
 
     Range thread_bounds = CurrentThreadBounds();
@@ -1582,15 +1218,20 @@ private:
       return id;
     };
 
-    PrimExpr mbar_phase_expr = loop_mbar_phase_stack_.empty()
-                                   ? PrimExpr(IntImm(DataType::Int(32), 0))
-                                   : loop_mbar_phase_stack_.back();
+    UpdateBarrierArriveCallback barrier_arrive_callback = [this](Var data_var,
+                                                                 PrimExpr n) {
+      barrier_arrive_updates_[data_var] = n;
+    };
+
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  barrier_callback, mbarrier_callback, layout_map_,
-                  buffer_remap_, buffer_var_gemm_, layout_sqmma_,
-                  layout_k_major_, layout_sqmma_inst_split_, let_var_to_expr,
-                  mbar_phase_expr, &mbarrier_buffer_, cluster_size_},
+                  mbarrier_callback, barrier_arrive_callback, layout_map_,
+                  layout_k_major_, layout_sqmma_, layout_sqmma_inst_split_,
+                  buffer_remap_, let_var_to_expr,
+                  loop_mbar_phase_stack_.empty()
+                      ? PrimExpr(IntImm(DataType::Int(32), 0))
+                      : loop_mbar_phase_stack_.back(),
+                  &mbarrier_buffer_, cluster_size_},
         analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
@@ -1600,7 +1241,7 @@ private:
     if (op->attr_key == kPipelineContextNumStages) {
       return VisitStmt(op->body);
     }
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
       if (iv->thread_tag == "threadIdx.x") {
@@ -1721,7 +1362,7 @@ private:
       }
     }
 
-    auto root = tvm::ffi::GetRef<For>(op);
+    auto root = GetRef<For>(op);
 
     // Check if the loop writes to any non-local buffer.
     // Thread partitioning is unnecessary when all stores target local buffers.
@@ -1749,7 +1390,7 @@ private:
           // tvm_access_ptr format: (dtype, data, offset, extent, rw_mask)
           auto buffer_var = call->args[1].as<VarNode>();
           if (buffer_var) {
-            Var var = tvm::ffi::GetRef<Var>(buffer_var);
+            Var var = GetRef<Var>(buffer_var);
             auto it = buffer_map_.find(var);
             if (it != buffer_map_.end() && !IsLocalBuffer(it->second)) {
               has_non_local_store = true;
@@ -1821,15 +1462,14 @@ private:
       }
     });
 
-    // Check if vectorizable cast operations exist.
-    // MUSA reuses the same vectorized cast type pairs as CUDA codegen.
+    // Check if vectorizable cast operations exist
     bool has_cast_operations = false;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
       if (const auto *cast = obj.as<CastNode>()) {
         DataType from_ty = cast->value.dtype();
         DataType target_ty = cast->dtype;
         if (IsCudaVectorizableCast(from_ty, target_ty) &&
-            (TargetIsCuda(target_) || TargetIsMusa(target_))) {
+            TargetIsCuda(Target::Current())) {
           has_cast_operations = true;
         }
       }
@@ -1870,13 +1510,19 @@ private:
   Target target_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Layout> layout_map_;
+  Map<Layout, Bool> layout_k_major_;
+  Map<Layout, Bool> layout_sqmma_;
+  Map<Layout, PrimExpr> layout_sqmma_inst_split_;
   Map<Buffer, Layout> layout_remap_;
   Map<Buffer, Buffer> buffer_remap_;
+  std::unordered_map<int64_t, LayoutMap> layout_override_steps_;
   // This is a workaround for cpu backend,
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
   size_t thread_block_size_ = 0;
+  // Product of cluster_dims from block annotation (default 1).
+  int cluster_size_ = 1;
   // Stack of per-Block workspace buffers gathered while visiting children
   std::vector<Array<Buffer>> workspace_stack_;
   // Counter and arrive-counts for mbarrier allocation via
@@ -1897,41 +1543,19 @@ private:
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
   bool has_tma_{false};
-  Array<Var> buffer_var_gemm_;
-  Map<Layout, Bool> layout_sqmma_;
-  Map<Layout, Bool> layout_k_major_;
-  Map<Layout, PrimExpr> layout_sqmma_inst_split_;
-  std::vector<std::pair<Layout, Layout>> layout_aliases_;
-  int cluster_size_{1};
-  std::unordered_map<int64_t, LayoutMap> layout_override_steps_;
   // Flag to indicate we are inside a TMA context (tma_load, tma_load_im2col,
   // tma_store). When true, HandleAccessPtrAndOffset only updates buffer data
   // without recomputing indices, since swizzle is encoded in TMA descriptor
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
+  // Pending barrier arrive-count overrides from multi-TMA cluster copies.
+  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+      barrier_arrive_updates_;
 };
 
 namespace transform {
 
-using namespace tir::transform;
-
-Array<PrimExpr> TestingExpandLayoutToBufferInputShape(const Buffer &buffer,
-                                                      const Layout &layout) {
-  return ExpandLayoutToBufferShape(buffer, layout)->InputShape();
-}
-
-Array<PrimExpr> TestingExpandLayoutToBufferOutputShape(const Buffer &buffer,
-                                                       const Layout &layout) {
-  return ExpandLayoutToBufferShape(buffer, layout)->OutputShape();
-}
-
-Array<PrimExpr> TestingMakeBufferWithLayoutStrides(const Buffer &buffer,
-                                                   const Layout &layout) {
-  Map<Var, Var> var_remap;
-  Buffer remapped = makeBufferWithLayout(
-      buffer, ExpandLayoutToBufferShape(buffer, layout), var_remap);
-  return remapped->strides;
-}
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerTileOp() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
@@ -1941,15 +1565,8 @@ tvm::transform::Pass LowerTileOp() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
-  refl::GlobalDef()
-      .def("tl.transform._TestingExpandLayoutToBufferInputShape",
-           TestingExpandLayoutToBufferInputShape)
-      .def("tl.transform._TestingExpandLayoutToBufferOutputShape",
-           TestingExpandLayoutToBufferOutputShape)
-      .def("tl.transform._TestingMakeBufferWithLayoutStrides",
-           TestingMakeBufferWithLayoutStrides);
 }
 } // namespace transform
 

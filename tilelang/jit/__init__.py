@@ -56,7 +56,7 @@ def compile(
 
     Parameters
     ----------
-    func : tvm.tir.PrimFunc, optional
+    func : tvm.tirx.PrimFunc, optional
         The TileLang TIR function to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
@@ -140,7 +140,7 @@ def par_compile(
 
     Parameters
     ----------
-    funcs : Iterable[tvm.tir.PrimFunc]
+    funcs : Iterable[tvm.tirx.PrimFunc]
         The TileLang TIR functions to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).

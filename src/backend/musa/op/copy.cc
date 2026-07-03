@@ -10,17 +10,20 @@
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
+#include "support/check.h"
 #include "target/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
 #include "transform/ptx_async_copy_injector.h"
 
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <cstdint>
 #include <sstream>
@@ -29,7 +32,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -723,7 +727,7 @@ Stmt Copy::LowerNormal(const CopyNode &op, const LowerArgs &T,
         // no conflict.
         bool dst_depends_on_thread = false;
         for (const auto &range : node.dst_range) {
-          if (tir::UsesVar(range->min, [&](const VarNode *v) {
+          if (tirx::UsesVar(range->min, [&](const VarNode *v) {
                 return v == T.thread_var.get();
               })) {
             dst_depends_on_thread = true;
@@ -1019,8 +1023,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   if (src.scope() != "shared.tmem" && dst.scope() != "shared.tmem") {
     return Stmt();
   }
-  ICHECK(TargetHasTmem(T.target)) << "Target " << T.target->ToDebugString()
-                                  << " does not support tensor memory copy";
+  ICHECK(TargetHasTmem(T.target))
+      << "Target " << T.target->str() << " does not support tensor memory copy";
 
   // Decide copy type
   bool is_ld = false; // tcgen05.ld (tensor memory -> register)

@@ -7,13 +7,16 @@
 #ifndef TVM_TL_OP_OP_H_
 #define TVM_TL_OP_OP_H_
 
+// Dependencies for operators
+#include "support/check.h"
+#include <array>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/buffer.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/stmt.h>
+#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt.h>
 #include <utility>
 #include <vector>
 
@@ -22,11 +25,12 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
-using AddBarrierCallback = std::function<Buffer(int64_t)>;
 using AllocMBarrierCallback = std::function<int(int arrive_count)>;
+using UpdateBarrierArriveCallback = std::function<void(Var, PrimExpr)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
 
@@ -85,14 +89,13 @@ struct LowerArgs {
   Range thread_bounds;
   Var thread_var;
   AddWorkspaceCallback AddWorkspace;
-  AddBarrierCallback AddBarrier;
   AllocMBarrierCallback AllocMBarrier;
+  UpdateBarrierArriveCallback UpdateBarrierArrive;
   LayoutMap layout_map;
-  Map<Buffer, Buffer> buffer_remap;
-  Array<Var> buffer_var_gemm;
-  Map<Layout, Bool> layout_sqmma;
   Map<Layout, Bool> layout_k_major;
+  Map<Layout, Bool> layout_sqmma;
   Map<Layout, PrimExpr> layout_sqmma_inst_split;
+  Map<Buffer, Buffer> buffer_remap;
   // Map from LetStmt variable to its bound expression, for resolving
   // fragment buffer accesses through let bindings
   Map<Var, PrimExpr> let_var_to_expr;
@@ -105,6 +108,9 @@ struct LowerArgs {
   // Points to the LowerTileOpPass member so copy.cc sees the buffer
   // even when created lazily by the AllocMBarrier callback.
   Optional<Buffer> *mbarrier_buffer = nullptr;
+  // Product of cluster_dims (from block annotation). Defaults to 1 (no
+  // cluster). Used by TMA copy lowering to scale expect_tx bytes for cluster
+  // barriers.
   int cluster_size = 1;
 };
 
@@ -164,7 +170,7 @@ TileOperator ParseOperator(Call call);
 TileOperator ParseOperator(Stmt stmt);
 
 using OpBuilderFunc =
-    ffi::TypedFunction<TileOperator(Array<PrimExpr>, Map<String, ObjectRef>)>;
+    TypedFunction<TileOperator(Array<PrimExpr>, Map<String, ObjectRef>)>;
 
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \

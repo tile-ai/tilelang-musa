@@ -12,12 +12,16 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace rocm {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
+
+  static int GetPreferedVectorizedSize(DataType dt, Target) {
+    return backend::reduce::GetPreferedVectorizedSize(dt);
+  }
 
   static bool UseSyncBarrier(Target, int) { return false; }
 

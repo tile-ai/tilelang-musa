@@ -1,64 +1,42 @@
+#include "support/check.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 #include "../op/copy.h"
-#include "../op/gemm.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
 #include "../op/utils.h"
-#include "common/collector.h"
 #include "common/pipeline_utils.h"
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
-#include "../backend/cuda/op/copy.h"
-#include "../backend/musa/op/copy.h"
 #include "../target/utils.h"
 #include "tvm/ir/expr.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
-namespace {
-
-bool GetBoolAnnotation(const CopyNode &op, const char *key) {
-  if (auto val = op.annotations.Get(key)) {
-    if (auto int_val = val->as<IntImmNode>()) {
-      return int_val->value != 0;
-    }
-  }
-  return false;
-}
-
-bool GetIsTmaCopy(const CopyNode &op) {
-  return GetBoolAnnotation(op, "is_tma_copy");
-}
-
-bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target) {
-  if (TargetIsCuda(target) || TargetIsCuTeDSL(target)) {
-    return cuda::IsPipelineManagedCPAsyncCopy(op, target);
-  }
-  if (TargetIsMusa(target)) {
-    return musa::IsPipelineManagedCPAsyncCopy(op, target);
-  }
-  return false;
-}
-
-} // namespace
+using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
+                                           ObjectPtrHash, ObjectPtrEqual>;
 
 using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
@@ -143,7 +121,7 @@ private:
     auto var = call->args[1].as<VarNode>();
     if (!var)
       return Optional<Buffer>();
-    auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+    auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
     if (it == buffer_data_to_buffer_.end())
       return Optional<Buffer>();
     return (*it).second;
@@ -168,7 +146,7 @@ private:
           ICHECK(call->op.same_as(builtin::tvm_access_ptr()));
           auto var = call->args[1].as<VarNode>();
           ICHECK(var);
-          auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
           ICHECK(it != buffer_data_to_buffer_.end());
           return (*it).second;
         };
@@ -215,7 +193,7 @@ private:
       if (args.size() > 5) {
         auto var = args[5].as<VarNode>();
         if (var) {
-          auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
           if (it != buffer_data_to_buffer_.end()) {
             pending_tcgen05_c_buf_ = (*it).second;
           }
@@ -249,7 +227,7 @@ private:
       pending_tcgen05_smem_reads_.clear();
       pending_tcgen05_c_buf_ = Optional<Buffer>();
       StmtExprVisitor::VisitExpr_(op);
-    } else if (op->op.same_as(tir::builtin::if_then_else())) {
+    } else if (op->op.same_as(tirx::builtin::if_then_else())) {
       const PrimExpr &then_expr = args[1];
       const PrimExpr &else_expr = args[2];
       this->VisitExpr(then_expr);
@@ -312,8 +290,6 @@ private:
     AccessRegions access = tile_op->GetAccessRegions();
     reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
     writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
-    // Plain T.copy no longer auto-upgrades to TMA in the generic pipeline
-    // path; only warp-specialized rewriting may turn it into T.tma_copy.
     if (const auto *copy = tile_op.as<CopyNode>()) {
       if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
         is_global_copy_pattern_ = true;
@@ -344,7 +320,7 @@ private:
       auto *var = call->args[1].as<VarNode>();
       if (!var)
         return Optional<Buffer>();
-      auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+      auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
       if (it == buffer_data_to_buffer_.end())
         return Optional<Buffer>();
       return (*it).second;
@@ -401,8 +377,7 @@ private:
 
   void VisitExpr_(const CallNode *op) final {
     auto args = op->args;
-    if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
-        tile_op.defined()) {
+    if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       HandleTileOp(tile_op);
       StmtExprVisitor::VisitExpr_(op);
       return;
@@ -412,7 +387,7 @@ private:
       if (const auto *load = op->args[0].as<BufferLoadNode>()) {
         buffer_region = BufferRegion::FullRegion(load->buffer);
       } else if (const auto *var_node = op->args[0].as<VarNode>()) {
-        Var data_var = tvm::ffi::GetRef<Var>(var_node);
+        Var data_var = GetRef<Var>(var_node);
         auto it = buffer_data_to_buffer_.find(data_var);
         if (it != buffer_data_to_buffer_.end()) {
           buffer_region = BufferRegion::FullRegion((*it).second);
@@ -425,7 +400,7 @@ private:
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       const VarNode *buffer_var = op->args[1].as<VarNode>();
       ICHECK(buffer_var);
-      auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(buffer_var));
+      auto it = buffer_data_to_buffer_.find(GetRef<Var>(buffer_var));
       if (it != buffer_data_to_buffer_.end()) {
         const Buffer &buffer = (*it).second;
         const BufferRegion buffer_region = BufferRegion::FullRegion(buffer);
@@ -487,6 +462,16 @@ private:
         if (buffer_writes != chain_builder_.mbar_to_buffer_writes_.end()) {
           writes_.insert(writes_.end(), buffer_writes->second.begin(),
                          buffer_writes->second.end());
+        }
+      } else {
+        // Handle-based mbarrier (e.g. get_mbarrier(id)): cannot resolve to a
+        // concrete Buffer.  Conservatively attach all known async buffer
+        // dependencies so the wait is not treated as dependency-free.
+        for (const auto &[_, regions] : chain_builder_.mbar_to_buffer_reads_) {
+          reads_.insert(reads_.end(), regions.begin(), regions.end());
+        }
+        for (const auto &[_, regions] : chain_builder_.mbar_to_buffer_writes_) {
+          writes_.insert(writes_.end(), regions.begin(), regions.end());
         }
       }
     } else {
@@ -560,15 +545,14 @@ private:
    */
   struct PipelineStageInfo {
     Array<BufferRegion> reads, writes;
+    std::unordered_set<const VarNode *> scalar_defs;
+    std::unordered_set<const VarNode *> scalar_uses;
     int original_stmt_index{};
     int order = -1, stage = -1;
     bool copy_stage = false;
     bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
-    bool cp_async_copy_stage = false;
     bool conditional_execution = false;
     bool producer_for_copy = false;
-    bool deferred_async_gemm = false;
-    bool wgmma_wait = false;
     // Commit statements have no buffer writes, but they must be scheduled as a
     // part of their cp.async producer group (after the cp.async calls).
     bool cp_async_commit_stage = false;
@@ -589,10 +573,7 @@ private:
     }
     bool is_copy_stage() const { return copy_stage; }
     bool is_tma_copy() const { return tma_copy; }
-    bool is_cp_async_copy_stage() const { return cp_async_copy_stage; }
     bool is_producer_for_copy() const { return producer_for_copy; }
-    bool has_deferred_async_gemm() const { return deferred_async_gemm; }
-    bool has_wgmma_wait() const { return wgmma_wait; }
     bool is_cp_async_commit_stage() const { return cp_async_commit_stage; }
     bool has_cp_async_call() const { return cp_async_call_count > 0; }
     bool has_cp_async_commit() const { return cp_async_commit_count > 0; }
@@ -600,6 +581,29 @@ private:
     bool is_last_use_stmt_index_valid() const {
       return last_use_stmt_index != -1;
     }
+  };
+
+  class ScalarUseDefCollector : public StmtExprVisitor {
+  public:
+    static std::pair<std::unordered_set<const VarNode *>,
+                     std::unordered_set<const VarNode *>>
+    Collect(const Stmt &stmt) {
+      ScalarUseDefCollector collector;
+      collector(stmt);
+      return {std::move(collector.scalar_defs_),
+              std::move(collector.scalar_uses_)};
+    }
+
+  private:
+    void VisitStmt_(const BindNode *op) final {
+      this->VisitExpr(op->value);
+      scalar_defs_.insert(op->var.get());
+    }
+
+    void VisitExpr_(const VarNode *op) final { scalar_uses_.insert(op); }
+
+    std::unordered_set<const VarNode *> scalar_defs_;
+    std::unordered_set<const VarNode *> scalar_uses_;
   };
 
   struct AsyncIntrinInfo {
@@ -649,7 +653,7 @@ private:
         conditional = true;
         return;
       }
-      if (const auto *realize = node.as<BlockRealizeNode>()) {
+      if (const auto *realize = node.as<SBlockRealizeNode>()) {
         if (!is_one(realize->predicate)) {
           conditional = true;
         }
@@ -671,140 +675,7 @@ private:
     if (pinfo.has_cp_async_commit() && !pinfo.has_cp_async_call()) {
       return false;
     }
-    return pinfo.is_cp_async_copy_stage() || pinfo.has_cp_async_call();
-  }
-
-  bool HasDeferredAsyncGemm(const Stmt &stmt) const {
-    bool found = false;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (found) {
-        return;
-      }
-      const auto *call = node.as<CallNode>();
-      if (call == nullptr) {
-        return;
-      }
-      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
-      if (!tile_op.defined()) {
-        return;
-      }
-      if (const auto *gemm = tile_op.as<GemmNode>()) {
-        found = gemm->wgWait_ < 0;
-      }
-    });
-    return found;
-  }
-
-  bool HasWgmmaWait(const Stmt &stmt) const {
-    bool found = false;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (found) {
-        return;
-      }
-      const auto *call = node.as<CallNode>();
-      found = call != nullptr && call->op.same_as(tl::wait_wgmma());
-    });
-    return found;
-  }
-
-  class RawCPAsyncCopyEligibilityChecker : public StmtExprVisitor {
-  public:
-    bool Check(const Stmt &stmt) {
-      VisitStmt(stmt);
-      return saw_raw_copy_ && !saw_ineligible_raw_copy_;
-    }
-
-  private:
-    void VisitStmt_(const ForNode *op) final {
-      int previous_vectorized_lanes = vectorized_lanes_;
-      if (op->kind == ForKind::kVectorized) {
-        const int64_t *extent = as_const_int(op->extent);
-        if (extent == nullptr || *extent <= 0 ||
-            vectorized_lanes_ > std::numeric_limits<int>::max() / *extent) {
-          saw_ineligible_raw_copy_ = true;
-          return;
-        }
-        vectorized_lanes_ *= static_cast<int>(*extent);
-      }
-      StmtExprVisitor::VisitStmt_(op);
-      vectorized_lanes_ = previous_vectorized_lanes;
-    }
-
-    void VisitStmt_(const BufferStoreNode *op) final {
-      if (!IsSharedBuffer(op->buffer)) {
-        StmtExprVisitor::VisitStmt_(op);
-        return;
-      }
-
-      const BufferLoadNode *load = MatchRawCopyLoad(op->value);
-      if (load == nullptr || !IsGlobalLikeBuffer(load->buffer) ||
-          load->buffer->dtype != op->buffer->dtype) {
-        saw_ineligible_raw_copy_ = true;
-        StmtExprVisitor::VisitStmt_(op);
-        return;
-      }
-
-      int bytes = op->buffer->dtype.bytes() * op->buffer->dtype.lanes() *
-                  vectorized_lanes_;
-      if (!IsValidCPAsyncTransferBytes(bytes)) {
-        saw_ineligible_raw_copy_ = true;
-      }
-      saw_raw_copy_ = true;
-      StmtExprVisitor::VisitStmt_(op);
-    }
-
-    void VisitExpr_(const CallNode *op) final {
-      if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
-          tile_op.defined()) {
-        if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
-          VisitStmt(parallel->GetRoot());
-          return;
-        }
-      }
-      StmtExprVisitor::VisitExpr_(op);
-    }
-
-    static bool IsGlobalLikeBuffer(const Buffer &buffer) {
-      return IsGlobalBuffer(buffer) ||
-             (buffer.defined() && buffer.scope().empty());
-    }
-
-    static bool IsZeroValue(const PrimExpr &expr) {
-      if (const auto *broadcast = expr.as<BroadcastNode>()) {
-        return IsZeroValue(broadcast->value);
-      }
-      if (const auto *float_imm = expr.as<FloatImmNode>()) {
-        return float_imm->value == 0.0f;
-      }
-      if (const auto *int_imm = expr.as<IntImmNode>()) {
-        return int_imm->value == 0;
-      }
-      return false;
-    }
-
-    static const BufferLoadNode *MatchRawCopyLoad(const PrimExpr &value) {
-      if (const auto *load = value.as<BufferLoadNode>()) {
-        return load;
-      }
-      if (const auto *cast = value.as<CastNode>()) {
-        return MatchRawCopyLoad(cast->value);
-      }
-      const auto *call = value.as<CallNode>();
-      if (!call || !call->op.same_as(builtin::if_then_else()) ||
-          !IsZeroValue(call->args[2])) {
-        return nullptr;
-      }
-      return MatchRawCopyLoad(call->args[1]);
-    }
-
-    int vectorized_lanes_{1};
-    bool saw_raw_copy_{false};
-    bool saw_ineligible_raw_copy_{false};
-  };
-
-  bool CanRawCopyStmtUseCPAsync(const Stmt &stmt) const {
-    RawCPAsyncCopyEligibilityChecker checker;
-    return checker.Check(stmt);
+    return pinfo.is_copy_stage() || pinfo.has_cp_async_call();
   }
 
   bool IsPureCopyStmt(const Stmt &stmt) const {
@@ -843,7 +714,7 @@ private:
       if (call == nullptr) {
         return;
       }
-      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
         return;
       }
@@ -879,7 +750,7 @@ private:
       if (call == nullptr) {
         return;
       }
-      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
         return;
       }
@@ -919,7 +790,10 @@ private:
     // stage-0 producer schedule just like ordinary global->shared copies.
     if (pinfo->has_cp_async_call()) {
       pinfo->copy_stage = true;
-      pinfo->cp_async_copy_stage = true;
+      return;
+    }
+
+    if (pinfo->copy_stage) {
       return;
     }
 
@@ -932,11 +806,7 @@ private:
       if (!IsGlobalLikeBuffer(copy->src) || !IsSharedBuffer(copy->dst)) {
         return;
       }
-      if (GetIsTmaCopy(*copy)) {
-        return;
-      }
       pinfo->copy_stage = true;
-      pinfo->cp_async_copy_stage = IsPipelineManagedCPAsyncCopy(*copy, target_);
       return;
     }
 
@@ -964,18 +834,7 @@ private:
                              return r->buffer == read->buffer &&
                                     MayConflict(r->region, read->region);
                            }) != pinfo.writes.end()) {
-            int last_use = i;
-            if ((*pipeline_stage_infos)[i].has_deferred_async_gemm()) {
-              for (int j = i + 1;
-                   j < static_cast<int>(pipeline_stage_infos->size()); ++j) {
-                if ((*pipeline_stage_infos)[j].has_wgmma_wait()) {
-                  last_use = j;
-                  break;
-                }
-              }
-            }
-            pinfo.last_use_stmt_index =
-                std::max(pinfo.last_use_stmt_index, last_use);
+            pinfo.last_use_stmt_index = std::max(pinfo.last_use_stmt_index, i);
           }
         }
 
@@ -1000,6 +859,100 @@ private:
                        << "' with overlapping regions. This is not supported "
                           "in pipeline planning.";
           }
+        }
+      }
+    }
+  }
+
+  std::unordered_map<const VarNode *, int> BuildScalarDefMap(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    std::unordered_map<const VarNode *, int> scalar_def_to_stmt;
+    for (int i = 0; i < static_cast<int>(pipeline_stage_infos.size()); ++i) {
+      for (const VarNode *var : pipeline_stage_infos[i].scalar_defs) {
+        scalar_def_to_stmt.emplace(var, i);
+      }
+    }
+    return scalar_def_to_stmt;
+  }
+
+  void PropagateScalarProducersForCopy(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    auto scalar_def_to_stmt = BuildScalarDefMap(*pipeline_stage_infos);
+    const size_t max_iterations = (pipeline_stage_infos->size() * 4) + 16;
+    size_t iter_count = 0;
+    bool updated = true;
+
+    auto update_producer = [](PipelineStageInfo *producer,
+                              int consumer_last_use) -> bool {
+      if (consumer_last_use < 0) {
+        return false;
+      }
+      bool changed = false;
+      if (!producer->producer_for_copy) {
+        producer->producer_for_copy = true;
+        producer->last_use_stmt_index = consumer_last_use;
+        changed = true;
+      } else if (!producer->is_last_use_stmt_index_valid() ||
+                 consumer_last_use < producer->last_use_stmt_index) {
+        producer->last_use_stmt_index = consumer_last_use;
+        changed = true;
+      }
+      return changed;
+    };
+
+    while (updated) {
+      updated = false;
+      for (int consumer_idx = 0;
+           consumer_idx < static_cast<int>(pipeline_stage_infos->size());
+           ++consumer_idx) {
+        const auto &consumer = (*pipeline_stage_infos)[consumer_idx];
+        if (!(consumer.is_first_stage() &&
+              consumer.is_last_use_stmt_index_valid())) {
+          continue;
+        }
+        for (const VarNode *var : consumer.scalar_uses) {
+          auto it = scalar_def_to_stmt.find(var);
+          if (it == scalar_def_to_stmt.end() || it->second == consumer_idx) {
+            continue;
+          }
+          auto &producer = (*pipeline_stage_infos)[it->second];
+          if (producer.is_copy_stage() || producer.is_cp_async_commit_stage()) {
+            continue;
+          }
+          updated |= update_producer(&producer, consumer.last_use_stmt_index);
+        }
+      }
+      if (++iter_count > max_iterations) {
+        LOG(FATAL) << "Pipeline planning: Exceeded maximum iterations while "
+                      "propagating scalar producers for copy stages.";
+      }
+    }
+  }
+
+  void ValidateScalarDependencies(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    auto scalar_def_to_stmt = BuildScalarDefMap(pipeline_stage_infos);
+    for (int consumer_idx = 0;
+         consumer_idx < static_cast<int>(pipeline_stage_infos.size());
+         ++consumer_idx) {
+      const auto &consumer = pipeline_stage_infos[consumer_idx];
+      for (const VarNode *var : consumer.scalar_uses) {
+        auto it = scalar_def_to_stmt.find(var);
+        if (it == scalar_def_to_stmt.end() || it->second == consumer_idx) {
+          continue;
+        }
+        const auto &producer = pipeline_stage_infos[it->second];
+        ICHECK_LE(producer.stage, consumer.stage)
+            << "Pipeline planning error: scalar dependency from statement "
+            << producer.original_stmt_index << " to statement "
+            << consumer.original_stmt_index
+            << " crosses from a later stage to an earlier stage.";
+        if (producer.stage == consumer.stage) {
+          ICHECK_LT(producer.order, consumer.order)
+              << "Pipeline planning error: scalar dependency from statement "
+              << producer.original_stmt_index << " to statement "
+              << consumer.original_stmt_index
+              << " is reordered within the same pipeline stage.";
         }
       }
     }
@@ -1071,7 +1024,7 @@ private:
     for (int stage_id : sorted_async_stage_ids) {
       async_stages.push_back(Integer(stage_id));
     }
-    annotations->Set(tir::attr::software_pipeline_async_stages,
+    annotations->Set(s_tir::attr::software_pipeline_async_stages,
                      Array<Integer>(async_stages));
     return true;
   }
@@ -1099,15 +1052,6 @@ private:
       pinfo.stage = static_cast<int>(stage_array[i]->value);
       if (!pinfo.is_copy_stage() && !pinfo.conditional_execution &&
           pinfo.stage == 0) {
-        auto copy_tile_op = GetSinglePureCopyTileOp(pipeline_stmts[i]);
-        if (copy_tile_op.defined()) {
-          if (const auto *copy = copy_tile_op.value().as<CopyNode>()) {
-            if (GetIsTmaCopy(*copy)) {
-              pipeline_stage_infos.push_back(std::move(pinfo));
-              continue;
-            }
-          }
-        }
         bool reads_global = false;
         bool writes_shared = false;
         for (const BufferRegion &read : pinfo.reads) {
@@ -1136,27 +1080,26 @@ private:
   PipelineStageInfo
   MakePipelineStageInfo(Stmt stmt, int idx,
                         AsyncDependencyChainBuilder &chain_builder) {
-    Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ std::move(stmt));
-    Array<Array<BufferRegion>> access =
-        GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                 /*name_hint=*/"",
+                 /*body*/ std::move(stmt));
     auto collector =
         BufferRegionCollector(buffer_data_to_buffer_, chain_builder, target_);
     collector(block);
     PipelineStageInfo pinfo;
     pinfo.reads = std::move(collector.GetReads());
     pinfo.writes = std::move(collector.GetWrites());
+    auto [scalar_defs, scalar_uses] =
+        ScalarUseDefCollector::Collect(block->body);
+    pinfo.scalar_defs = std::move(scalar_defs);
+    pinfo.scalar_uses = std::move(scalar_uses);
     pinfo.original_stmt_index = idx;
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
-    pinfo.deferred_async_gemm = HasDeferredAsyncGemm(block->body);
-    pinfo.wgmma_wait = HasWgmmaWait(block->body);
     bool pure_copy_stage =
         collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
     pinfo.copy_stage = pure_copy_stage;
     pinfo.tma_copy = pure_copy_stage && !pinfo.conditional_execution &&
                      collector.GetTmaCopyPattern();
-    pinfo.cp_async_copy_stage = pure_copy_stage && !pinfo.tma_copy &&
-                                CanRawCopyStmtUseCPAsync(block->body);
     auto async_info = AnalyzeAsyncIntrinsics(block->body);
     pinfo.cp_async_call_count = async_info.cp_async_call_count;
     pinfo.cp_async_commit_count = async_info.cp_async_commit_count;
@@ -1192,21 +1135,6 @@ private:
         }
       }
 
-      if (ws_tma_enabled && HasForceAsyncCopyAttr(loop->body) &&
-          TargetHasAsyncCopy(target_) && use_async_copy_) {
-        Map<String, Any> annotations;
-        for (const auto &[key, value] : loop->annotations) {
-          if (key != "tl_pipeline_order" && key != "tl_pipeline_stage") {
-            annotations.Set(key, value);
-          }
-        }
-        annotations.Set(tir::attr::software_pipeline_async_stages,
-                        Array<Integer>{0});
-        auto for_node = tvm::ffi::GetRef<For>(loop);
-        for_node.CopyOnWrite()->annotations = annotations;
-        return for_node;
-      }
-
       if (ws_tma_enabled) {
         return StmtExprMutator::VisitStmt_(loop);
       }
@@ -1217,24 +1145,24 @@ private:
           annotations.Set(key, value);
         }
       }
-      annotations.Set(tir::attr::software_pipeline_order, order_anno.value());
+      annotations.Set(s_tir::attr::software_pipeline_order, order_anno.value());
 
       for (const auto &[key, value] : loop->annotations) {
         if (key != "tl_pipeline_stage") {
           annotations.Set(key, value);
         }
       }
-      annotations.Set(tir::attr::software_pipeline_stage, stage_anno.value());
+      annotations.Set(s_tir::attr::software_pipeline_stage, stage_anno.value());
       if (TargetHasAsyncCopy(target_) && use_async_copy_) {
         // Legacy explicit stage/order annotations do not carry per-statement
         // async producer metadata yet, so keep the previous stage-level
         // behavior as a fallback for these loops.
-        annotations.Set(tir::attr::software_pipeline_async_stages,
+        annotations.Set(s_tir::attr::software_pipeline_async_stages,
                         Array<Integer>{0});
       }
       Stmt pipeline_body_root{nullptr};
       Optional<SeqStmt> pipeline_body_seq;
-      if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
+      if (const auto *realize = loop->body.as<SBlockRealizeNode>()) {
         const auto &block = realize->block;
         for (const auto &buffer : block->alloc_buffers) {
           ICHECK(buffer->IsInstance<BufferNode>());
@@ -1258,21 +1186,16 @@ private:
             current = if_then_else->then_case;
             continue;
           }
-          if (const auto *let_stmt = current.as<LetStmtNode>()) {
-            current = let_stmt->body;
-            continue;
-          }
           LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
                      << "because it is not a SeqStmt, IfThenElse without else, "
-                     << "or LetStmt wrapping them, but got "
-                     << current->GetTypeKey();
+                     << "but got " << current->GetTypeKey();
         }
       }
       ICHECK(pipeline_body_seq.defined());
       MaybeAnnotateLegacyAsyncPipelineLoop(
           pipeline_body_root, pipeline_body_seq.value()->seq, order_array,
           stage_array, &annotations);
-      auto for_node = tvm::ffi::GetRef<For>(loop);
+      auto for_node = GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
     }
@@ -1280,8 +1203,31 @@ private:
     if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno->as<IntImmNode>()->value;
+    // Skip software pipelining on ROCm targets where async-copy pipelining
+    // has not been validated.  Currently only gfx950 (CDNA4 / MI350) supports
+    // the full HIP async-copy pipeline path.  gfx942 (CDNA3 / MI300X) has
+    // async-copy hardware but the software pipeline for that target has not
+    // been validated yet, so it falls back to a plain sequential loop as well.
+    // RDNA targets have no async-copy support at all and also fall back.
+    if (TargetIsRocm(target_) && !TargetIsGfx950(target_) && num_stages >= 1) {
+      // Strip the "num_stages" annotation before recursing so that downstream
+      // passes (InjectSoftwarePipeline, MultiVersionBufferRewriter, etc.) do
+      // not treat this loop as pipelined.  Leaving the annotation in place
+      // would cause those passes to multi-version shared buffers and inject
+      // cp.async / barrier code that is incompatible with the plain sequential
+      // execution path chosen here.
+      auto stripped = GetRef<For>(loop);
+      Map<String, Any> annotations;
+      for (const auto &[key, value] : loop->annotations) {
+        if (key != "num_stages") {
+          annotations.Set(key, value);
+        }
+      }
+      stripped.CopyOnWrite()->annotations = annotations;
+      return StmtExprMutator::VisitStmt_(stripped.get());
+    }
     Stmt pipeline_body_root{nullptr};
-    if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
+    if (const auto *realize = loop->body.as<SBlockRealizeNode>()) {
       const auto &block = realize->block;
       for (const auto &buffer : block->alloc_buffers) {
         ICHECK(buffer->IsInstance<BufferNode>());
@@ -1306,20 +1252,15 @@ private:
           current = if_then_else->then_case;
           continue;
         }
-        if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          current = let_stmt->body;
-          continue;
-        }
         LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
                    << "because it is not a SeqStmt, IfThenElse without else, "
-                   << "or LetStmt wrapping them, but got "
-                   << current->GetTypeKey();
+                   << "but got " << current->GetTypeKey();
       }
     }
     ICHECK(pipeline_body_seq.defined());
 
-    CHECK(num_stages >= 1);
-    CHECK(loop->kind == ForKind::kSerial);
+    ICHECK(num_stages >= 1);
+    ICHECK(loop->kind == ForKind::kSerial);
 
     // Flatten nested SeqStmts. TMA copy lowering emits
     // SeqStmt({produce, wait}) which creates nested SeqStmts when placed
@@ -1347,6 +1288,7 @@ private:
       auto pinfo = MakePipelineStageInfo(flat_stmts[i], i, chain_builder);
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
+
     // Build a formal cp.async synchronization model in original statement
     // order:
     //   group := cp_async* then commit
@@ -1664,6 +1606,8 @@ private:
       }
     }
 
+    PropagateScalarProducersForCopy(&pipeline_stage_infos);
+
     // Order explicit cp.async producer groups by the lifetime of the data they
     // introduce. Groups whose data dies earlier should be scheduled earlier in
     // the synthetic stage-0 producer schedule, which also matches the desired
@@ -1784,8 +1728,8 @@ private:
           if (pipeline_stage_infos[commit_stmt_idx].has_cp_async_call()) {
             continue;
           }
-          CHECK_GT(pipeline_stage_infos[commit_stmt_idx].order,
-                   max_cp_async_order)
+          ICHECK_GT(pipeline_stage_infos[commit_stmt_idx].order,
+                    max_cp_async_order)
               << "Pipeline planning error: cp.async commit is scheduled before "
                  "its cp.async calls. commit_stmt="
               << commit_stmt_idx << ", commit_order="
@@ -1870,7 +1814,7 @@ private:
       }
 
       if (dependent_consumer_stage >= 0) {
-        CHECK_GE(dependent_consumer_stage, required_stage)
+        ICHECK_GE(dependent_consumer_stage, required_stage)
             << "Pipeline planning error: wait_group stage cannot be after its "
                "dependent consumer stage. wait_stmt="
             << wait_dep.wait_stmt_index << ", required_stage=" << required_stage
@@ -1912,6 +1856,23 @@ private:
           indeg[v] += 1;
         }
       };
+
+      {
+        auto scalar_def_to_stmt = BuildScalarDefMap(pipeline_stage_infos);
+        for (int consumer_idx = 0; consumer_idx < n; ++consumer_idx) {
+          const auto &consumer = pipeline_stage_infos[consumer_idx];
+          for (const VarNode *var : consumer.scalar_uses) {
+            auto it = scalar_def_to_stmt.find(var);
+            if (it == scalar_def_to_stmt.end() || it->second == consumer_idx) {
+              continue;
+            }
+            int producer_idx = it->second;
+            if (pipeline_stage_infos[producer_idx].stage == consumer.stage) {
+              add_edge(producer_idx, consumer_idx);
+            }
+          }
+        }
+      }
 
       auto group_schedule_key = [&](const CPAsyncGroupInfo &group) {
         int key = std::numeric_limits<int>::max();
@@ -2116,7 +2077,7 @@ private:
         }
       }
 
-      CHECK_EQ(static_cast<int>(topo_order.size()), n)
+      ICHECK_EQ(static_cast<int>(topo_order.size()), n)
           << "Pipeline planning error: cycle detected while enforcing cp.async "
              "ordering constraints.";
 
@@ -2124,6 +2085,8 @@ private:
         pipeline_stage_infos[topo_order[new_order]].order = new_order;
       }
     }
+
+    ValidateScalarDependencies(pipeline_stage_infos);
 
     // Finally, make the pipeline annotation
     Map<String, Any> annotations;
@@ -2147,8 +2110,10 @@ private:
       stages.push_back(pinfo.stage);
     }
 
-    annotations.Set(tir::attr::software_pipeline_stage, Array<Integer>(stages));
-    annotations.Set(tir::attr::software_pipeline_order, Array<Integer>(orders));
+    annotations.Set(s_tir::attr::software_pipeline_stage,
+                    Array<Integer>(stages));
+    annotations.Set(s_tir::attr::software_pipeline_order,
+                    Array<Integer>(orders));
 
     // Propagate per-statement TMA eligibility so InjectSoftwarePipeline can
     // rewrite TMA copies to use pipeline-level barrier management.
@@ -2232,7 +2197,7 @@ private:
         for (int stage_id : sorted_async_stage_ids) {
           async_stages.push_back(Integer(stage_id));
         }
-        annotations.Set(tir::attr::software_pipeline_async_stages,
+        annotations.Set(s_tir::attr::software_pipeline_async_stages,
                         Array<Integer>(async_stages));
       }
     }
@@ -2240,21 +2205,21 @@ private:
     // Reconstruct the loop body with the flattened SeqStmt so that
     // InjectSoftwarePipeline sees the correct number of pipeline stages.
     Stmt new_body_seq = SeqStmt(flat_stmts);
-    // Rebuild any wrapper layers (IfThenElse, LetStmt, BlockRealize)
+    // Rebuild any wrapper layers (IfThenElse, SBlockRealize)
     // between the loop body and the SeqStmt.
     Stmt new_loop_body;
-    if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
+    if (const auto *realize = loop->body.as<SBlockRealizeNode>()) {
       const auto &block = realize->block;
       // Rebuild: body_root → ... → new_body_seq
       // We need to reconstruct the chain from block->body to the SeqStmt.
       Stmt rebuilt_inner = RebuildBodyWrapper(
           block->body, pipeline_body_seq.value(), new_body_seq);
-      Block new_block(block->iter_vars, block->reads, block->writes,
-                      block->name_hint, rebuilt_inner, block->init,
-                      block->alloc_buffers, block->match_buffers,
-                      block->annotations);
+      SBlock new_block(block->iter_vars, block->reads, block->writes,
+                       block->name_hint, rebuilt_inner, block->init,
+                       block->alloc_buffers, block->match_buffers,
+                       block->annotations);
       new_loop_body =
-          BlockRealize(realize->iter_values, realize->predicate, new_block);
+          SBlockRealize(realize->iter_values, realize->predicate, new_block);
     } else {
       new_loop_body = RebuildBodyWrapper(loop->body, pipeline_body_seq.value(),
                                          new_body_seq);
@@ -2264,11 +2229,11 @@ private:
                new_loop_body, loop->thread_binding, annotations);
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
-    Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
+    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.erase(buffer->data);
     }
@@ -2276,7 +2241,7 @@ private:
   }
 
   /*!
-   * \brief Rebuild the chain of wrapper statements (IfThenElse, LetStmt)
+   * \brief Rebuild the chain of wrapper statements (IfThenElse)
    *        between the loop body root and the inner SeqStmt, replacing
    *        the old SeqStmt with the new (flattened) one.
    */
@@ -2291,10 +2256,6 @@ private:
           RebuildBodyWrapper(if_node->then_case, old_seq, new_seq),
           if_node->else_case);
     }
-    if (const auto *let_node = current.as<LetStmtNode>()) {
-      return LetStmt(let_node->var, let_node->value,
-                     RebuildBodyWrapper(let_node->body, old_seq, new_seq));
-    }
     LOG(FATAL) << "RebuildBodyWrapper: unexpected node type "
                << current->GetTypeKey();
     return current;
@@ -2306,10 +2267,10 @@ private:
 };
 
 tvm::transform::Pass PipelinePlanning() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool use_async_copy =
-        ctx->GetConfig<Bool>("tir.use_async_copy", Bool(true)).value();
+        ctx->GetConfig<Bool>("tirx.use_async_copy", Bool(true)).value();
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = PipelinePlanner::Substitute(f, use_async_copy);
     return f;
@@ -2318,7 +2279,7 @@ tvm::transform::Pass PipelinePlanning() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.PipelinePlanning", PipelinePlanning);
 }
 

@@ -12,7 +12,7 @@ Compared with the DeepSeek V3.2 sparse prefill kernel:
 import torch
 import tilelang
 from tilelang import language as T
-from tvm import tir
+from tvm import tirx as tir
 
 from .gdn_common import cosize
 from .sparse_mla_prefill_common import (
@@ -44,9 +44,7 @@ def sparse_attention_fwd_kernel_model1(
     threads=640,
     has_attn_sink=False,
 ):
-    assert dim == tilelang.math.next_power_of_2(dim), (
-        f"haven't check padding correctness yet, dim={dim}"
-    )
+    assert dim == tilelang.math.next_power_of_2(dim), f"haven't check padding correctness yet, dim={dim}"
     assert topk % block_i == 0, "topk must be a multiple of block_i"
     if extra_topk > 0:
         assert extra_topk % block_i == 0, "extra_topk must be a multiple of block_i"
@@ -154,9 +152,7 @@ def sparse_attention_fwd_kernel_model1(
 
             g_i = by
             s_i = bx if head_repeats == 1 else (bx // head_repeats)
-            h0 = g_i * padded_head_kv + (
-                0 if head_repeats == 1 else (bx % head_repeats) * 64
-            )
+            h0 = g_i * padded_head_kv + (0 if head_repeats == 1 else (bx % head_repeats) * 64)
             h1 = h0 + heads_per_block
             tid = T.get_thread_binding()
 
@@ -188,12 +184,8 @@ def sparse_attention_fwd_kernel_model1(
                 max_logits = T.alloc_fragment([heads_per_block], accum_dtype)
                 acc_s = T.alloc_fragment([heads_per_block, block_i], accum_dtype)
                 acc_s_cast = T.alloc_fragment([heads_per_block, block_i], dtype)
-                acc_o_l_0 = T.alloc_fragment(
-                    [heads_per_block, dim_qk // 4], accum_dtype
-                )
-                acc_o_l_1 = T.alloc_fragment(
-                    [heads_per_block, dim_qk // 4], accum_dtype
-                )
+                acc_o_l_0 = T.alloc_fragment([heads_per_block, dim_qk // 4], accum_dtype)
+                acc_o_l_1 = T.alloc_fragment([heads_per_block, dim_qk // 4], accum_dtype)
                 kv_reg_l = T.alloc_local([64], dtype)
                 consumer0_ldg_tx = tid % 8
                 consumer0_ldg_ty = tid // 8
@@ -221,9 +213,7 @@ def sparse_attention_fwd_kernel_model1(
 
                     T.annotate_layout(
                         {
-                            kv_shared_l[
-                                :, :
-                            ]: tilelang.layout.make_sqmma_swizzled_layout(
+                            kv_shared_l[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                 kv_shared_l[:, :],
                                 k_major=True,
                             )
@@ -244,8 +234,7 @@ def sparse_attention_fwd_kernel_model1(
                         for u in T.unroll(4):
                             for v in T.vectorized(8):
                                 kv_reg_l[r * 32 + u * 8 + v] = kv_shared_l[
-                                    ((consumer0_ldg_ty + r * 32) % 8) * (block_i // 8)
-                                    + (consumer0_ldg_ty + r * 32) // 8,
+                                    ((consumer0_ldg_ty + r * 32) % 8) * (block_i // 8) + (consumer0_ldg_ty + r * 32) // 8,
                                     64 * u + consumer0_ldg_tx * 8 + v,
                                 ]
                     T.warpgroup_commit_batch()
@@ -256,9 +245,7 @@ def sparse_attention_fwd_kernel_model1(
                     T.barrier_wait(bar_kv1_ready, (i_i & 1))
                     T.annotate_layout(
                         {
-                            kv_shared_r[
-                                :, :
-                            ]: tilelang.layout.make_sqmma_swizzled_layout(
+                            kv_shared_r[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                 kv_shared_r[:, :],
                                 k_major=True,
                             )
@@ -284,9 +271,7 @@ def sparse_attention_fwd_kernel_model1(
                     for h_i in T.Parallel(heads_per_block):
                         alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
                     for h_i, bi_i in T.Parallel(heads_per_block, block_i):
-                        acc_s[h_i, bi_i] = T.exp2(
-                            acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale
-                        )
+                        acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
 
                     T.reduce_sum(acc_s, sumexp_i, dim=1)
                     for h_i in T.Parallel(heads_per_block):
@@ -307,9 +292,7 @@ def sparse_attention_fwd_kernel_model1(
 
                     T.annotate_layout(
                         {
-                            v_shared_0[
-                                :, :
-                            ]: tilelang.layout.make_sqmma_swizzled_layout(
+                            v_shared_0[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                 v_shared_0[:, :],
                                 k_major=False,
                             )
@@ -339,9 +322,7 @@ def sparse_attention_fwd_kernel_model1(
 
                     T.annotate_layout(
                         {
-                            v_shared_1[
-                                :, :
-                            ]: tilelang.layout.make_sqmma_swizzled_layout(
+                            v_shared_1[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                 v_shared_1[:, :],
                                 k_major=False,
                             )
@@ -394,13 +375,7 @@ def sparse_attention_fwd_kernel_model1(
                 if has_attn_sink:
                     for h_i, d_i in T.Parallel(heads_per_block, dim_qk // 4):
                         if sumexp_inv[h_i] > 0:
-                            sink_scale = 1 / (
-                                1
-                                + T.exp2(
-                                    attn_sink[h0 + h_i] * 1.4426950408889634
-                                    - sumexp[h_i]
-                                )
-                            )
+                            sink_scale = 1 / (1 + T.exp2(attn_sink[h0 + h_i] * 1.4426950408889634 - sumexp[h_i]))
                             acc_o_l_0[h_i, d_i] *= sink_scale
                             acc_o_l_1[h_i, d_i] *= sink_scale
 
@@ -410,12 +385,8 @@ def sparse_attention_fwd_kernel_model1(
                 for h_i in T.Parallel(heads_per_block):
                     lse[s_i, h0 + h_i] = sumexp[h_i] * 0.6931471805599453
             elif tid < 512:
-                acc_o_r_0 = T.alloc_fragment(
-                    [heads_per_block, dim_qk // 4], accum_dtype
-                )
-                acc_o_r_1 = T.alloc_fragment(
-                    [heads_per_block, dim_qk // 4], accum_dtype
-                )
+                acc_o_r_0 = T.alloc_fragment([heads_per_block, dim_qk // 4], accum_dtype)
+                acc_o_r_1 = T.alloc_fragment([heads_per_block, dim_qk // 4], accum_dtype)
                 kv_reg_r = T.alloc_local([64], dtype)
                 T.fill(acc_o_r_0, 0)
                 T.fill(acc_o_r_1, 0)
@@ -429,8 +400,7 @@ def sparse_attention_fwd_kernel_model1(
                         for u in T.unroll(4):
                             for v in T.vectorized(8):
                                 kv_reg_r[r * 32 + u * 8 + v] = kv_shared_r[
-                                    ((consumer1_ldg_ty + r * 32) % 8) * (block_i // 8)
-                                    + (consumer1_ldg_ty + r * 32) // 8,
+                                    ((consumer1_ldg_ty + r * 32) % 8) * (block_i // 8) + (consumer1_ldg_ty + r * 32) // 8,
                                     64 * u + consumer1_ldg_tx * 8 + v,
                                 ]
 
@@ -439,9 +409,7 @@ def sparse_attention_fwd_kernel_model1(
                     T.barrier_wait(bar_vl0_free, (i_i & 1))
                     T.annotate_layout(
                         {
-                            v_shared_0[
-                                :, :
-                            ]: tilelang.layout.make_sqmma_swizzled_layout(
+                            v_shared_0[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                 v_shared_0[:, :],
                                 k_major=False,
                             )
@@ -478,9 +446,7 @@ def sparse_attention_fwd_kernel_model1(
                     T.barrier_wait(bar_vl1_free, (i_i & 1))
                     T.annotate_layout(
                         {
-                            v_shared_1[
-                                :, :
-                            ]: tilelang.layout.make_sqmma_swizzled_layout(
+                            v_shared_1[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                 v_shared_1[:, :],
                                 k_major=False,
                             )
@@ -516,13 +482,7 @@ def sparse_attention_fwd_kernel_model1(
                 if has_attn_sink:
                     for h_i, d_i in T.Parallel(heads_per_block, dim_qk // 4):
                         if sum_exp_inv_shared[h_i] > 0:
-                            sink_scale = 1 / (
-                                1
-                                + T.exp2(
-                                    attn_sink[h0 + h_i] * 1.4426950408889634
-                                    - lse_shared[h_i]
-                                )
-                            )
+                            sink_scale = 1 / (1 + T.exp2(attn_sink[h0 + h_i] * 1.4426950408889634 - lse_shared[h_i]))
                             acc_o_r_0[h_i, d_i] *= sink_scale
                             acc_o_r_1[h_i, d_i] *= sink_scale
 
@@ -530,9 +490,7 @@ def sparse_attention_fwd_kernel_model1(
                     acc_o_r_0,
                     output[s_i, h0:h1, dim_qk // 2 : dim_qk // 2 + dim_qk // 4],
                 )
-                T.copy(
-                    acc_o_r_1, output[s_i, h0:h1, dim_qk // 2 + dim_qk // 4 : dim_qk]
-                )
+                T.copy(acc_o_r_1, output[s_i, h0:h1, dim_qk // 2 + dim_qk // 4 : dim_qk])
             else:
                 kperm_mask_local = T.alloc_local([4], "bool")
                 kperm_indices_local = T.alloc_local([4], indices_dtype)
@@ -554,9 +512,7 @@ def sparse_attention_fwd_kernel_model1(
                             )
                             kperm_indices_local[r] = indices[s_i, g_i, token_pos]
                             kperm_mask_local[r] = (
-                                kperm_indices_local[r] >= 0
-                                and kperm_indices_local[r] < seq_len_kv
-                                and token_pos < topk_len_local[0]
+                                kperm_indices_local[r] >= 0 and kperm_indices_local[r] < seq_len_kv and token_pos < topk_len_local[0]
                             )
                             kperm_indices_local[r] = T.if_then_else(
                                 kperm_mask_local[r],
@@ -567,9 +523,7 @@ def sparse_attention_fwd_kernel_model1(
                         T.barrier_wait(bar_kv0_free, (i_i & 1) ^ 1)
                         T.annotate_layout(
                             {
-                                kv_shared_l[
-                                    :, :
-                                ]: tilelang.layout.make_sqmma_swizzled_layout(
+                                kv_shared_l[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                     kv_shared_l[:, :],
                                     k_major=True,
                                 )
@@ -594,10 +548,9 @@ def sparse_attention_fwd_kernel_model1(
                                         src_robust_desc=kv_robust_desc,
                                     )
                         for r in T.unroll(4):
-                            is_kv_valid[
-                                ((r * 16 + producer_ldg_ty) % 8) * (block_i // 8)
-                                + (r * 16 + producer_ldg_ty) // 8
-                            ] = kperm_mask_local[r]
+                            is_kv_valid[((r * 16 + producer_ldg_ty) % 8) * (block_i // 8) + (r * 16 + producer_ldg_ty) // 8] = (
+                                kperm_mask_local[r]
+                            )
                         T.ptx_commit_group()
                         T.ptx_wait_group(0)
                         T.lma_wait()
@@ -606,9 +559,7 @@ def sparse_attention_fwd_kernel_model1(
                         T.barrier_wait(bar_kv1_free, (i_i & 1) ^ 1)
                         T.annotate_layout(
                             {
-                                kv_shared_r[
-                                    :, :
-                                ]: tilelang.layout.make_sqmma_swizzled_layout(
+                                kv_shared_r[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                     kv_shared_r[:, :],
                                     k_major=True,
                                 )
@@ -623,10 +574,7 @@ def sparse_attention_fwd_kernel_model1(
                                         kv[
                                             kperm_indices_local[r],
                                             g_i,
-                                            dim_qk // 2
-                                            + 64 * u
-                                            + producer_ldg_tx * 8
-                                            + v,
+                                            dim_qk // 2 + 64 * u + producer_ldg_tx * 8 + v,
                                         ],
                                         kv_shared_r[
                                             r * 16 + producer_ldg_ty,
@@ -661,9 +609,7 @@ def sparse_attention_fwd_kernel_model1(
                         T.barrier_wait(bar_kv0_free, (i_i & 1) ^ 1)
                         T.annotate_layout(
                             {
-                                kv_shared_l[
-                                    :, :
-                                ]: tilelang.layout.make_sqmma_swizzled_layout(
+                                kv_shared_l[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                     kv_shared_l[:, :],
                                     k_major=True,
                                 )
@@ -688,10 +634,9 @@ def sparse_attention_fwd_kernel_model1(
                                         src_robust_desc=extra_kv_robust_desc,
                                     )
                         for r in T.unroll(4):
-                            is_kv_valid[
-                                ((r * 16 + producer_ldg_ty) % 8) * (block_i // 8)
-                                + (r * 16 + producer_ldg_ty) // 8
-                            ] = kperm_mask_local[r]
+                            is_kv_valid[((r * 16 + producer_ldg_ty) % 8) * (block_i // 8) + (r * 16 + producer_ldg_ty) // 8] = (
+                                kperm_mask_local[r]
+                            )
                         T.ptx_commit_group()
                         T.ptx_wait_group(0)
                         T.lma_wait()
@@ -700,9 +645,7 @@ def sparse_attention_fwd_kernel_model1(
                         T.barrier_wait(bar_kv1_free, (i_i & 1) ^ 1)
                         T.annotate_layout(
                             {
-                                kv_shared_r[
-                                    :, :
-                                ]: tilelang.layout.make_sqmma_swizzled_layout(
+                                kv_shared_r[:, :]: tilelang.layout.make_sqmma_swizzled_layout(
                                     kv_shared_r[:, :],
                                     k_major=True,
                                 )
@@ -717,10 +660,7 @@ def sparse_attention_fwd_kernel_model1(
                                         extra_kv[
                                             kperm_indices_local[r],
                                             g_i,
-                                            dim_qk // 2
-                                            + 64 * u
-                                            + producer_ldg_tx * 8
-                                            + v,
+                                            dim_qk // 2 + 64 * u + producer_ldg_tx * 8 + v,
                                         ],
                                         kv_shared_r[
                                             r * 16 + producer_ldg_ty,
@@ -762,15 +702,9 @@ def sparse_mla_fwd_interface_model1(
     seq_len_kv, kv_group, _ = kv.shape
 
     dim = d_v
-    assert kv_group == 1, (
-        "Only MQA (kv_group == 1) is validated for model1 sparse prefill"
-    )
-    assert dim_q == dim, (
-        f"MODEL1 expects q last_dim == kv last_dim == {dim}, got q={dim_q}, kv={kv.shape[-1]}"
-    )
-    assert kv.shape[-1] == dim, (
-        f"MODEL1 expects kv last_dim == {dim}, got {kv.shape[-1]}"
-    )
+    assert kv_group == 1, "Only MQA (kv_group == 1) is validated for model1 sparse prefill"
+    assert dim_q == dim, f"MODEL1 expects q last_dim == kv last_dim == {dim}, got q={dim_q}, kv={kv.shape[-1]}"
+    assert kv.shape[-1] == dim, f"MODEL1 expects kv last_dim == {dim}, got {kv.shape[-1]}"
     assert dim == 512, f"MODEL1 kernel currently expects dim == d_v == 512, got {dim}"
 
     _, _, topk = indices.shape
@@ -789,9 +723,7 @@ def sparse_mla_fwd_interface_model1(
         assert extra_indices is None, "extra_indices requires extra_kv"
         assert extra_topk_length is None, "extra_topk_length requires extra_kv"
 
-    topk_length = require_token_lengths(
-        topk_length, seq_len, topk, q.device, "topk_length"
-    )
+    topk_length = require_token_lengths(topk_length, seq_len, topk, q.device, "topk_length")
     if extra_kv is not None:
         extra_topk_length = require_token_lengths(
             extra_topk_length,
