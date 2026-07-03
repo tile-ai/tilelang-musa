@@ -557,5 +557,53 @@ def test_ph1_gemm_ab_stage_stride_accounts_for_tile_bytes():
     assert _int_values(b_shared.strides) == [2048, 64, 1]
 
 
+def test_inject_software_pipeline_replays_scalar_bind_per_stage_use():
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 0, 1],
+                    "software_pipeline_order": [1, 2, 0],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [0, 1, 0],
+                    "software_pipeline_async_producer_groups": [-1, 0, -1],
+                },
+            ):
+                base: T.int32 = i * 16
+                with T.block("copy"):
+                    T.reads(A[base + tx])
+                    T.writes(shared[tx])
+                    shared[tx] = A[base + tx]
+                with T.block("store"):
+                    T.reads(shared[tx])
+                    T.writes(B[base + tx])
+                    B[base + tx] = shared[tx]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_bind_blocks = {"copy": 0, "store": 0}
+
+    def _visit(node):
+        if not isinstance(node, tvm.tir.Block) or str(node.name_hint) not in leading_bind_blocks:
+            return
+        body = node.body
+        assert isinstance(
+            body, tvm.tir.LetStmt
+        ), f"{node.name_hint} body should start with scalar LetStmt"
+        assert str(body.var.name).startswith("base")
+        leading_bind_blocks[str(node.name_hint)] += 1
+
+    post_order_visit(mod["main"].body, _visit)
+
+    assert leading_bind_blocks["copy"] > 0
+    assert leading_bind_blocks["store"] > 0
+    assert "base = T.int32()" not in mod["main"].script()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
