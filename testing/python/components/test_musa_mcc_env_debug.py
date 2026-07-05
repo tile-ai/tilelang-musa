@@ -2,8 +2,25 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
+from types import SimpleNamespace
 
 import tilelang.contrib.mcc as mcc
+
+
+def test_get_musa_compute_version_uses_current_device(monkeypatch):
+    requested_devices = []
+    fake_musa = SimpleNamespace(is_available=lambda: True, current_device=lambda: 2)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(musa=fake_musa))
+    monkeypatch.setattr(
+        mcc.tvm,
+        "musa",
+        lambda device_id: requested_devices.append(device_id)
+        or SimpleNamespace(exist=True, compute_version="3.1"),
+    )
+
+    assert mcc.get_musa_compute_version() == "3.1"
+    assert requested_devices == [2]
 
 
 def test_dump_kernel_source_writes_numbered_source_and_commands(tmp_path, monkeypatch):

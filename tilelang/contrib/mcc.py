@@ -426,9 +426,18 @@ def get_musa_compute_version(target=None):
             return arch[0] + "." + arch[1]
         return arch[:-1] + "." + arch[-1]
 
+    device_id = 0
+    try:
+        import torch
+
+        if hasattr(torch, "musa") and torch.musa.is_available():
+            device_id = torch.musa.current_device()
+    except Exception:
+        pass
+
     # 3. GPU compute version
     if hasattr(tvm, "musa"):
-        dev = tvm.musa(0)
+        dev = tvm.musa(device_id)
         if dev.exist:
             return dev.compute_version
 
@@ -438,7 +447,7 @@ def get_musa_compute_version(target=None):
         import torch
 
         if hasattr(torch, "musa") and torch.musa.is_available():
-            props = torch.musa.get_device_properties(0)
+            props = torch.musa.get_device_properties(device_id)
             major = getattr(props, "major", None)
             minor = getattr(props, "minor", None)
             if major is not None and minor is not None:
