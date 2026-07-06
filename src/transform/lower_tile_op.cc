@@ -4,10 +4,12 @@
  */
 
 #include "support/check.h"
+#include <optional>
 #include <string>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
@@ -37,6 +39,149 @@ namespace tl {
 
 using namespace tirx;
 using namespace ffi;
+
+static bool ShapesStructurallyEqual(const Array<PrimExpr> &lhs,
+                                    const Array<PrimExpr> &rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  StructuralEqual equal;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!equal(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static std::optional<int64_t> ConstProductShape(const Array<PrimExpr> &shape) {
+  int64_t product = 1;
+  for (const PrimExpr &dim : shape) {
+    const auto *imm = dim.as<IntImmNode>();
+    if (imm == nullptr) {
+      return std::nullopt;
+    }
+    product *= imm->value;
+  }
+  return product;
+}
+
+static std::optional<Array<PrimExpr>>
+PreserveSharedStageStrides(const Buffer &buffer, const Layout &layout,
+                           const Array<PrimExpr> &output_shape) {
+  if (!IsSharedBuffer(buffer) || buffer->strides.empty()) {
+    return std::nullopt;
+  }
+  if (buffer->strides.size() == output_shape.size() &&
+      ShapesStructurallyEqual(buffer->shape, output_shape)) {
+    return buffer->strides;
+  }
+  if (buffer->shape.empty() || output_shape.size() < 2 ||
+      buffer->strides.size() != buffer->shape.size()) {
+    return std::nullopt;
+  }
+
+  Var stage_var = InputPlaceholder(0);
+  std::optional<size_t> stage_dim;
+  for (size_t i = 0; i < layout->GetForwardIndex().size(); ++i) {
+    bool uses_stage =
+        UsesVar(layout->GetForwardIndex()[i], [&](const VarNode *var) {
+          return GetRef<Var>(var).same_as(stage_var);
+        });
+    if (!uses_stage) {
+      continue;
+    }
+    if (stage_dim.has_value()) {
+      return std::nullopt;
+    }
+    stage_dim = i;
+  }
+  if (!stage_dim.has_value() || stage_dim.value() >= output_shape.size() ||
+      !StructuralEqual()(buffer->shape[0], output_shape[stage_dim.value()])) {
+    return std::nullopt;
+  }
+  if (stage_dim.value() != 0) {
+    return std::nullopt;
+  }
+
+  Array<PrimExpr> per_stage_shape;
+  per_stage_shape.reserve(output_shape.size() - 1);
+  for (size_t i = 0; i < output_shape.size(); ++i) {
+    if (i != stage_dim.value()) {
+      per_stage_shape.push_back(output_shape[i]);
+    }
+  }
+  auto per_stage_extent = ConstProductShape(per_stage_shape);
+  if (!per_stage_extent.has_value() || per_stage_extent.value() <= 0) {
+    return std::nullopt;
+  }
+  const auto *stage_stride = buffer->strides[0].as<IntImmNode>();
+  if (stage_stride != nullptr &&
+      stage_stride->value < per_stage_extent.value()) {
+    return std::nullopt;
+  }
+
+  std::vector<PrimExpr> strides(output_shape.size());
+  PrimExpr stride = Integer(1);
+  for (int i = static_cast<int>(output_shape.size()) - 1; i >= 0; --i) {
+    if (static_cast<size_t>(i) == stage_dim.value()) {
+      continue;
+    }
+    strides[i] = stride;
+    stride = stride * output_shape[i];
+  }
+
+  Array<PrimExpr> output_strides;
+  output_strides.reserve(output_shape.size());
+  for (size_t i = 0; i < output_shape.size(); ++i) {
+    output_strides.push_back(i == stage_dim.value() ? buffer->strides[0]
+                                                    : strides[i]);
+  }
+  return output_strides;
+}
+
+static Layout CanonicalizeSharedStageLayout(const Buffer &buffer,
+                                            const Layout &layout) {
+  if (!IsSharedBuffer(buffer) || buffer->strides.empty() ||
+      buffer->shape.empty() || !layout.defined()) {
+    return layout;
+  }
+
+  Var stage_var = InputPlaceholder(0);
+  std::optional<size_t> stage_dim;
+  auto forward_index = layout->GetForwardIndex();
+  for (size_t i = 0; i < forward_index.size(); ++i) {
+    bool uses_stage = UsesVar(forward_index[i], [&](const VarNode *var) {
+      return GetRef<Var>(var).same_as(stage_var);
+    });
+    if (!uses_stage) {
+      continue;
+    }
+    if (stage_dim.has_value()) {
+      return layout;
+    }
+    stage_dim = i;
+  }
+  if (!stage_dim.has_value() || stage_dim.value() == 0) {
+    return layout;
+  }
+
+  auto output_shape = layout->OutputShape();
+  if (stage_dim.value() >= output_shape.size() ||
+      !StructuralEqual()(buffer->shape[0], output_shape[stage_dim.value()])) {
+    return layout;
+  }
+
+  Array<PrimExpr> reordered_forward;
+  reordered_forward.reserve(forward_index.size());
+  reordered_forward.push_back(forward_index[stage_dim.value()]);
+  for (size_t i = 0; i < forward_index.size(); ++i) {
+    if (i != stage_dim.value()) {
+      reordered_forward.push_back(forward_index[i]);
+    }
+  }
+  return Layout(layout->InputShape(), reordered_forward);
+}
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
@@ -82,9 +227,14 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
       output_shape.insert(output_shape.begin(), replicate_extent);
     }
   }
-  return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
-                buffer->name, buffer->data_alignment, buffer->offset_factor,
-                buffer->buffer_type);
+  Array<PrimExpr> output_strides;
+  if (auto preserved_strides =
+          PreserveSharedStageStrides(buffer, layout, output_shape)) {
+    output_strides = preserved_strides.value();
+  }
+  return Buffer(new_var, buffer->dtype, output_shape, output_strides,
+                buffer->elem_offset, buffer->name, buffer->data_alignment,
+                buffer->offset_factor, buffer->buffer_type);
 }
 
 // The function `makeBufferWithLayout` creates a new Buffer object based on the
@@ -324,16 +474,68 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
+  bool BufferHasExplicitStrides(const Buffer &buffer) const {
+    return !buffer->strides.empty() &&
+           buffer->strides.size() == buffer->shape.size();
+  }
+
+  bool SameShape(const Buffer &lhs, const Buffer &rhs) const {
+    return ShapesStructurallyEqual(lhs->shape, rhs->shape);
+  }
+
+  bool PreferBufferAlias(const Buffer &candidate, const Buffer &current) const {
+    return BufferHasExplicitStrides(candidate) &&
+           !BufferHasExplicitStrides(current) && SameShape(candidate, current);
+  }
+
+  void RecordBufferAlias(const Buffer &buffer) {
+    auto it = buffer_map_.find(buffer->data);
+    if (it == buffer_map_.end()) {
+      buffer_map_.insert({buffer->data, buffer});
+    } else if (PreferBufferAlias(buffer, it->second)) {
+      it->second = buffer;
+    }
+    auto preferred = buffer_map_.find(buffer->data);
+    if (preferred != buffer_map_.end()) {
+      buffer_data_to_buffer_.Set(buffer->data, preferred->second);
+    }
+  }
+
+  Buffer PreferredBufferAlias(const Buffer &buffer) const {
+    auto it = buffer_map_.find(buffer->data);
+    if (it != buffer_map_.end() && PreferBufferAlias(it->second, buffer)) {
+      return it->second;
+    }
+    return buffer;
+  }
+
+  void SetLayoutBoolHintWithAliases(Map<Layout, Bool> *dst,
+                                    const Layout &layout, Bool value) {
+    dst->Set(layout, value);
+    for (const auto &[original, canonical] : layout_aliases_) {
+      if (original.same_as(layout)) {
+        dst->Set(canonical, value);
+      }
+    }
+  }
+
+  void SetLayoutExprHintWithAliases(Map<Layout, PrimExpr> *dst,
+                                    const Layout &layout, PrimExpr value) {
+    dst->Set(layout, value);
+    for (const auto &[original, canonical] : layout_aliases_) {
+      if (original.same_as(layout)) {
+        dst->Set(canonical, value);
+      }
+    }
+  }
+
   Stmt VisitStmt_(const SBlockNode *op) final {
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
-      buffer_map_.insert({buffer->data, buffer});
+      RecordBufferAlias(buffer);
     }
     for (auto match_buffer : op->match_buffers) {
-      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
-    }
-    for (auto buffer : op->alloc_buffers) {
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
+      RecordBufferAlias(match_buffer->buffer);
     }
     Map<Var, Layout> vmap;
     if (op->annotations.count(attr::kLayoutMap)) {
@@ -341,9 +543,20 @@ private:
                             .as<Map<Buffer, Layout>>()
                             .value();
       for (auto [buffer, layout] : layout_map) {
-        buffer_remap_.Set(buffer,
-                          makeBufferWithLayout(buffer, layout, var_remap_));
-        layout_map_.Set(buffer, layout);
+        Buffer layout_buffer = PreferredBufferAlias(buffer);
+        Layout canonical_layout =
+            CanonicalizeSharedStageLayout(layout_buffer, layout);
+        if (!canonical_layout.same_as(layout)) {
+          layout_aliases_.push_back({layout, canonical_layout});
+        }
+        Buffer remapped =
+            makeBufferWithLayout(layout_buffer, canonical_layout, var_remap_);
+        buffer_remap_.Set(buffer, remapped);
+        layout_map_.Set(buffer, canonical_layout);
+        if (!layout_buffer.same_as(buffer)) {
+          buffer_remap_.Set(layout_buffer, remapped);
+          layout_map_.Set(layout_buffer, canonical_layout);
+        }
       }
     }
     if (op->annotations.count("layout_override_seq")) {
@@ -357,23 +570,39 @@ private:
             if (!buffer_data_to_buffer_.count(var)) {
               continue;
             }
-            resolved_step_layouts.Set(buffer_data_to_buffer_[var], layout);
+            Buffer step_buffer = buffer_data_to_buffer_[var];
+            Layout canonical_layout =
+                CanonicalizeSharedStageLayout(step_buffer, layout);
+            if (!canonical_layout.same_as(layout)) {
+              layout_aliases_.push_back({layout, canonical_layout});
+            }
+            resolved_step_layouts.Set(step_buffer, canonical_layout);
           }
           layout_override_steps_[step] = resolved_step_layouts;
         }
       }
     }
     if (op->annotations.count(attr::kKMajorMap)) {
-      layout_k_major_ =
+      auto k_major_map =
           Downcast<Map<Layout, Bool>>(op->annotations.at(attr::kKMajorMap));
+      for (const auto &[layout, k_major] : k_major_map) {
+        SetLayoutBoolHintWithAliases(&layout_k_major_, layout, k_major);
+      }
     }
     if (op->annotations.count(attr::kSqmmaMap)) {
-      layout_sqmma_ =
+      auto sqmma_map =
           Downcast<Map<Layout, Bool>>(op->annotations.at(attr::kSqmmaMap));
+      for (const auto &[layout, is_sqmma] : sqmma_map) {
+        SetLayoutBoolHintWithAliases(&layout_sqmma_, layout, is_sqmma);
+      }
     }
     if (op->annotations.count(attr::kSqmmaInstSplitMap)) {
-      layout_sqmma_inst_split_ = Downcast<Map<Layout, PrimExpr>>(
+      auto inst_split_map = Downcast<Map<Layout, PrimExpr>>(
           op->annotations.at(attr::kSqmmaInstSplitMap));
+      for (const auto &[layout, inst_split] : inst_split_map) {
+        SetLayoutExprHintWithAliases(&layout_sqmma_inst_split_, layout,
+                                     inst_split);
+      }
     }
     // Extract cluster_size from cluster_dims annotation
     if (op->annotations.count("cluster_dims")) {
@@ -393,8 +622,9 @@ private:
     block_ptr->annotations.erase("layout_override_seq");
     for (size_t i = 0; i < block->alloc_buffers.size(); i++) {
       auto buffer = block->alloc_buffers[i];
-      if (buffer_remap_.count(buffer)) {
-        block_ptr->alloc_buffers.Set(i, buffer_remap_[buffer]);
+      Optional<Buffer> remap_key = FindRemapBuffer(buffer);
+      if (remap_key.defined() && buffer_remap_.count(remap_key.value())) {
+        block_ptr->alloc_buffers.Set(i, buffer_remap_[remap_key.value()]);
       } else if (IsFragmentBuffer(buffer)) {
         const auto *ptr_type =
             TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
@@ -466,6 +696,59 @@ private:
     bool rewritten{false};
   };
 
+  PrimExpr LinearizeIndicesForBuffer(const Buffer &buffer,
+                                     const Array<PrimExpr> &indices) {
+    ICHECK_EQ(indices.size(), buffer->shape.size())
+        << "Indices size and shape size must match for buffer " << buffer->name
+        << ", but got indices size: " << indices.size()
+        << " and shape size: " << buffer->shape.size();
+    PrimExpr elem_offset = 0;
+    if (!buffer->strides.empty()) {
+      ICHECK_EQ(buffer->strides.size(), indices.size())
+          << "Buffer strides and indices must have the same rank for buffer "
+          << buffer->name;
+      for (size_t i = 0; i < indices.size(); ++i) {
+        elem_offset += indices[i] * buffer->strides[i];
+      }
+      return analyzer_->Simplify(elem_offset);
+    }
+
+    PrimExpr stride = 1;
+    for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
+      elem_offset += indices[i] * stride;
+      stride *= buffer->shape[i];
+    }
+    return analyzer_->Simplify(elem_offset);
+  }
+
+  Array<PrimExpr> OffsetToIndicesForBuffer(const Buffer &buffer,
+                                           PrimExpr elem_offset) {
+    Array<PrimExpr> indices;
+    if (!buffer->strides.empty()) {
+      ICHECK_EQ(buffer->strides.size(), buffer->shape.size())
+          << "Buffer strides and shape must have the same rank for buffer "
+          << buffer->name;
+      PrimExpr remaining_offset = elem_offset;
+      for (size_t i = 0; i < buffer->shape.size(); ++i) {
+        PrimExpr index =
+            analyzer_->Simplify(floordiv(remaining_offset, buffer->strides[i]));
+        indices.push_back(index);
+        remaining_offset =
+            analyzer_->Simplify(remaining_offset - index * buffer->strides[i]);
+      }
+      return indices;
+    }
+
+    PrimExpr remaining_offset = elem_offset;
+    for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
+      indices.insert(indices.begin(), analyzer_->Simplify(floormod(
+                                          remaining_offset, buffer->shape[i])));
+      remaining_offset =
+          analyzer_->Simplify(floordiv(remaining_offset, buffer->shape[i]));
+    }
+    return indices;
+  }
+
   AccessPtrResult
   HandleAccessPtrAndOffset(const PrimExpr &access_ptr,
                            const Optional<PrimExpr> &offset = std::nullopt,
@@ -498,14 +781,17 @@ private:
       }
 
       Buffer original_buffer = it->second;
+      Buffer remap_key =
+          FindRemapBuffer(original_buffer).value_or(original_buffer);
 
       // Check if this buffer has a layout
-      if (!layout_map_.count(original_buffer)) {
+      Optional<Layout> layout_opt = FindLayout(remap_key);
+      if (!layout_opt.defined() || !buffer_remap_.count(remap_key)) {
         return result; // No layout, no transformation needed
       }
 
-      Layout layout = layout_map_[original_buffer];
-      Buffer new_buffer = buffer_remap_[original_buffer];
+      Layout layout = layout_opt.value();
+      Buffer new_buffer = buffer_remap_[remap_key];
 
       // In TMA context, swizzle is encoded in TMA descriptor parameters
       // rather than in memory indices, so we only update buffer data
@@ -526,29 +812,13 @@ private:
       if (offset.defined()) {
         elem_offset = elem_offset + offset.value();
       }
-      // Get original and new buffer shapes
-      Array<PrimExpr> old_shape = original_buffer->shape;
-      Array<PrimExpr> new_shape = new_buffer->shape;
       // Convert linear offset to multi-dimensional indices
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = elem_offset;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(
-            multi_dim_indices.begin(),
-            analyzer_->Simplify(floormod(remaining_offset, old_shape[i])));
-        remaining_offset =
-            analyzer_->Simplify(floordiv(remaining_offset, old_shape[i]));
-      }
+      Array<PrimExpr> multi_dim_indices =
+          OffsetToIndicesForBuffer(remap_key, elem_offset);
       // Apply layout transformation
       auto forward_indices = layout->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
-      }
-      new_offset = analyzer_->Simplify(new_offset);
-      Array<PrimExpr> new_indices;
+      PrimExpr new_offset =
+          LinearizeIndicesForBuffer(new_buffer, forward_indices);
       layout_remap_.Set(new_buffer, layout);
 
       // Build new tvm_access_ptr call with new buffer and offset
@@ -573,13 +843,6 @@ private:
       }
       BufferLoad load = Downcast<BufferLoad>(access_ptr_call->args[0]);
       Array<PrimExpr> indices = load->indices;
-      Array<PrimExpr> old_shape = load->buffer->shape;
-
-      ICHECK_EQ(indices.size(), old_shape.size())
-          << "Indices size and shape size must match for general N-dimensional "
-             "buffer "
-          << "but got indices size: " << indices.size()
-          << " and shape size: " << old_shape.size();
 
       Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
       Optional<Layout> layout = FindLayout(remap_key);
@@ -589,7 +852,6 @@ private:
       auto new_buffer = buffer_remap_.count(remap_key)
                             ? buffer_remap_[remap_key]
                             : load->buffer;
-      auto new_shape = new_buffer->shape;
 
       // In TMA context, swizzle is encoded in TMA descriptor parameters
       // rather than in memory indices, so we only update buffer data
@@ -606,13 +868,7 @@ private:
         return result;
       }
 
-      PrimExpr elem_offset = 0;
-      PrimExpr stride = 1;
-
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        elem_offset += indices[i] * stride;
-        stride *= old_shape[i];
-      }
+      PrimExpr elem_offset = LinearizeIndicesForBuffer(remap_key, indices);
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
@@ -623,30 +879,15 @@ private:
       (void)buffer_row_size;
 
       // Convert offset to target-dimension, reindex it and convert it back
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = smem_offset;
-
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(multi_dim_indices.begin(),
-                                 floormod(remaining_offset, old_shape[i]));
-        remaining_offset = floordiv(remaining_offset, old_shape[i]);
-      }
+      Array<PrimExpr> multi_dim_indices =
+          OffsetToIndicesForBuffer(remap_key, smem_offset);
 
       auto forward_indices = layout.value()->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
-      }
-      new_offset = analyzer_->Simplify(new_offset);
+      PrimExpr new_offset =
+          LinearizeIndicesForBuffer(new_buffer, forward_indices);
 
-      Array<PrimExpr> new_indices;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_indices.insert(new_indices.begin(),
-                           floormod(new_offset, new_shape[i]));
-        new_offset = floordiv(new_offset, new_shape[i]);
-      }
+      Array<PrimExpr> new_indices =
+          OffsetToIndicesForBuffer(new_buffer, new_offset);
 
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices)};
       if (buffer_remap_.count(remap_key)) {
@@ -678,13 +919,6 @@ private:
       PrimExpr rw_mask = access_ptr_call->args[2];
 
       Array<PrimExpr> indices = load->indices;
-      Array<PrimExpr> old_shape = load->buffer->shape;
-
-      ICHECK_EQ(indices.size(), old_shape.size())
-          << "Indices size and shape size must match for general N-dimensional "
-             "buffer "
-          << "but got indices size: " << indices.size()
-          << " and shape size: " << old_shape.size();
 
       Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
       Optional<Layout> layout = FindLayout(remap_key);
@@ -694,7 +928,6 @@ private:
       auto new_buffer = buffer_remap_.count(remap_key)
                             ? buffer_remap_[remap_key]
                             : load->buffer;
-      auto new_shape = new_buffer->shape;
 
       // In TMA context, swizzle is encoded in TMA descriptor parameters
       // rather than in memory indices, so we only update buffer data
@@ -712,12 +945,7 @@ private:
         return result;
       }
 
-      PrimExpr elem_offset = 0;
-      PrimExpr stride = 1;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        elem_offset += indices[i] * stride;
-        stride *= old_shape[i];
-      }
+      PrimExpr elem_offset = LinearizeIndicesForBuffer(remap_key, indices);
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
@@ -727,29 +955,15 @@ private:
       (void)buffer_row_size;
 
       // Convert offset to target-dimension, reindex it and convert it back
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = smem_offset;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(multi_dim_indices.begin(),
-                                 floormod(remaining_offset, old_shape[i]));
-        remaining_offset = floordiv(remaining_offset, old_shape[i]);
-      }
+      Array<PrimExpr> multi_dim_indices =
+          OffsetToIndicesForBuffer(remap_key, smem_offset);
 
       auto forward_indices = layout.value()->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
-      }
-      new_offset = analyzer_->Simplify(new_offset);
+      PrimExpr new_offset =
+          LinearizeIndicesForBuffer(new_buffer, forward_indices);
 
-      Array<PrimExpr> new_indices;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_indices.insert(new_indices.begin(),
-                           floormod(new_offset, new_shape[i]));
-        new_offset = floordiv(new_offset, new_shape[i]);
-      }
+      Array<PrimExpr> new_indices =
+          OffsetToIndicesForBuffer(new_buffer, new_offset);
 
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices), extent,
                                   rw_mask};
@@ -817,6 +1031,19 @@ private:
       }
     }
     return Optional<Layout>();
+  }
+
+  bool CanApplyDirectLayoutAccess(const Buffer &buffer, const Buffer &remap_key,
+                                  const Layout &layout,
+                                  const Array<PrimExpr> &indices) const {
+    if (indices.size() < layout->InputDim()) {
+      return false;
+    }
+    if (buffer.same_as(remap_key)) {
+      return true;
+    }
+    return indices.size() == remap_key->shape.size() &&
+           ShapesStructurallyEqual(buffer->shape, remap_key->shape);
   }
 
   PrimExpr VisitExpr_(const tirx::CallNode *op) final {
@@ -1043,10 +1270,14 @@ private:
       return load;
     }
     auto buffer = load->buffer;
-    if (buffer_remap_.count(buffer)) {
-      auto new_indices = layout_map_[buffer]->Forward(load->indices);
-      auto new_buffer = buffer_remap_[load->buffer];
-      layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
+    Buffer remap_key = FindRemapBuffer(buffer).value_or(buffer);
+    Optional<Layout> layout = FindLayout(remap_key);
+    if (layout.defined() && buffer_remap_.count(remap_key) &&
+        CanApplyDirectLayoutAccess(buffer, remap_key, layout.value(),
+                                   load->indices)) {
+      auto new_indices = layout.value()->Forward(load->indices);
+      auto new_buffer = buffer_remap_[remap_key];
+      layout_remap_.Set(new_buffer, layout.value());
       return BufferLoad(new_buffer, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
@@ -1061,10 +1292,14 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto buffer = store->buffer;
-    if (buffer_remap_.count(buffer)) {
-      auto new_indices = layout_map_[buffer]->Forward(store->indices);
-      auto new_buffer = buffer_remap_[store->buffer];
-      layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
+    Buffer remap_key = FindRemapBuffer(buffer).value_or(buffer);
+    Optional<Layout> layout = FindLayout(remap_key);
+    if (layout.defined() && buffer_remap_.count(remap_key) &&
+        CanApplyDirectLayoutAccess(buffer, remap_key, layout.value(),
+                                   store->indices)) {
+      auto new_indices = layout.value()->Forward(store->indices);
+      auto new_buffer = buffer_remap_[remap_key];
+      layout_remap_.Set(new_buffer, layout.value());
       return BufferStore(new_buffer, store->value, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
@@ -1080,8 +1315,9 @@ private:
     auto var = Downcast<Var>(IRMutatorWithAnalyzer::VisitExpr_(op));
     if (buffer_data_to_buffer_.count(var)) {
       auto buffer = buffer_data_to_buffer_[var];
-      if (buffer_remap_.count(buffer))
-        return buffer_remap_[buffer]->data;
+      Optional<Buffer> remap_key = FindRemapBuffer(buffer);
+      if (remap_key.defined() && buffer_remap_.count(remap_key.value()))
+        return buffer_remap_[remap_key.value()]->data;
     }
     return var;
   }
@@ -1133,9 +1369,10 @@ private:
    */
   Stmt VisitStmt_(const AllocBufferNode *op) final {
     auto buffer = op->buffer;
-    if (buffer_remap_.count(buffer)) {
+    Optional<Buffer> remap_key = FindRemapBuffer(buffer);
+    if (remap_key.defined() && buffer_remap_.count(remap_key.value())) {
       auto node = Downcast<AllocBuffer>(IRMutatorWithAnalyzer::VisitStmt_(op));
-      node.CopyOnWrite()->buffer = buffer_remap_[buffer];
+      node.CopyOnWrite()->buffer = buffer_remap_[remap_key.value()];
       return std::move(node);
     }
     if (IsFragmentBuffer(buffer)) {
@@ -1175,8 +1412,12 @@ private:
         auto step_layouts = layout_override_steps_[step];
         for (const auto &[buffer, layout] : step_layouts) {
           layout_map_.Set(buffer, layout);
-          if (buffer_remap_.count(buffer)) {
-            layout_map_.Set(buffer_remap_[buffer], layout);
+          Optional<Buffer> remap_key = FindRemapBuffer(buffer);
+          if (remap_key.defined()) {
+            layout_map_.Set(remap_key.value(), layout);
+          }
+          if (remap_key.defined() && buffer_remap_.count(remap_key.value())) {
+            layout_map_.Set(buffer_remap_[remap_key.value()], layout);
           }
         }
       }
@@ -1513,6 +1754,7 @@ private:
   Map<Layout, Bool> layout_k_major_;
   Map<Layout, Bool> layout_sqmma_;
   Map<Layout, PrimExpr> layout_sqmma_inst_split_;
+  std::vector<std::pair<Layout, Layout>> layout_aliases_;
   Map<Buffer, Layout> layout_remap_;
   Map<Buffer, Buffer> buffer_remap_;
   std::unordered_map<int64_t, LayoutMap> layout_override_steps_;

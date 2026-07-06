@@ -1386,6 +1386,14 @@ private:
     PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
     PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
     PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
+    auto is_comparable_index = [](const PrimExpr &expr) {
+      DataType dtype = expr.dtype();
+      return dtype.is_int() || dtype.is_uint();
+    };
+    if (!is_comparable_index(lhs_min) || !is_comparable_index(lhs_max) ||
+        !is_comparable_index(rhs_min) || !is_comparable_index(rhs_max)) {
+      return false;
+    }
     for (unsigned idx = 0; idx != 3; ++idx) {
       auto &info = thread_vars[idx];
       Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
