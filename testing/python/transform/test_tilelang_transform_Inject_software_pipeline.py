@@ -516,6 +516,64 @@ def test_inject_software_pipeline_expands_annotated_layout():
     assert layout_map[shared.data].is_equal(layout.expand([2]))
 
 
+def _collect_leading_let_names(mod, block_names):
+    leading_lets = {name: [] for name in block_names}
+
+    def _visit(node):
+        if not isinstance(node, tvm.tir.LetStmt):
+            return
+        names = []
+        body = node
+        while isinstance(body, tvm.tir.LetStmt):
+            names.append(str(body.var.name))
+            body = body.body
+        if not isinstance(body, tvm.tir.BlockRealize):
+            return
+        block_name = str(body.block.name_hint)
+        if block_name in leading_lets:
+            leading_lets[block_name].append(names)
+
+    post_order_visit(mod["main"].body, _visit)
+    return leading_lets
+
+
+def test_inject_software_pipeline_replays_scalar_let_without_annotation_slot():
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [1, 0],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 0],
+                    "software_pipeline_async_producer_groups": [0, -1],
+                },
+            ):
+                base: T.int32 = i * 16
+                with T.block("copy"):
+                    T.reads(A[base + tx])
+                    T.writes(shared[tx])
+                    shared[tx] = A[base + tx]
+                with T.block("store"):
+                    T.reads(shared[tx])
+                    T.writes(B[base + tx])
+                    B[base + tx] = shared[tx]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_lets = _collect_leading_let_names(mod, {"copy", "store"})
+
+    assert leading_lets["copy"]
+    assert leading_lets["store"]
+    assert all(names[0].startswith("base") for names in leading_lets["copy"])
+    assert all(names[0].startswith("base") for names in leading_lets["store"])
+
+
 def test_ph1_gemm_ab_stage_stride_accounts_for_tile_bytes():
     @T.prim_func
     def before(

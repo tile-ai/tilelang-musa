@@ -237,6 +237,30 @@ def test_pipeline_planning_keeps_plain_hopper_pipeline_copies_sync():
     assert tma_copies[:2] == [0, 0]
 
 
+def test_pipeline_planning_accepts_explicit_let_free_annotations():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        C: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            A_shared = T.alloc_shared((16,), T.float16)
+            for i in T.Pipelined(4, order=[1, 0], stage=[0, 1]):
+                base: T.int32 = i * 16
+                T.copy(A[base], A_shared)
+                T.copy(A_shared, C[base])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+
+    assert stages == [0, 1]
+    assert orders == [1, 0]
+
+
 def test_pipeline_planning_binds_commit_to_cp_async_stage():
     @T.prim_func
     def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):

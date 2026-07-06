@@ -3071,7 +3071,8 @@ private:
           key != tir::attr::software_pipeline_async_stages &&
           key != kPipelineAsyncProducers &&
           key != kPipelineAsyncProducerGroups && key != kPipelineTmaCopies &&
-          key != "num_stages" && key != "tl_pipelined_num_stages") {
+          key != kPipelineReplayableScalarBinds && key != "num_stages" &&
+          key != "tl_pipelined_num_stages") {
         preserved_annotations.Set(key, kv.second);
       }
     }
