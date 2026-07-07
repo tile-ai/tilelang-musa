@@ -3,7 +3,7 @@ import torch
 import tilelang
 import tilelang.testing
 from tilelang import language as T
-from tvm import tir
+from tvm import tirx as tir
 # tilelang.disable_cache()
 
 
