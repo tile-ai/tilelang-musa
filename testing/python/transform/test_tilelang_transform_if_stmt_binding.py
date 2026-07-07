@@ -32,18 +32,18 @@ def test_if_stmt_binding_keeps_direct_bind_scope():
     def before(A: T.Buffer((4,), "float32"), B: T.Buffer((4,), "float32")):
         if A[0] >= T.float32(0):
             A[0] = T.float32(1)
-            with T.LetStmt(A[1] + T.float32(2)) as bound:
-                B[0] = bound
-                B[1] = bound + T.float32(1)
+            bound = T.bind(A[1] + T.float32(2))
+            B[0] = bound
+            B[1] = bound + T.float32(1)
 
     @T.prim_func
     def expected(A: T.Buffer((4,), "float32"), B: T.Buffer((4,), "float32")):
         if A[0] >= T.float32(0):
             A[0] = T.float32(1)
         if A[0] >= T.float32(0):
-            with T.LetStmt(A[1] + T.float32(2)) as bound:
-                B[0] = bound
-                B[1] = bound + T.float32(1)
+            bound = T.bind(A[1] + T.float32(2))
+            B[0] = bound
+            B[1] = bound + T.float32(1)
 
     after = _run_if_stmt_binding(before)
     tvm.ir.assert_structural_equal(after.body, expected.body, True)

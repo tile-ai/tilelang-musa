@@ -528,25 +528,28 @@ def test_inject_software_pipeline_expands_annotated_layout():
     assert layout_map[shared.data].is_equal(layout.expand([2]))
 
 
-def _collect_leading_let_names(mod, block_names):
-    leading_lets = {name: [] for name in block_names}
+def _collect_leading_bind_names(mod, block_names):
+    leading_binds = {name: [] for name in block_names}
 
     def _visit(node):
-        if not isinstance(node, tvm.tir.LetStmt):
+        if not isinstance(node, tvm.tirx.SBlock):
+            return
+        block_name = str(node.name_hint)
+        if block_name not in leading_binds:
+            return
+        body = node.body
+        if not isinstance(body, tvm.tirx.SeqStmt):
             return
         names = []
-        body = node
-        while isinstance(body, tvm.tir.LetStmt):
-            names.append(str(body.var.name))
-            body = body.body
-        if not isinstance(body, tvm.tir.BlockRealize):
-            return
-        block_name = str(body.block.name_hint)
-        if block_name in leading_lets:
-            leading_lets[block_name].append(names)
+        for stmt in body.seq:
+            if not isinstance(stmt, tvm.tirx.Bind):
+                break
+            names.append(str(stmt.var.name))
+        if names:
+            leading_binds[block_name].append(names)
 
     post_order_visit(mod["main"].body, _visit)
-    return leading_lets
+    return leading_binds
 
 
 def test_inject_software_pipeline_replays_scalar_let_without_annotation_slot():
@@ -566,11 +569,11 @@ def test_inject_software_pipeline_replays_scalar_let_without_annotation_slot():
                 },
             ):
                 base: T.int32 = i * 16
-                with T.block("copy"):
+                with T.sblock("copy"):
                     T.reads(A[base + tx])
                     T.writes(shared[tx])
                     shared[tx] = A[base + tx]
-                with T.block("store"):
+                with T.sblock("store"):
                     T.reads(shared[tx])
                     T.writes(B[base + tx])
                     B[base + tx] = shared[tx]
@@ -578,12 +581,12 @@ def test_inject_software_pipeline_replays_scalar_let_without_annotation_slot():
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
-    leading_lets = _collect_leading_let_names(mod, {"copy", "store"})
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
 
-    assert leading_lets["copy"]
-    assert leading_lets["store"]
-    assert all(names[0].startswith("base") for names in leading_lets["copy"])
-    assert all(names[0].startswith("base") for names in leading_lets["store"])
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    assert all(names[0].startswith("base") for names in leading_binds["copy"])
+    assert all(names[0].startswith("base") for names in leading_binds["store"])
 
 
 def test_ph1_gemm_ab_stage_stride_accounts_for_tile_bytes():
