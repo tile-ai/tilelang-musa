@@ -13,13 +13,33 @@ import tvm
 from tvm import ir, tirx
 
 
+EvictionPolicy = Literal["evict_normal", "evict_first", "evict_last"]
 CachePolicy = Literal["cache_none", "cache_once", "cache_normal", "cache_persist"]
+_EVICTION_POLICY_MAP = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
 _CACHE_POLICY_MAP = {
     "cache_none": 0,
     "cache_once": 1,
     "cache_normal": 2,
     "cache_persist": 3,
 }
+_EVICTION_TO_CACHE_POLICY = {
+    _EVICTION_POLICY_MAP["evict_normal"]: _CACHE_POLICY_MAP["cache_normal"],
+    _EVICTION_POLICY_MAP["evict_first"]: _CACHE_POLICY_MAP["cache_once"],
+    _EVICTION_POLICY_MAP["evict_last"]: _CACHE_POLICY_MAP["cache_persist"],
+}
+
+
+def _set_tma_cache_annotations(ann: dict) -> None:
+    if "eviction_policy" in ann:
+        if "inner_cache_policy" in ann or "outer_cache_policy" in ann:
+            raise ValueError("eviction_policy cannot be combined with inner_cache_policy or outer_cache_policy.")
+    else:
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP["evict_normal"]
+
+    if "inner_cache_policy" not in ann:
+        ann["inner_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
+    if "outer_cache_policy" not in ann:
+        ann["outer_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
 
 
 def _normalize_copy_regions(
@@ -66,7 +86,7 @@ def copy(
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     force_async_copy: bool = False,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    eviction_policy: EvictionPolicy | None = None,
     inner_cache_policy: CachePolicy | None = None,
     outer_cache_policy: CachePolicy | None = None,
     src_robust_desc: tirx.PrimExpr | None = None,
@@ -153,12 +173,12 @@ def copy(
     if "src_robust_desc" not in ann and src_robust_desc is not None:
         ann["src_robust_desc"] = src_robust_desc
     if "eviction_policy" not in ann and eviction_policy is not None:
-        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
-        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
     if "inner_cache_policy" not in ann and inner_cache_policy is not None:
         ann["inner_cache_policy"] = _CACHE_POLICY_MAP[inner_cache_policy]
     if "outer_cache_policy" not in ann and outer_cache_policy is not None:
         ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
+    _set_tma_cache_annotations(ann)
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
@@ -174,7 +194,7 @@ def copy_cluster(
     dst_block: int | tirx.PrimExpr | None = None,
     cluster_mask: int | None = None,
     remote_barrier: tirx.BufferLoad | None = None,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    eviction_policy: EvictionPolicy | None = None,
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
@@ -269,7 +289,7 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier=None,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    eviction_policy: EvictionPolicy | None = None,
     inner_cache_policy: CachePolicy | None = None,
     outer_cache_policy: CachePolicy | None = None,
     annotations: dict | None = None,
@@ -327,12 +347,12 @@ def tma_copy(
         ann["barrier"] = _mbar_to_buffer_load(barrier)
 
     if "eviction_policy" not in ann and eviction_policy is not None:
-        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
-        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
     if "inner_cache_policy" not in ann and inner_cache_policy is not None:
         ann["inner_cache_policy"] = _CACHE_POLICY_MAP[inner_cache_policy]
     if "outer_cache_policy" not in ann and outer_cache_policy is not None:
         ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
+    _set_tma_cache_annotations(ann)
 
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
 
