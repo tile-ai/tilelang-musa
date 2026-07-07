@@ -2402,16 +2402,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)));\n";
     musa_codegen::Replacer replacer;
 
-    // TODO(lei): Type Workaround for TF32, should be removed when
-    // we introduced tfloat32_t in the frontend.
     std::string AType = musa_codegen::ptx::DTypeEnumToString(dtype_a_enum);
-    if (AType == "tl::DataType::kFloat32") {
-      AType = "tl::DataType::kTensorFloat32";
-    }
     std::string BType = musa_codegen::ptx::DTypeEnumToString(dtype_b_enum);
-    if (BType == "tl::DataType::kFloat32") {
-      BType = "tl::DataType::kTensorFloat32";
-    }
     std::string ARegType = musa_codegen::GetMMARegisterType(dtype_a_enum);
     if (ARegType == "float") {
       ARegType = "uint32_t";
@@ -2587,13 +2579,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     musa_codegen::Replacer replacer;
 
     std::string AType = musa_codegen::ptx::DTypeEnumToString(A_dtype);
-    if (AType == "tl::DataType::kFloat32") {
-      AType = "tl::DataType::kTensorFloat32";
-    }
     std::string BType = musa_codegen::ptx::DTypeEnumToString(B_dtype);
-    if (BType == "tl::DataType::kFloat32") {
-      BType = "tl::DataType::kTensorFloat32";
-    }
 
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);
@@ -2662,13 +2648,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     musa_codegen::Replacer replacer;
     std::string AType = musa_codegen::ptx::DTypeEnumToString(A_dtype);
-    if (AType == "tl::DataType::kFloat32") {
-      AType = "tl::DataType::kTensorFloat32";
-    }
     std::string BType = musa_codegen::ptx::DTypeEnumToString(B_dtype);
-    if (BType == "tl::DataType::kFloat32") {
-      BType = "tl::DataType::kTensorFloat32";
-    }
 
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);

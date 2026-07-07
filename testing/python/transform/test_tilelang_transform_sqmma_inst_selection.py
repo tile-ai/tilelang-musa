@@ -112,7 +112,7 @@ def test_ph1_sqmma_keeps_transposed_a_single_warp_group():
 def test_ph1_sqmma_falls_back_for_tf32_multi_inst_tiles(block_M, block_N, block_K):
     source = _compile_source(
         _nn_matmul(
-            dtype="float32",
+            dtype=T.tfloat32,
             block_M=block_M,
             block_N=block_N,
             block_K=block_K,
@@ -127,7 +127,7 @@ def test_ph1_sqmma_falls_back_for_tf32_multi_inst_tiles(block_M, block_N, block_
 def test_ph1_sqmma_keeps_tf32_basic_tile():
     source = _compile_source(
         _nn_matmul(
-            dtype="float32",
+            dtype=T.tfloat32,
             block_M=64,
             block_N=64,
             block_K=32,
@@ -135,3 +135,18 @@ def test_ph1_sqmma_keeps_tf32_basic_tile():
     )
 
     assert _has_ph1_sqmma_gemm_ss(source, 64, 64, 32)
+
+
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+def test_ph1_sqmma_falls_back_for_float32_basic_tile():
+    source = _compile_source(
+        _nn_matmul(
+            dtype="float32",
+            block_M=64,
+            block_N=64,
+            block_K=32,
+        )
+    )
+
+    assert not _has_ph1_sqmma_gemm_ss(source, 64, 64, 32)
