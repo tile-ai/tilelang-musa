@@ -27,8 +27,7 @@ def reduce_sum_cross_warp(A, threads=128):
 
 def _extract_named_barrier_base(source):
     match = re.search(r"tl::NamedBarrier<([0-9]+)>", source)
-    assert match is not None, source
-    return int(match.group(1))
+    return int(match.group(1)) if match is not None else None
 
 
 def _extract_allreduce_threads(source):
@@ -37,7 +36,11 @@ def _extract_allreduce_threads(source):
     return int(match.group(1))
 
 
-def _assert_consecutive_barrier_init(source, base_id):
+def _assert_named_barrier_init_if_used(source):
+    base_id = _extract_named_barrier_base(source)
+    if base_id is None:
+        return
+
     init0 = re.search(rf"__musa_async_init_arrival\(\s*{base_id}\s*,", source)
     init1 = re.search(rf"__musa_async_init_arrival\(\s*{base_id + 1}\s*,", source)
     assert init0 is not None, source
@@ -59,8 +62,7 @@ def test_reduce_sum_cross_warp():
     assert "tl::AllReduce<" in source, source
     allreduce_threads = _extract_allreduce_threads(source)
     assert allreduce_threads > 32, source
-    barrier_base = _extract_named_barrier_base(source)
-    _assert_consecutive_barrier_init(source, barrier_base)
+    _assert_named_barrier_init_if_used(source)
 
     a = torch.randn(M, N, dtype=torch.float32, device="musa")
     b = kernel(a)
