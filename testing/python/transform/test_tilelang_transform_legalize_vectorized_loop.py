@@ -70,7 +70,7 @@ def test_swizzled_tail_access_keeps_vectorization():
                 ] = Kb[kk[r], 0, p[0] * 8 + v + 224]
 
     mod = tvm.IRModule.from_expr(main)
-    with tvm.target.Target("musa -arch=mp_31"):
+    with tvm.target.Target({"kind": "musa", "arch": "mp_31"}):
         transformed = tl.transform.LegalizeVectorizedLoop()(mod)
 
     script = transformed.script()
