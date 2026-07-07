@@ -54,6 +54,36 @@ static bool ShapesStructurallyEqual(const Array<PrimExpr> &lhs,
   return true;
 }
 
+static bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
+                        arith::Analyzer *analyzer) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool IsProvenSubdomainShape(const Array<PrimExpr> &sub_shape,
+                                   const Array<PrimExpr> &base_shape,
+                                   arith::Analyzer *analyzer) {
+  if (sub_shape.size() != base_shape.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < sub_shape.size(); ++i) {
+    if (analyzer->CanProveEqual(sub_shape[i], base_shape[i])) {
+      continue;
+    }
+    if (!analyzer->CanProve(sub_shape[i] <= base_shape[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static std::optional<int64_t> ConstProductShape(const Array<PrimExpr> &shape) {
   int64_t product = 1;
   for (const PrimExpr &dim : shape) {
@@ -64,6 +94,105 @@ static std::optional<int64_t> ConstProductShape(const Array<PrimExpr> &shape) {
     product *= imm->value;
   }
   return product;
+}
+
+static bool IsSharedLayoutOutputExtentCompatible(const Buffer &buffer,
+                                                 const Layout &layout) {
+  if (!IsSharedBuffer(buffer)) {
+    return true;
+  }
+  auto buffer_extent = ConstProductShape(buffer->shape);
+  auto layout_extent = ConstProductShape(layout->OutputShape());
+  if (!buffer_extent.has_value() || !layout_extent.has_value() ||
+      layout_extent.value() <= 0) {
+    return false;
+  }
+  if (layout_extent.value() > buffer_extent.value()) {
+    return false;
+  }
+  return buffer_extent.value() % layout_extent.value() == 0;
+}
+
+static Layout ExpandLayoutToBufferSubdomain(const Buffer &buffer,
+                                            const Layout &layout,
+                                            size_t leading_ndim) {
+  Array<PrimExpr> expanded_forward;
+  expanded_forward.reserve(leading_ndim + layout->GetForwardIndex().size());
+  for (size_t i = 0; i < leading_ndim; ++i) {
+    expanded_forward.push_back(InputPlaceholder(i));
+  }
+
+  Map<Var, PrimExpr> shifted_vars;
+  for (size_t i = 0; i < layout->InputShape().size(); ++i) {
+    shifted_vars.Set(InputPlaceholder(i), InputPlaceholder(i + leading_ndim));
+  }
+  for (const auto &e : layout->GetForwardIndex()) {
+    expanded_forward.push_back(Substitute(e, shifted_vars));
+  }
+  return Layout(buffer->shape, expanded_forward);
+}
+
+static Layout ExpandLayoutToBufferShape(const Buffer &buffer,
+                                        const Layout &layout) {
+  if (IsFragmentBuffer(buffer)) {
+    return layout;
+  }
+  if (!layout.defined() ||
+      buffer->shape.size() <= layout->InputShape().size()) {
+    if (layout.defined() && buffer->shape.size() > 2 &&
+        buffer->shape.size() == layout->InputShape().size()) {
+      arith::Analyzer analyzer;
+      auto input_elems = ConstProductShape(layout->InputShape());
+      auto output_elems = ConstProductShape(layout->OutputShape());
+      bool output_preserves_stage =
+          !layout->OutputShape().empty() &&
+          StructuralEqual()(layout->OutputShape()[0], buffer->shape[0]);
+      if (input_elems.has_value() && output_elems.has_value() &&
+          output_elems.value() < input_elems.value() &&
+          !output_preserves_stage &&
+          IsProvenSubdomainShape(buffer->shape, layout->InputShape(),
+                                 &analyzer)) {
+        Array<PrimExpr> lifted_forward;
+        lifted_forward.push_back(InputPlaceholder(0));
+        for (const auto &e : layout->GetForwardIndex()) {
+          lifted_forward.push_back(e);
+        }
+        Layout lifted_layout = Layout(layout->InputShape(), lifted_forward);
+        if (IsSharedLayoutOutputExtentCompatible(buffer, lifted_layout)) {
+          return lifted_layout;
+        }
+      }
+    }
+    return layout;
+  }
+
+  size_t leading_ndim = buffer->shape.size() - layout->InputShape().size();
+  Array<PrimExpr> leading_shape;
+  Array<PrimExpr> trailing_shape;
+  for (size_t i = 0; i < leading_ndim; ++i) {
+    leading_shape.push_back(buffer->shape[i]);
+  }
+  for (size_t i = leading_ndim; i < buffer->shape.size(); ++i) {
+    trailing_shape.push_back(buffer->shape[i]);
+  }
+
+  arith::Analyzer analyzer;
+  if (!ShapesEqual(trailing_shape, layout->InputShape(), &analyzer)) {
+    if (IsProvenSubdomainShape(trailing_shape, layout->InputShape(),
+                               &analyzer)) {
+      Layout expanded_layout =
+          ExpandLayoutToBufferSubdomain(buffer, layout, leading_ndim);
+      if (IsSharedLayoutOutputExtentCompatible(buffer, expanded_layout)) {
+        return expanded_layout;
+      }
+    }
+    return layout;
+  }
+  Layout expanded_layout = layout->Expand(leading_shape);
+  if (!IsSharedLayoutOutputExtentCompatible(buffer, expanded_layout)) {
+    return layout;
+  }
+  return expanded_layout;
 }
 
 static std::optional<Array<PrimExpr>>
@@ -544,8 +673,10 @@ private:
                             .value();
       for (auto [buffer, layout] : layout_map) {
         Buffer layout_buffer = PreferredBufferAlias(buffer);
+        Layout expanded_layout =
+            ExpandLayoutToBufferShape(layout_buffer, layout);
         Layout canonical_layout =
-            CanonicalizeSharedStageLayout(layout_buffer, layout);
+            CanonicalizeSharedStageLayout(layout_buffer, expanded_layout);
         if (!canonical_layout.same_as(layout)) {
           layout_aliases_.push_back({layout, canonical_layout});
         }
@@ -571,8 +702,10 @@ private:
               continue;
             }
             Buffer step_buffer = buffer_data_to_buffer_[var];
+            Layout expanded_layout =
+                ExpandLayoutToBufferShape(step_buffer, layout);
             Layout canonical_layout =
-                CanonicalizeSharedStageLayout(step_buffer, layout);
+                CanonicalizeSharedStageLayout(step_buffer, expanded_layout);
             if (!canonical_layout.same_as(layout)) {
               layout_aliases_.push_back({layout, canonical_layout});
             }
@@ -1799,6 +1932,24 @@ namespace transform {
 
 using namespace tirx::transform;
 
+Array<PrimExpr> TestingExpandLayoutToBufferInputShape(const Buffer &buffer,
+                                                      const Layout &layout) {
+  return ExpandLayoutToBufferShape(buffer, layout)->InputShape();
+}
+
+Array<PrimExpr> TestingExpandLayoutToBufferOutputShape(const Buffer &buffer,
+                                                       const Layout &layout) {
+  return ExpandLayoutToBufferShape(buffer, layout)->OutputShape();
+}
+
+Array<PrimExpr> TestingMakeBufferWithLayoutStrides(const Buffer &buffer,
+                                                   const Layout &layout) {
+  Map<Var, Var> var_remap;
+  Buffer remapped = makeBufferWithLayout(
+      buffer, ExpandLayoutToBufferShape(buffer, layout), var_remap);
+  return remapped->strides;
+}
+
 tvm::transform::Pass LowerTileOp() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return LowerTileOpPass::Substitute(std::move(f));
@@ -1809,6 +1960,13 @@ tvm::transform::Pass LowerTileOp() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
+  refl::GlobalDef()
+      .def("tl.transform._TestingExpandLayoutToBufferInputShape",
+           TestingExpandLayoutToBufferInputShape)
+      .def("tl.transform._TestingExpandLayoutToBufferOutputShape",
+           TestingExpandLayoutToBufferOutputShape)
+      .def("tl.transform._TestingMakeBufferWithLayoutStrides",
+           TestingMakeBufferWithLayoutStrides);
 }
 } // namespace transform
 
