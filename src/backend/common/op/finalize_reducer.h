@@ -88,6 +88,12 @@ template <typename Impl> struct FinalizeReducerLowerer {
              "barrier synchronization";
       ICHECK(T.mbarrier_buffer != nullptr);
       sync_barrier_id = T.AllocMBarrier(*as_const_int(all_threads));
+      // MUSA NamedBarrier uses two phases in AllReduce: sync<0>() before the
+      // workspace write and sync<1>() before the peer read. Reserve both
+      // consecutive barrier IDs while passing the first one to the template.
+      int sync_barrier_next_id = T.AllocMBarrier(*as_const_int(all_threads));
+      ICHECK_EQ(sync_barrier_next_id, sync_barrier_id + 1)
+          << "finalize_reducer requires consecutive named barrier IDs";
       sync_barrier = T.mbarrier_buffer->value();
       ICHECK(sync_barrier.defined());
     }
