@@ -15,6 +15,7 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
+from tilelang.utils.device import synchronize
 from tvm import tirx
 
 
@@ -120,9 +121,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        synchronize()
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        synchronize()
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -180,9 +181,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        synchronize()
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        synchronize()
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
