@@ -259,6 +259,40 @@ def test_non_cuda_target_skip():
     assert not _check_has_intrinsic(mod, "stg"), "Non-CUDA targets should NOT use stg intrinsics"
 
 
+def test_force_async_copy_scope_skip():
+    """force_async_copy scopes are consumed by async-copy lowering, not LDGSTG."""
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+        with T.attr(0, "tl.force_async_copy", 1):
+            for i in T.thread_binding(32, "threadIdx.x"):
+                for j in T.vectorized(4):
+                    B[i * 4 + j] = A[i * 4 + j]
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = _apply_passes(mod, enable_non_predicated=True)
+
+    assert not _check_has_intrinsic(mod, "ldg")
+    assert not _check_has_intrinsic(mod, "stg")
+
+
+def test_source_robust_desc_scope_skip():
+    """source_robust_desc scopes must preserve loads for robust async-copy lowering."""
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+        with T.attr(A.data, "tl.source_robust_desc", T.int32(1)):
+            for i in T.thread_binding(32, "threadIdx.x"):
+                for j in T.vectorized(4):
+                    B[i * 4 + j] = A[i * 4 + j]
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = _apply_passes(mod, enable_non_predicated=True)
+
+    assert not _check_has_intrinsic(mod, "ldg")
+    assert not _check_has_intrinsic(mod, "stg")
+
+
 @tilelang.testing.requires_cuda
 def test_e2e_load_global_store_global():
     """End-to-end test that ldg/stg intrinsics work correctly when enabled."""

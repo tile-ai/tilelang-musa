@@ -11,7 +11,8 @@
  * 2. Converts Ramp-based global BufferStore to stg intrinsics
  * 3. Supports predicated loads (if_then_else with else=0)
  * 4. Supports predicated stores (if_then_else with empty then case)
- * 5. Only enabled for CUDA targets
+ * 5. Skips lowering inside force_async_copy / source_robust_desc scopes
+ * 6. Only enabled for CUDA and MUSA targets
  *
  * Pass configurations:
  * - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default:
@@ -46,7 +47,29 @@ public:
       : enable_non_predicated_(enable_non_predicated),
         enable_predicated_(enable_predicated) {}
 
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tl::attr::kSourceRobustDesc) {
+      bool previous_in_source_robust_desc = in_source_robust_desc_;
+      in_source_robust_desc_ = true;
+      Stmt body = this->VisitStmt(op->body);
+      in_source_robust_desc_ = previous_in_source_robust_desc;
+      return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
+    }
+    if (op->attr_key == tl::attr::kForceAsyncCopy) {
+      bool previous_in_force_async_copy = in_force_async_copy_;
+      in_force_async_copy_ = true;
+      Stmt body = this->VisitStmt(op->body);
+      in_force_async_copy_ = previous_in_force_async_copy;
+      return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
   Stmt VisitStmt_(const BufferStoreNode *store) final {
+    if (ShouldSkipLowering()) {
+      return StmtExprMutator::VisitStmt_(store);
+    }
+
     // Skip if non-predicated lowering is disabled
     if (!enable_non_predicated_) {
       return StmtExprMutator::VisitStmt_(store);
@@ -96,6 +119,10 @@ public:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *if_stmt) final {
+    if (ShouldSkipLowering()) {
+      return StmtExprMutator::VisitStmt_(if_stmt);
+    }
+
     // Skip if predicated lowering is disabled
     if (!enable_predicated_) {
       return StmtExprMutator::VisitStmt_(if_stmt);
@@ -161,6 +188,10 @@ public:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *load) final {
+    if (ShouldSkipLowering()) {
+      return StmtExprMutator::VisitExpr_(load);
+    }
+
     // Only handle global memory loads
     if (load->buffer.scope() != "global") {
       return StmtExprMutator::VisitExpr_(load);
@@ -220,6 +251,10 @@ public:
   }
 
   PrimExpr VisitExpr_(const CallNode *call) final {
+    if (ShouldSkipLowering()) {
+      return StmtExprMutator::VisitExpr_(call);
+    }
+
     // Skip if predicated lowering is disabled
     if (!enable_predicated_) {
       return StmtExprMutator::VisitExpr_(call);
@@ -292,8 +327,14 @@ public:
 private:
   bool enable_non_predicated_{false};
   bool enable_predicated_{true};
+  bool in_force_async_copy_{false};
+  bool in_source_robust_desc_{false};
   ffi::Optional<PrimExpr>
       current_predicate_; // Track predicate context for nested loads
+
+  bool ShouldSkipLowering() const {
+    return in_force_async_copy_ || in_source_robust_desc_;
+  }
 
   // Create access pointer for the buffer at given base offset
   PrimExpr CreateAccessPtr(const Buffer &buffer, const PrimExpr &base,
@@ -467,15 +508,16 @@ using namespace tirx::transform;
 
 tvm::transform::Pass LowerLDGSTG() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    // Check if target is CUDA
+    // Check if target is a backend that supports tl.ldg*/tl.stg* codegen.
     auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
     if (!target_opt.defined()) {
       // No target bound, skip this pass
       return f;
     }
     Target target = target_opt.value();
-    if (target->kind->name != "cuda") {
-      // Not a CUDA target, skip
+    String target_kind = target->kind->name;
+    if (target_kind != "cuda" && target_kind != "musa") {
+      // Not a supported target, skip
       return f;
     }
 
