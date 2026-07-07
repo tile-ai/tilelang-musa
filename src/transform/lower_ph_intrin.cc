@@ -23,12 +23,51 @@ namespace tl {
 using namespace tirx;
 
 class LowerPHIntrin : public StmtExprMutator {
+private:
+  struct DescInit {
+    const VarNode *base_var;
+    Stmt stmt;
+    bool emitted;
+  };
+
+  class DescInitPlacer : public StmtMutator {
+  public:
+    explicit DescInitPlacer(std::vector<DescInit> *desc_inits)
+        : desc_inits_(desc_inits) {}
+
+    Stmt VisitStmt_(const BindNode *op) final {
+      Stmt stmt = StmtMutator::VisitStmt_(op);
+      return AppendInitsForBase(stmt, op->var.get());
+    }
+
+    Stmt VisitStmt_(const AllocBufferNode *op) final {
+      Stmt stmt = StmtMutator::VisitStmt_(op);
+      return AppendInitsForBase(stmt, op->buffer->data.get());
+    }
+
+  private:
+    Stmt AppendInitsForBase(const Stmt &stmt, const VarNode *base_var) {
+      Array<Stmt> seq;
+      seq.push_back(stmt);
+      for (auto &desc_init : *desc_inits_) {
+        if (!desc_init.emitted && desc_init.base_var == base_var) {
+          seq.push_back(desc_init.stmt);
+          desc_init.emitted = true;
+        }
+      }
+      return seq.size() == 1 ? stmt : SeqStmt(seq);
+    }
+
+    std::vector<DescInit> *desc_inits_;
+  };
+
 public:
   static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect,
                              bool enable_tma_desc_prefetch) {
     PrimFuncNode *fptr = f.CopyOnWrite();
     LowerPHIntrin substituter(disable_shuffle_elect, enable_tma_desc_prefetch);
     fptr->body = substituter.VisitStmt(f->body);
+    fptr->body = DescInitPlacer(&substituter.desc_inits_)(fptr->body);
     // Collect prologue/epilogue statements for host-side setup/teardown
     Array<Stmt> prologue_stmts;
     Array<Stmt> epilogue_stmts;
@@ -183,12 +222,6 @@ public:
   }
 
 private:
-  struct DescInit {
-    const VarNode *base_var;
-    Stmt stmt;
-    bool emitted;
-  };
-
   static Array<PrimExpr> MakeInitDescArgs(const Call &call, const Var &var) {
     Array<PrimExpr> init_desc_args;
     if (call->op.same_as(create_tma_descriptor())) {

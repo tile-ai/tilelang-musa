@@ -3,7 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.musa import transform as musa_transform
 
-musa_target = tvm.target.Target("musa -arch=mp_31", host="llvm")
+musa_target = tvm.target.Target({"kind": "musa", "arch": "mp_31"}, host="llvm")
 
 
 @tilelang.testing.requires_musa
@@ -17,7 +17,7 @@ def test_tma_descriptor_init_after_alloc_global():
                 T.create_tma_descriptor(
                     6,
                     4,
-                    Output_partial,
+                    Output_partial.data,
                     8,
                     2,
                     2,
@@ -48,7 +48,7 @@ def test_tma_descriptor_init_after_alloc_global():
 
     assert not tvm.tirx.analysis.undefined_vars(func.body, func.params)
     body_text = func.script()
-    assert body_text.index('T.allocate([32], "float16", "global")') < body_text.index('T.call_packed("__tvm_tensormap_create_tiled"')
+    assert body_text.index('T.alloc_buffer((32,), "float16")') < body_text.index('T.call_packed("__tvm_tensormap_create_tiled"')
 
 
 if __name__ == "__main__":
