@@ -39,6 +39,13 @@ constexpr const char *kMUSAGlobalBarrierState = "__tvm_global_barrier_state";
 constexpr const char *kMUSAGlobalBarrierKInitOp =
     "tir.tvm_global_barrier_kinit";
 
+musa_codegen::ptx::DataType
+GetTensorCoreOperandDType(musa_codegen::ptx::DataType dtype) {
+  return dtype == musa_codegen::ptx::DataType::kFloat32
+             ? musa_codegen::ptx::DataType::kTensorFloat32
+             : dtype;
+}
+
 bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
@@ -2419,8 +2426,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)));\n";
     musa_codegen::Replacer replacer;
 
-    std::string AType = musa_codegen::ptx::DTypeEnumToString(dtype_a_enum);
-    std::string BType = musa_codegen::ptx::DTypeEnumToString(dtype_b_enum);
+    std::string AType = musa_codegen::ptx::DTypeEnumToString(
+        GetTensorCoreOperandDType(dtype_a_enum));
+    std::string BType = musa_codegen::ptx::DTypeEnumToString(
+        GetTensorCoreOperandDType(dtype_b_enum));
     std::string ARegType = musa_codegen::GetMMARegisterType(dtype_a_enum);
     if (ARegType == "float") {
       ARegType = "uint32_t";
@@ -2595,8 +2604,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // replace patterns
     musa_codegen::Replacer replacer;
 
-    std::string AType = musa_codegen::ptx::DTypeEnumToString(A_dtype);
-    std::string BType = musa_codegen::ptx::DTypeEnumToString(B_dtype);
+    std::string AType = musa_codegen::ptx::DTypeEnumToString(
+        GetTensorCoreOperandDType(musa_codegen::ptx::DTypeFromString(A_dtype)));
+    std::string BType = musa_codegen::ptx::DTypeEnumToString(
+        GetTensorCoreOperandDType(musa_codegen::ptx::DTypeFromString(B_dtype)));
 
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);
@@ -2664,8 +2675,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "(scale_out));\n";
 
     musa_codegen::Replacer replacer;
-    std::string AType = musa_codegen::ptx::DTypeEnumToString(A_dtype);
-    std::string BType = musa_codegen::ptx::DTypeEnumToString(B_dtype);
+    std::string AType = musa_codegen::ptx::DTypeEnumToString(
+        GetTensorCoreOperandDType(dtype_a_enum));
+    std::string BType = musa_codegen::ptx::DTypeEnumToString(
+        GetTensorCoreOperandDType(dtype_b_enum));
 
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);

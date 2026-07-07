@@ -37,6 +37,10 @@ bool IsPH1SupportedFp8(DataType dtype) {
          dtype.is_float8_e5m2();
 }
 
+bool IsPH1SupportedTf32(DataType dtype) {
+  return dtype == DataType::Float(32) || dtype.is_tfloat32();
+}
+
 Layout MakeTransposedPH1SqmmaOperandLayout(int actual_rows, int actual_cols,
                                            int logical_rows, int logical_cols,
                                            int element_bits, bool k_inner) {
@@ -265,7 +269,7 @@ SelectSQMMAInstShape(const GemmNode &op, int block_size, Target target) {
              b_dtype == DataType::BFloat(16) &&
              c_dtype == DataType::Float(32)) {
     type_class = SqmmaTypeClass::kBF16;
-  } else if (a_dtype.is_tfloat32() && b_dtype.is_tfloat32() &&
+  } else if (IsPH1SupportedTf32(a_dtype) && IsPH1SupportedTf32(b_dtype) &&
              c_dtype == DataType::Float(32)) {
     type_class = SqmmaTypeClass::kTF32;
   } else if (IsPH1SupportedFp8(a_dtype) && IsPH1SupportedFp8(b_dtype) &&
@@ -411,7 +415,7 @@ SelectPH1WmmaInstShape(const GemmNode &op, int block_size, Target target) {
              b_dtype == DataType::BFloat(16) &&
              c_dtype == DataType::Float(32)) {
     type_class = Ph1WmmaTypeClass::kBF16BF16F32;
-  } else if (a_dtype.is_tfloat32() && b_dtype.is_tfloat32() &&
+  } else if (IsPH1SupportedTf32(a_dtype) && IsPH1SupportedTf32(b_dtype) &&
              c_dtype == DataType::Float(32)) {
     type_class = Ph1WmmaTypeClass::kTF32TF32F32;
   } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Int(8) &&
