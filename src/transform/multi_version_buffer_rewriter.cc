@@ -119,7 +119,17 @@ bool UpdateExpandedLayoutMapForRemappedAllocs(
 
 } // namespace
 
-enum class Role : uint8_t { kConsumer, kProducer, kBoth };
+enum class Role : uint8_t { kConsumer, kProducer, kBoth, kNeutral };
+
+Role MergeRoles(Role lhs, Role rhs) {
+  if (lhs == Role::kNeutral)
+    return rhs;
+  if (rhs == Role::kNeutral)
+    return lhs;
+  if (lhs == rhs)
+    return lhs;
+  return Role::kBoth;
+}
 
 class WarpSpecializedRoleMarker_ : public StmtVisitor {
 public:
@@ -172,12 +182,9 @@ public:
 
   void VisitStmt_(const SeqStmtNode *op) final {
     StmtVisitor::VisitStmt_(op);
-    auto role = GetRole(op->seq[0]);
+    Role role = Role::kNeutral;
     for (auto stmt : op->seq) {
-      if (role != GetRole(stmt)) {
-        role = Role::kBoth;
-        break;
-      }
+      role = MergeRoles(role, GetRole(stmt));
     }
     SetRole(op, role);
   }
@@ -187,8 +194,7 @@ public:
     auto role = GetRole(op->then_case);
     if (op->else_case.defined()) {
       auto role_else = GetRole(op->else_case.value());
-      if (role != role_else)
-        role = Role::kBoth;
+      role = MergeRoles(role, role_else);
     }
     SetRole(op, role);
   }
@@ -204,17 +210,23 @@ public:
   }
 
   void VisitStmt_(const ForNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const BindNode *op) final { StmtVisitor::VisitStmt_(op); }
+  void VisitStmt_(const BindNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kNeutral);
+  }
   void VisitStmt_(const AttrStmtNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const AssertStmtNode *op) final {
     StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kNeutral);
   }
   void VisitStmt_(const SBlockNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const AllocBufferNode *op) final {
     StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kNeutral);
   }
   void VisitStmt_(const DeclBufferNode *op) final {
     StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kNeutral);
   }
 
   bool HasProducer() { return has_simt_copy_ || has_bulk_copy_; }
