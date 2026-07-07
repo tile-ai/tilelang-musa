@@ -65,6 +65,29 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
   return false;
 }
 
+bool IsReplayableScalarBindBlock(const SBlock &block,
+                                 const BufferSet &pipeline_write_buffers) {
+  if (block->body.as<BindNode>() == nullptr) {
+    return false;
+  }
+  for (const BufferRegion &read : block->reads) {
+    if (pipeline_write_buffers.count(read->buffer)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+BufferSet CollectPipelineWriteBuffers(const Array<SBlock> &blocks) {
+  BufferSet write_buffers;
+  for (const SBlock &block : blocks) {
+    for (const BufferRegion &write : block->writes) {
+      write_buffers.insert(write->buffer);
+    }
+  }
+  return write_buffers;
+}
+
 bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
 }
@@ -686,22 +709,23 @@ public:
    * blocks and should not be re-allocated.
    * \param pipeline_loop The original loop to be software pipelined.
    * \param pipeline_info The pipeline annotation information.
-   * \param loop_var_let_wrappers Let wrappers whose values depend on the loop
-   * var.
+   * \param scalar_binding_blocks Replayable scalar Bind statements from the
+   * pipeline body.
    * \param loop_var_if_wrappers If wrappers with conditions that depend on the
    * loop var.
    */
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
                    const Array<Buffer> &local_allocs, const For &pipeline_loop,
-                   const PipelineInfo &pipeline_info, Optional<Target> target,
-                   const std::vector<LetWrapper> &loop_var_let_wrappers,
+                   const PipelineInfo &pipeline_info,
+                   const Array<SBlock> &scalar_binding_blocks,
+                   Optional<Target> target,
                    const std::vector<IfWrapper> &loop_var_if_wrappers)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), local_allocs_(local_allocs),
         pipeline_loop_(pipeline_loop), pipeline_info_(pipeline_info),
+        scalar_binding_blocks_(scalar_binding_blocks),
         target_(std::move(target)),
-        loop_var_let_wrappers_(loop_var_let_wrappers),
         loop_var_if_wrappers_(loop_var_if_wrappers) {}
 
   Stmt BuildPipeline() {
@@ -720,9 +744,15 @@ public:
         buffer_remap_.Set(buffer, RewriteAllocBuffer(buffer, num_versions));
       }
     }
-    ordered_stmts_.resize(pipeline_info_.size());
+    std::vector<std::pair<int, SBlock>> ordered_blocks;
     for (const auto &[block, anno] : pipeline_info_) {
-      ordered_stmts_.Set(anno.order, block);
+      ordered_blocks.emplace_back(anno.order, block);
+    }
+    std::sort(
+        ordered_blocks.begin(), ordered_blocks.end(),
+        [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
+    for (const auto &[_, block] : ordered_blocks) {
+      ordered_stmts_.push_back(block);
     }
     CollectScalarBindings();
 
@@ -804,7 +834,7 @@ private:
   void CollectScalarBindings() {
     scalar_bindings_.clear();
     scalar_binding_map_.clear();
-    for (const SBlock &block : ordered_stmts_) {
+    for (const SBlock &block : scalar_binding_blocks_) {
       if (const auto *bind = GetScalarBindingMarker(block)) {
         if (!scalar_binding_map_.count(bind->var)) {
           scalar_binding_map_.emplace(bind->var, scalar_bindings_.size());
@@ -1302,13 +1332,6 @@ private:
       PrimExpr substituted_condition = Substitute(
           iw.condition, {{pipeline_loop_->loop_var, normalized_access_index}});
       stmt = IfThenElse(substituted_condition, stmt, Stmt(), iw.span);
-    }
-    for (auto it = loop_var_let_wrappers_.rbegin();
-         it != loop_var_let_wrappers_.rend(); ++it) {
-      const auto &lw = *it;
-      PrimExpr substituted = Substitute(
-          lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
-      stmt = SeqStmt({Bind(lw.var, substituted, lw.span), stmt});
     }
     return stmt;
   }
@@ -2468,7 +2491,7 @@ private:
   Map<Buffer, Buffer> buffer_remap_;
   Optional<Target> target_;
   Array<SBlock> ordered_stmts_;
-  std::vector<LetWrapper> loop_var_let_wrappers_;
+  Array<SBlock> scalar_binding_blocks_;
   std::vector<ScalarBinding> scalar_bindings_;
   ScalarBindingMap scalar_binding_map_;
   std::vector<IfWrapper> loop_var_if_wrappers_;
@@ -3029,6 +3052,42 @@ private:
     }
   }
 
+  void ValidateScheduledBindDependencies(const PipelineInfo &pipeline_info,
+                                         const Array<SBlock> &scheduled_order) {
+    std::unordered_map<Var, SBlock, ObjectPtrHash, ObjectPtrEqual>
+        bind_producers;
+    for (const SBlock &block : scheduled_order) {
+      if (const auto *bind = block->body.as<BindNode>()) {
+        bind_producers.emplace(bind->var, block);
+      }
+    }
+    if (bind_producers.empty()) {
+      return;
+    }
+
+    for (const SBlock &consumer : scheduled_order) {
+      Array<Var> undefined_vars = UndefinedVars(consumer->body, Array<Var>{});
+      for (const Var &var : undefined_vars) {
+        auto it = bind_producers.find(var);
+        if (it == bind_producers.end() || it->second.same_as(consumer)) {
+          continue;
+        }
+
+        const PipelineAnnotation &producer_info = pipeline_info.at(it->second);
+        const PipelineAnnotation &consumer_info = pipeline_info.at(consumer);
+        ICHECK_EQ(producer_info.stage, consumer_info.stage)
+            << "ValueError: scheduled scalar Bind '" << var
+            << "' is used from a different pipeline stage. Scalar Bind "
+               "statements that cannot be replayed must be scheduled in the "
+               "same stage as their consumers.";
+        ICHECK_LT(producer_info.order, consumer_info.order)
+            << "ValueError: scheduled scalar Bind '" << var
+            << "' must be ordered before every consumer in the same pipeline "
+               "stage.";
+      }
+    }
+  }
+
   bool HasOverlappableStages(const PipelineInfo &pipeline_info) const {
     std::optional<int> first_stage;
     for (const auto &pair : pipeline_info) {
@@ -3176,7 +3235,6 @@ private:
     Optional<SeqStmt> pipeline_body_seq;
     std::vector<std::function<Stmt(Stmt)>> rewrap_fns;
     std::vector<IfWrapper> loop_var_if_wrappers;
-    std::vector<LetWrapper> loop_var_let_wrappers;
     auto append_attr_wrapper = [&rewrap_fns](const AttrStmtNode *attr) {
       Any node = attr->node;
       String attr_key = attr->attr_key;
@@ -3270,22 +3328,6 @@ private:
     SeqStmt pipeline_body = pipeline_body_seq.value();
     const Array<Stmt> &pipeline_body_stmts = pipeline_body->seq;
 
-    auto pipeline_stages = Downcast<Array<Integer>>(
-        op->annotations.at(s_tir::attr::software_pipeline_stage));
-    auto pipeline_orders = Downcast<Array<Integer>>(
-        op->annotations.at(s_tir::attr::software_pipeline_order));
-    std::vector<LetWrapper> replay_loop_var_let_wrappers =
-        loop_var_let_wrappers;
-    bool use_scalar_binding_markers =
-        !loop_var_let_wrappers.empty() &&
-        pipeline_stages.size() ==
-            pipeline_body_stmts.size() + loop_var_let_wrappers.size() &&
-        pipeline_orders.size() ==
-            pipeline_body_stmts.size() + loop_var_let_wrappers.size();
-    if (use_scalar_binding_markers) {
-      replay_loop_var_let_wrappers.clear();
-    }
-
     // Step 3: Blockize the components of the pipeline. Each child of the
     // pipelined loop will be converted into a block.
     PipelineInfo pipeline_info;
@@ -3294,11 +3336,6 @@ private:
     auto f_add_child = [&](const Stmt &child) {
       original_order.push_back(MakeBlock(child, buffer_data_to_buffer_));
     };
-    if (use_scalar_binding_markers) {
-      for (const LetWrapper &lw : loop_var_let_wrappers) {
-        f_add_child(Bind(lw.var, lw.value, lw.span));
-      }
-    }
     for (size_t i = 0; i < pipeline_body_stmts.size(); i++) {
       const Stmt &child = pipeline_body_stmts[i];
       const auto *nested_block_realize = child.as<SBlockRealizeNode>();
@@ -3321,18 +3358,98 @@ private:
     BufferUsageCollector collector(buffer_data_to_buffer_, allocated_buffers_);
     pipeline_allocs = collector.Collect(SeqStmt(pipeline_body_stmts));
 
-    ICHECK_EQ(pipeline_stages.size(), original_order.size())
-        << "PrimFunc " << global_symbol_ << " has original order "
-        << original_order.Map(
-               [](const auto &block) { return block->name_hint; })
-        << ", but pipeline annotation is " << pipeline_stages
-        << " with different size";
-    ICHECK_EQ(pipeline_orders.size(), original_order.size())
-        << "PrimFunc " << global_symbol_ << " has original order "
-        << original_order.Map(
-               [](const auto &block) { return block->name_hint; })
-        << ", but pipeline annotation is " << pipeline_orders
-        << " with different size";
+    Optional<Array<Integer>> replayable_bind_mask;
+    if (auto replayable_bind_anno =
+            op->annotations.Get(kPipelineReplayableScalarBinds)) {
+      auto mask = Downcast<Array<Integer>>(replayable_bind_anno.value());
+      if (mask.size() == original_order.size()) {
+        bool valid_mask = true;
+        for (size_t i = 0; i < original_order.size(); ++i) {
+          if (mask[i]->value != 0 &&
+              original_order[i]->body.as<BindNode>() == nullptr) {
+            valid_mask = false;
+            break;
+          }
+        }
+        if (valid_mask) {
+          replayable_bind_mask = std::move(mask);
+        }
+      }
+    }
+    BufferSet pipeline_write_buffers;
+    if (!replayable_bind_mask.defined()) {
+      pipeline_write_buffers = CollectPipelineWriteBuffers(original_order);
+    }
+    Array<SBlock> scalar_binding_blocks;
+    Array<SBlock> scheduled_order;
+    std::vector<char> is_replayable_bind;
+    is_replayable_bind.reserve(original_order.size());
+    for (size_t i = 0; i < original_order.size(); ++i) {
+      const SBlock &block = original_order[i];
+      bool replayable =
+          replayable_bind_mask.defined()
+              ? replayable_bind_mask.value()[i]->value != 0
+              : IsReplayableScalarBindBlock(block, pipeline_write_buffers);
+      is_replayable_bind.push_back(replayable ? 1 : 0);
+      if (replayable) {
+        scalar_binding_blocks.push_back(block);
+      } else {
+        scheduled_order.push_back(block);
+      }
+    }
+    ICHECK(!scheduled_order.empty())
+        << "ValueError: The body of the software pipeline has no schedulable "
+           "statements after removing replayable scalar Bind statements";
+
+    auto pipeline_stages = Downcast<Array<Integer>>(
+        op->annotations.at(s_tir::attr::software_pipeline_stage));
+    auto pipeline_orders = Downcast<Array<Integer>>(
+        op->annotations.at(s_tir::attr::software_pipeline_order));
+    ICHECK_EQ(pipeline_stages.size(), pipeline_orders.size())
+        << "PrimFunc " << global_symbol_
+        << " has software_pipeline_stage annotation " << pipeline_stages
+        << " and software_pipeline_order annotation " << pipeline_orders
+        << " with different sizes";
+
+    bool annotations_include_replayable_binds = false;
+    if (pipeline_stages.size() == scheduled_order.size()) {
+      annotations_include_replayable_binds = false;
+    } else if (pipeline_stages.size() == original_order.size()) {
+      annotations_include_replayable_binds = true;
+    } else {
+      LOG(FATAL) << "PrimFunc " << global_symbol_
+                 << " has schedulable pipeline order "
+                 << scheduled_order.Map(
+                        [](const auto &block) { return block->name_hint; })
+                 << " and original order "
+                 << original_order.Map(
+                        [](const auto &block) { return block->name_hint; })
+                 << ", but pipeline annotation is " << pipeline_stages
+                 << " with different size";
+    }
+
+    std::vector<size_t> scheduled_annotation_indices;
+    scheduled_annotation_indices.reserve(scheduled_order.size());
+    if (annotations_include_replayable_binds) {
+      size_t scheduled_index = 0;
+      for (size_t i = 0; i < original_order.size(); ++i) {
+        if (is_replayable_bind[i]) {
+          continue;
+        }
+        ICHECK(scheduled_index < scheduled_order.size());
+        ICHECK(scheduled_order[scheduled_index].same_as(original_order[i]));
+        scheduled_annotation_indices.push_back(i);
+        ++scheduled_index;
+      }
+    } else {
+      for (size_t i = 0; i < scheduled_order.size(); ++i) {
+        scheduled_annotation_indices.push_back(i);
+      }
+    }
+
+    auto expected_annotation_size = annotations_include_replayable_binds
+                                        ? original_order.size()
+                                        : scheduled_order.size();
 
     std::unordered_set<int> pipeline_async_stages;
     if (auto async_annot =
@@ -3346,9 +3463,9 @@ private:
     if (auto async_producers_anno =
             op->annotations.Get(kPipelineAsyncProducers)) {
       auto async_flags = Downcast<Array<Integer>>(async_producers_anno.value());
-      ICHECK_EQ(async_flags.size(), original_order.size())
-          << "PrimFunc " << global_symbol_ << " has original order "
-          << original_order.Map(
+      ICHECK_EQ(async_flags.size(), expected_annotation_size)
+          << "PrimFunc " << global_symbol_ << " has schedulable order "
+          << scheduled_order.Map(
                  [](const auto &block) { return block->name_hint; })
           << ", but async producer annotation is " << async_flags
           << " with different size";
@@ -3359,40 +3476,82 @@ private:
             op->annotations.Get(kPipelineAsyncProducerGroups)) {
       auto async_group_ids =
           Downcast<Array<Integer>>(async_groups_anno.value());
-      ICHECK_EQ(async_group_ids.size(), original_order.size())
-          << "PrimFunc " << global_symbol_ << " has original order "
-          << original_order.Map(
+      ICHECK_EQ(async_group_ids.size(), expected_annotation_size)
+          << "PrimFunc " << global_symbol_ << " has schedulable order "
+          << scheduled_order.Map(
                  [](const auto &block) { return block->name_hint; })
           << ", but async producer group annotation is " << async_group_ids
           << " with different size";
       pipeline_async_producer_groups = async_group_ids;
     }
 
-    for (size_t i = 0; i < pipeline_stages.size(); i++) {
-      int stage = static_cast<int>(pipeline_stages[i]->value);
+    for (size_t i = 0; i < scheduled_order.size(); i++) {
+      size_t annotation_index = scheduled_annotation_indices[i];
+      int stage = static_cast<int>(pipeline_stages[annotation_index]->value);
       bool is_async_candidate =
           pipeline_async_producers
-              ? (pipeline_async_producers.value()[i]->value != 0)
+              ? (pipeline_async_producers.value()[annotation_index]->value != 0)
               : (pipeline_async_stages.count(stage) > 0);
       // Stages that already spell out async behavior themselves keep that
       // ownership. The pipeline pass only injects async producer semantics for
       // "plain" producer stages that do not already contain cp.async / async
       // queue operations.
-      bool is_async = is_async_candidate &&
-                      !ContainsExplicitAsyncIntrinsics(original_order[i]->body);
+      bool is_async = is_async_candidate && !ContainsExplicitAsyncIntrinsics(
+                                                scheduled_order[i]->body);
       PipelineAnnotation stage_order{
           stage,
-          /*order=*/static_cast<int>(pipeline_orders[i]->value),
+          /*order=*/static_cast<int>(pipeline_orders[annotation_index]->value),
           /*async=*/is_async,
           /*async_group_id=*/
           pipeline_async_producer_groups
               ? static_cast<int>(
-                    pipeline_async_producer_groups.value()[i]->value)
+                    pipeline_async_producer_groups.value()[annotation_index]
+                        ->value)
               : -1};
-      pipeline_info.emplace(original_order[i], stage_order);
+      pipeline_info.emplace(scheduled_order[i], stage_order);
     }
 
-    ValidatePipelineBody(pipeline_info, original_order);
+    if (annotations_include_replayable_binds) {
+      for (const SBlock &binding_block : scalar_binding_blocks) {
+        const auto *bind = binding_block->body.as<BindNode>();
+        ICHECK(bind != nullptr);
+        bool seen_consumer = false;
+        bool multiple_consumers = false;
+        PipelineAnnotation first_consumer;
+        for (const SBlock &consumer : scheduled_order) {
+          Array<Var> undefined_vars =
+              UndefinedVars(consumer->body, Array<Var>{});
+          bool uses_binding = false;
+          for (const Var &var : undefined_vars) {
+            if (var.same_as(bind->var)) {
+              uses_binding = true;
+              break;
+            }
+          }
+          if (!uses_binding) {
+            continue;
+          }
+          const PipelineAnnotation &anno = pipeline_info.at(consumer);
+          if (!seen_consumer) {
+            first_consumer = anno;
+            seen_consumer = true;
+          } else if (first_consumer.stage != anno.stage ||
+                     first_consumer.order != anno.order) {
+            multiple_consumers = true;
+            break;
+          }
+        }
+        if (multiple_consumers) {
+          LOG(WARNING)
+              << "Scalar Bind '" << bind->var
+              << "' is used by multiple pipeline stages; its annotation is "
+                 "ignored and the bind is replayed at each use.";
+        }
+      }
+    }
+
+    ValidateScheduledBindDependencies(pipeline_info, scheduled_order);
+    ValidatePipelineBody(pipeline_info, scheduled_order);
 
     if (!HasOverlappableStages(pipeline_info)) {
       if (const auto *realize = for_node->body.as<SBlockRealizeNode>()) {
@@ -3438,15 +3597,24 @@ private:
       pipeline_depth = std::max(pipeline_depth, 1);
       if (max_stage > 0) {
         if (auto tma_copies_anno = op->annotations.Get(kPipelineTmaCopies)) {
-          auto tma_copies = Downcast<Array<Integer>>(tma_copies_anno.value());
-          if (tma_copies.size() == original_order.size()) {
-            for (const auto &tc : tma_copies) {
+          auto raw_tma_copies =
+              Downcast<Array<Integer>>(tma_copies_anno.value());
+          Array<Integer> tma_copies;
+          if (raw_tma_copies.size() == scheduled_order.size()) {
+            tma_copies = raw_tma_copies;
+          } else if (raw_tma_copies.size() == original_order.size()) {
+            for (size_t annotation_index : scheduled_annotation_indices) {
+              tma_copies.push_back(raw_tma_copies[annotation_index]);
+            }
+          }
+          if (tma_copies.size() == scheduled_order.size()) {
+            for (const Integer &tc : tma_copies) {
               if (tc->value != 0)
                 num_pipeline_tma_copies++;
             }
             if (num_pipeline_tma_copies > 0) {
               pipeline_barrier_buf = RewritePipelineTmaBarriers(
-                  original_order, pipeline_info, tma_copies,
+                  scheduled_order, pipeline_info, tma_copies,
                   buffer_data_to_buffer_, allocated_buffers_,
                   block_local_allocs, for_node->loop_var, for_node->min,
                   pipeline_depth);
@@ -3475,7 +3643,7 @@ private:
                 ->value);
       }
       Map<Buffer, Buffer> barrier_remap = ExpandPipelineBarriers(
-          original_order, pipeline_info, buffer_data_to_buffer_,
+          scheduled_order, pipeline_info, buffer_data_to_buffer_,
           allocated_buffers_, block_local_allocs, pipeline_allocs,
           for_node->loop_var, for_node->min, barrier_depth);
       // Register expanded barriers for outer block alloc_buffers update.
@@ -3498,10 +3666,9 @@ private:
       }
     }
 
-    PipelineRewriter rewriter(buffer_data_to_buffer_, pipeline_allocs,
-                              local_allocs, for_node, pipeline_info, target_,
-                              replay_loop_var_let_wrappers,
-                              loop_var_if_wrappers);
+    PipelineRewriter rewriter(
+        buffer_data_to_buffer_, pipeline_allocs, local_allocs, for_node,
+        pipeline_info, scalar_binding_blocks, target_, loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
     subtree_modified_ = true;
 
