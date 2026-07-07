@@ -139,7 +139,7 @@ def test_ph1_sqmma_keeps_tf32_basic_tile():
 
 @tilelang.testing.requires_musa
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
-def test_ph1_sqmma_falls_back_for_float32_basic_tile():
+def test_ph1_sqmma_keeps_float32_basic_tile():
     source = _compile_source(
         _nn_matmul(
             dtype="float32",
@@ -149,4 +149,4 @@ def test_ph1_sqmma_falls_back_for_float32_basic_tile():
         )
     )
 
-    assert not _has_ph1_sqmma_gemm_ss(source, 64, 64, 32)
+    assert _has_ph1_sqmma_gemm_ss(source, 64, 64, 32)
