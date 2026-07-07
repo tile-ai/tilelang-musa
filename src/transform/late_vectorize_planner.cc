@@ -153,7 +153,7 @@ private:
       return false;
     }
     const auto *call = store->value.as<CallNode>();
-    if (call == nullptr || !call->op.same_as(Op::Get("tir.exp2"))) {
+    if (call == nullptr || !call->op.same_as(Op::Get("tirx.exp2"))) {
       return false;
     }
     const DataType &t = call->dtype;
