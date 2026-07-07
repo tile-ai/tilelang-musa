@@ -51,9 +51,17 @@ class GemmFMA(GemmBase):
         accum_dtype = self.accum_dtype
         clear_accum = self.clear_accum
 
-        A_buf = self.A
-        B_buf = self.B
-        C_buf = self.C
+        A_region = self.ARegion
+        B_region = self.BRegion
+        C_region = self.CRegion
+
+        A_buf = A_region.buffer if A_region is not None else self.A
+        B_buf = B_region.buffer if B_region is not None else self.B
+        C_buf = C_region.buffer if C_region is not None else self.C
+
+        A_base_offsets = self.A_base_offsets
+        B_base_offsets = self.B_base_offsets
+        C_base_offsets = self.C_base_offsets
 
         M = self.M
         N = self.N
@@ -63,6 +71,20 @@ class GemmFMA(GemmBase):
 
         if not self.is_gemm_ss():
             raise ValueError(f"Unsupported gemm combination for fma, A: {self.A.scope()}, B: {self.B.scope()}")
+
+        def region_indices(buf, base_offsets, logical_indices):
+            rank = len(buf.shape)
+            logical_rank = len(logical_indices)
+            if rank < logical_rank:
+                raise ValueError(
+                    f"GemmFMA expects buffer rank >= logical rank, got buffer {buf.name} rank {rank} and logical rank {logical_rank}"
+                )
+            full_offsets = [0] * (rank - len(base_offsets)) + list(base_offsets)
+            leading_rank = rank - logical_rank
+            indices = list(full_offsets[:leading_rank])
+            for dim, logical_index in enumerate(logical_indices):
+                indices.append(full_offsets[leading_rank + dim] + logical_index)
+            return tuple(indices)
 
         @T.prim_func
         def _gemm_fma() -> None:
@@ -79,19 +101,19 @@ class GemmFMA(GemmBase):
                     if clear_accum:
                         accum[0] = T.cast(0, accum_dtype)
                     else:
-                        accum[0] = C_buf[i, j]
+                        accum[0] = C_buf[region_indices(C_buf, C_base_offsets, (i, j))]
 
                     for k_iter in T.serial(0, K):
                         if trans_A:
-                            a_val = T.cast(A_buf[k_iter, i], accum_dtype)
+                            a_val = T.cast(A_buf[region_indices(A_buf, A_base_offsets, (k_iter, i))], accum_dtype)
                         else:
-                            a_val = T.cast(A_buf[i, k_iter], accum_dtype)
+                            a_val = T.cast(A_buf[region_indices(A_buf, A_base_offsets, (i, k_iter))], accum_dtype)
                         if trans_B:
-                            b_val = T.cast(B_buf[j, k_iter], accum_dtype)
+                            b_val = T.cast(B_buf[region_indices(B_buf, B_base_offsets, (j, k_iter))], accum_dtype)
                         else:
-                            b_val = T.cast(B_buf[k_iter, j], accum_dtype)
+                            b_val = T.cast(B_buf[region_indices(B_buf, B_base_offsets, (k_iter, j))], accum_dtype)
                         accum[0] = accum[0] + a_val * b_val
-                    C_buf[i, j] = accum[0]
+                    C_buf[region_indices(C_buf, C_base_offsets, (i, j))] = accum[0]
 
         return _Simplify(_gemm_fma, inline_let=True)
 
