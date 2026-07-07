@@ -7,7 +7,7 @@ from tilelang.language.utils import get_buffer_region_from_load
 from functools import reduce
 from tvm import IRModule, DataType
 from tvm.tirx import PrimFunc
-from tvm import ir, tirx
+from tvm import arith, ir, tirx
 from tvm.tirx.expr import CallEffectKind
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
@@ -452,7 +452,8 @@ def prim_expr_equal(lhs, rhs) -> bool:
     """
     Robust equality for PrimExpr shapes/extents.
 
-    Tries structural_equal first, then falls back to expr_deep_equal.
+    Tries structural_equal first, then falls back to expr_deep_equal and
+    arithmetical equality proof.
     Python ints are converted to IntImm for comparison.
     """
     if isinstance(lhs, int) and isinstance(rhs, int):
@@ -463,7 +464,9 @@ def prim_expr_equal(lhs, rhs) -> bool:
         rhs = tirx.IntImm("int32", rhs)
     if ir.structural_equal(lhs, rhs):
         return True
-    return tirx.analysis.expr_deep_equal(lhs, rhs)
+    if tirx.analysis.expr_deep_equal(lhs, rhs):
+        return True
+    return arith.Analyzer().can_prove_equal(lhs, rhs)
 
 
 def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[list, list]:
