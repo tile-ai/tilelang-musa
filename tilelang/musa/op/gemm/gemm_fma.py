@@ -69,8 +69,9 @@ class GemmFMA(GemmBase):
             accum = T.alloc_local((1,), accum_dtype)
             total = M * N
             trip = T.ceildiv(total, thread_nums)
+            local_thread = thread_var - thread_bounds.min
             for idx_iter in T.serial(0, trip):
-                linear = idx_iter * thread_nums + thread_var
+                linear = idx_iter * thread_nums + local_thread
                 if linear < total:
                     i = linear // N
                     j = linear - i * N
