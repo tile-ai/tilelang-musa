@@ -14,6 +14,10 @@ In most cases, you only need to:
 
 ## Latest News
 
+### 0.1.10+musa.1
+
+🚀 tilelang_musa0.1.10+musa.1 has been released. This version is based on tilelang 0.1.10 and is deeply adapted for the musa platform. You can use the latest tilelang syntax to write kernels that can run on the musa platform.
+
 ### 0.1.9+musa.1
 
 🚀 tilelang_musa0.1.9+musa.1 has been released. This version is based on tilelang 0.1.9 and is deeply adapted for the musa platform. You can use the latest tilelang syntax to write kernels that can run on the musa platform.
