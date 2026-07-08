@@ -131,7 +131,14 @@ def test_disable_reuse_no_overlap():
     src_reuse = kernel_reuse.get_kernel_source()
 
     def extract_smem_element_offsets(src: str) -> list[int]:
-        """Extract base element offsets from buf_dyn_shmem references."""
+        """Extract base element offsets from shared-memory source."""
+        alias_offsets = re.findall(
+            r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);",
+            src,
+        )
+        if alias_offsets:
+            return sorted(set(int(m) for m in alias_offsets))
+
         offsets = set(int(m) for m in re.findall(r"buf_dyn_shmem\)\[(\d+)\]", src))
         for line in src.splitlines():
             if "buf_dyn_shmem" not in line or "threadIdx" not in line:
