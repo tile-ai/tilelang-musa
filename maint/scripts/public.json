@@ -4,7 +4,7 @@
     "3rdparty/mutlass": "https://github.com/MooreThreads/mutlass"
   },
   "gitmodule_refs": {
-    "3rdparty/tvm": "12b82cdad1b21d410f2146f4fde033272f735d31",
+    "3rdparty/tvm": "ab686f3e21435b146bc303538bca079dec07e00b",
     "3rdparty/mutlass": "d31e365170c9f51db887306032b81cc82141489b"
   },
   "remove_paths": [
