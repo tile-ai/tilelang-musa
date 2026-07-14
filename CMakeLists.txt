@@ -138,6 +138,16 @@ option(TILELANG_USE_CUDA_STUBS
        "Use POSIX dlopen-based CUDA stub libraries (cuda/cudart/nvrtc) for portable wheels"
        ${_TILELANG_USE_CUDA_STUBS_DEFAULT})
 unset(_TILELANG_USE_CUDA_STUBS_DEFAULT)
+
+if(WIN32 AND NOT CYGWIN)
+  set(_TILELANG_USE_MUSA_STUBS_DEFAULT OFF)
+else()
+  set(_TILELANG_USE_MUSA_STUBS_DEFAULT ON)
+endif()
+option(TILELANG_USE_MUSA_STUBS
+       "Use POSIX dlopen-based MUSA stub libraries (musa/musart) for portable wheels"
+       ${_TILELANG_USE_MUSA_STUBS_DEFAULT})
+unset(_TILELANG_USE_MUSA_STUBS_DEFAULT)
 # Configs end
 
 include(cmake/load_tvm.cmake)
