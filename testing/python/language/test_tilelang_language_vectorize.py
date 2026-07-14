@@ -143,8 +143,6 @@ def vectorize_test_all_dtypes(dtype, vec_num):
 )
 @pytest.mark.parametrize("vec_num", [1, 2, 4, 8])
 def test_vectorize_all_dtypes(dtype, vec_num):
-    if dtype == getattr(torch, "float8_e8m0fnu", None):
-        pytest.skip("MUSA SDK does not support float8_e8m0fnu yet")
     x = torch.empty((64,), dtype=dtype, device="musa")
     kernel = vectorize_test_all_dtypes(dtype, vec_num)
     kernel(x)

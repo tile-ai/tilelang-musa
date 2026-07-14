@@ -310,4 +310,39 @@ TL_DEVICE fp8_e5_4_t cvt_float_to_fp8e5m2_x4(float4 in) {
   return out;
 }
 
+TL_DEVICE fp8_e8_2_t cvt_float_to_fp8e8m0_x2(float2 in) {
+  return make_fp8_e8_2_t(fp8_e8_t(in.x), fp8_e8_t(in.y));
+}
+
+TL_DEVICE fp8_e8_4_t cvt_float_to_fp8e8m0_x4(float4 in) {
+  return make_fp8_e8_4_t(fp8_e8_t(in.x), fp8_e8_t(in.y), fp8_e8_t(in.z),
+                         fp8_e8_t(in.w));
+}
+
+TL_DEVICE fp8_e8_2_t cvt_double_to_fp8e8m0_x2(double2 in) {
+  return make_fp8_e8_2_t(fp8_e8_t(static_cast<float>(in.x)),
+                         fp8_e8_t(static_cast<float>(in.y)));
+}
+
+TL_DEVICE fp8_e8_2_t cvt_bfloat16_to_fp8e8m0_x2(__mt_bfloat162 in) {
+  float2 value = __bfloat1622float2(in);
+  return cvt_float_to_fp8e8m0_x2(value);
+}
+
+TL_DEVICE fp8_e8_4_t cvt_bfloat16_to_fp8e8m0_x4(bfloat164_t in) {
+  float4 value = cvt_bfloat16_to_float_x4(in);
+  return cvt_float_to_fp8e8m0_x4(value);
+}
+
+TL_DEVICE __mt_bfloat162 cvt_fp8e8m0_to_bfloat16_x2(fp8_e8_2_t in) {
+  float2 value = {static_cast<float>(in.x), static_cast<float>(in.y)};
+  return __float22bfloat162_rn(value);
+}
+
+TL_DEVICE bfloat164_t cvt_fp8e8m0_to_bfloat16_x4(fp8_e8_4_t in) {
+  float4 value = {static_cast<float>(in.x), static_cast<float>(in.y),
+                  static_cast<float>(in.z), static_cast<float>(in.w)};
+  return cvt_float_to_bfloat16_x4(value);
+}
+
 } // namespace tl

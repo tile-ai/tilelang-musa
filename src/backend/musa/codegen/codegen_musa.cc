@@ -283,6 +283,8 @@ std::string GetTileLangFP8Type(DataType type) {
     stream << "fp8_e4" << vec << "_t";
   } else if (type.is_float8_e5m2() || type.is_float8_e5m2fnuz()) {
     stream << "fp8_e5" << vec << "_t";
+  } else if (type.is_float8_e8m0fnu()) {
+    stream << "fp8_e8" << vec << "_t";
   } else {
     LOG(FATAL) << "Unsupported FP8 type in MUSA codegen but got " << type;
   }
@@ -1400,6 +1402,7 @@ void CodeGenTileLangMUSA::VisitExpr_(const CastNode *op, std::ostream &os) {
   int lanes = from_ty.lanes();
   auto IsMusaE4M3Type = [](DataType t) { return t.is_float8_e4m3(); };
   auto IsMusaE5M2Type = [](DataType t) { return t.is_float8_e5m2(); };
+  auto IsMusaE8M0Type = [](DataType t) { return t.is_float8_e8m0fnu(); };
 
   auto PrintVectorizedCast = [&](const std::string &cast_func,
                                  const std::string &src_type,
@@ -1548,6 +1551,49 @@ void CodeGenTileLangMUSA::VisitExpr_(const CastNode *op, std::ostream &os) {
           "float4", IsMusaE4M3Type(target_ty) ? "fp8_e4_4_t" : "fp8_e5_4_t", 4);
       return;
     }
+  }
+
+  if (IsMusaE8M0Type(from_ty) && target_ty.is_bfloat16()) {
+    if (lanes == 2) {
+      PrintVectorizedCast("tl::cvt_fp8e8m0_to_bfloat16_x2", "fp8_e8_2_t",
+                          "__mt_bfloat162", 2, "", false, true);
+      return;
+    } else if (lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("tl::cvt_fp8e8m0_to_bfloat16_x4", "fp8_e8_4_t",
+                          "tl::bfloat164_t", 4);
+      return;
+    }
+  }
+
+  if (from_ty.is_bfloat16() && IsMusaE8M0Type(target_ty)) {
+    if (lanes == 2) {
+      PrintVectorizedCast("tl::cvt_bfloat16_to_fp8e8m0_x2", "__mt_bfloat162",
+                          "fp8_e8_2_t", 2, "", true, false);
+      return;
+    } else if (lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("tl::cvt_bfloat16_to_fp8e8m0_x4", "tl::bfloat164_t",
+                          "fp8_e8_4_t", 4);
+      return;
+    }
+  }
+
+  if (from_ty.is_float() && from_ty.bits() == 32 && IsMusaE8M0Type(target_ty)) {
+    if (lanes == 2) {
+      PrintVectorizedCast("tl::cvt_float_to_fp8e8m0_x2", "float2", "fp8_e8_2_t",
+                          2);
+      return;
+    } else if (lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("tl::cvt_float_to_fp8e8m0_x4", "float4", "fp8_e8_4_t",
+                          4);
+      return;
+    }
+  }
+
+  if (from_ty.is_float() && from_ty.bits() == 64 && IsMusaE8M0Type(target_ty) &&
+      lanes == 2) {
+    PrintVectorizedCast("tl::cvt_double_to_fp8e8m0_x2", "double2", "fp8_e8_2_t",
+                        2);
+    return;
   }
 
   // Fallback: elementwise cast
