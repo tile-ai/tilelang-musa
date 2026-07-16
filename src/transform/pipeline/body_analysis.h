@@ -58,6 +58,7 @@ public:
     std::vector<size_t> scheduled_indices;
     std::vector<size_t> scheduled_stage_indices;
     Array<Integer> replayable_bind_mask;
+    bool has_bind_stmt{false};
   };
 
   ScheduledStmtAnalysis AnalyzeScheduledStmts(const Array<Stmt> &stmts) const {
@@ -71,6 +72,7 @@ public:
       if (IsPipelineDeclarationStmt(stmt)) {
         continue;
       }
+      analysis.has_bind_stmt = analysis.has_bind_stmt || stmt.as<BindNode>();
       bool replayable =
           IsReplayableScalarBindStmt(stmt, pipeline_write_buffers);
       analysis.replayable_bind_mask.push_back(Integer(replayable ? 1 : 0));

@@ -20,7 +20,12 @@ using BufferSet =
 inline bool IsReplayableScalarBind(const Stmt &stmt,
                                    const ffi::Array<BufferRegion> &reads,
                                    const BufferSet &write_buffers) {
-  if (stmt.as<BindNode>() == nullptr) {
+  const auto *bind = stmt.as<BindNode>();
+  if (bind == nullptr) {
+    return false;
+  }
+  if (bind->var->type_annotation.as<PointerTypeNode>() ||
+      bind->value.dtype().is_handle()) {
     return false;
   }
   for (const BufferRegion &read : reads) {

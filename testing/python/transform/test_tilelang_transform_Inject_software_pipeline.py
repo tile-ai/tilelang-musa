@@ -153,6 +153,22 @@ def _find_alloc_buffer(func, data):
     return buffers[0]
 
 
+def _find_alloc_buffer_by_data_name(func, name):
+    buffers = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.AllocBuffer) and str(node.buffer.data.name) == name:
+            buffers.append(node.buffer)
+
+    post_order_visit(func.body, _visit)
+    assert len(buffers) == 1, f"Expected one alloc buffer named {name}, got {len(buffers)}"
+    return buffers[0]
+
+
+def _int_values(values):
+    return [int(value) for value in values]
+
+
 def test_async_pipeline_groups_multiple_copy_producers():
     @T.prim_func
     def before(
@@ -424,6 +440,47 @@ def test_inject_software_pipeline_expands_annotated_layout():
     assert [int(dim) for dim in shared.shape] == [2, 8, 16]
     assert list(layout_map[shared.data].get_input_shape()) == [2, 8, 16]
     assert layout_map[shared.data].is_equal(layout.expand([2]))
+
+
+def test_ph1_gemm_ab_stage_stride_accounts_for_tile_bytes():
+    @T.prim_func
+    def before(
+        A: T.Tensor((4, 16, 32), T.float32),
+        B: T.Tensor((4, 32, 64), T.float32),
+        C: T.Tensor((4,), T.float32),
+    ):
+        with T.sblock("root"):
+            A_shared = T.alloc_buffer((16, 32), T.float32, scope="shared.dyn")
+            B_shared = T.alloc_buffer((32, 64), T.float32, scope="shared.dyn")
+            for k in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [0, 1],
+                },
+            ):
+                with T.sblock("load"):
+                    T.reads(A[k, 0, 0], B[k, 0, 0])
+                    T.writes(A_shared[0, 0], B_shared[0, 0])
+                    A_shared[0, 0] = A[k, 0, 0]
+                    B_shared[0, 0] = B[k, 0, 0]
+                with T.sblock("consume"):
+                    T.reads(A_shared[0, 0], B_shared[0, 0])
+                    T.writes(C[k])
+                    C[k] = A_shared[0, 0] + B_shared[0, 0]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "musa", "arch": "mp_31"}))(mod)
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    a_shared = _find_alloc_buffer_by_data_name(mod["main"], "A_shared")
+    b_shared = _find_alloc_buffer_by_data_name(mod["main"], "B_shared")
+
+    assert _int_values(a_shared.shape) == [2, 16, 32]
+    assert _int_values(a_shared.strides) == [1024, 32, 1]
+    assert _int_values(b_shared.shape) == [2, 32, 64]
+    assert _int_values(b_shared.strides) == [2048, 64, 1]
 
 
 def _collect_leading_bind_names(mod, block_names):

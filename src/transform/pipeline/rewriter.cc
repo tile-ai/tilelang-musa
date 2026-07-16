@@ -20,6 +20,7 @@
 
 #include "../common/pipeline_utils.h"
 #include "op/region.h"
+#include "backend/common/target_utils.h"
 #include "tir/schedule/utils.h"
 
 namespace tvm {
@@ -320,11 +321,19 @@ private:
   using ScalarBindingMap =
       std::unordered_map<Var, size_t, ObjectPtrHash, ObjectPtrEqual>;
 
+  static const BindNode *GetScalarBindingMarker(const SBlock &block) {
+    const auto *bind = block->body.as<BindNode>();
+    if (!bind) {
+      return nullptr;
+    }
+    return bind;
+  }
+
   void CollectScalarBindings() {
     scalar_bindings_.clear();
     scalar_binding_map_.clear();
     for (const SBlock &block : scalar_binding_blocks_) {
-      if (const auto *bind = block->body.as<BindNode>()) {
+      if (const auto *bind = GetScalarBindingMarker(block)) {
         if (!scalar_binding_map_.count(bind->var)) {
           scalar_binding_map_.emplace(bind->var, scalar_bindings_.size());
           scalar_bindings_.push_back({bind->var, bind->value, bind->span});
@@ -402,14 +411,17 @@ private:
     return binding_indices;
   }
 
-  Stmt RewriteScalarBindingForAccess(size_t binding_index,
-                                     const PrimExpr &access_index) {
+  Stmt WrapScalarBindingForAccess(size_t binding_index,
+                                  const PrimExpr &access_index, Stmt body) {
     const ScalarBinding &binding = scalar_bindings_[binding_index];
-    Stmt bind = Bind(binding.var, binding.value, binding.span);
-    bind = PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
-                                pipeline_loop_, max_stage_ != 1)(bind);
-    bind = Substitute(bind, {{pipeline_loop_->loop_var, access_index}});
-    return bind;
+    Stmt marker = Bind(binding.var, binding.value, binding.span);
+    marker = PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
+                                  pipeline_loop_, max_stage_ != 1)(marker);
+    marker = Substitute(marker, {{pipeline_loop_->loop_var, access_index}});
+    const auto *bind = marker.as<BindNode>();
+    ICHECK(bind) << "InjectSoftwarePipeline: expected scalar binding marker to "
+                    "remain a Bind";
+    return SeqStmt({Bind(bind->var, bind->value, bind->span), std::move(body)});
   }
 
   SBlock ReplayScalarBindings(SBlock block, const PrimExpr &access_index) {
@@ -418,16 +430,14 @@ private:
       return block;
     }
 
-    Array<Stmt> seq;
-    for (size_t binding_index : binding_indices) {
-      seq.push_back(RewriteScalarBindingForAccess(binding_index, access_index));
-    }
-    for (const Stmt &stmt : FlattenTopLevelSeq(block->body)) {
-      seq.push_back(stmt);
+    Stmt body = block->body;
+    for (auto it = binding_indices.rbegin(); it != binding_indices.rend();
+         ++it) {
+      body = WrapScalarBindingForAccess(*it, access_index, std::move(body));
     }
 
     SBlockNode *n = block.CopyOnWrite();
-    n->body = SeqStmt(seq);
+    n->body = body;
     return MakeBlock(SBlockRealize({}, Bool(true), block),
                      buffer_data_to_buffer_);
   }
@@ -563,6 +573,36 @@ private:
     return num_versions;
   }
 
+  int64_t PH1GemmABStageStrideElems(const Buffer &buffer) {
+    if (!target_.defined()) {
+      return 0;
+    }
+    if (!TargetIsPH1(target_.value()) ||
+        (buffer->data->name_hint != "A_shared" &&
+         buffer->data->name_hint != "B_shared") ||
+        (buffer.scope() != "shared" && buffer.scope() != "shared.dyn")) {
+      return 0;
+    }
+    Array<PrimExpr> shape = buffer->shape;
+    int ndim = static_cast<int>(shape.size());
+    if (ndim != 2) {
+      return 0;
+    }
+    const auto *h = shape[0].as<IntImmNode>();
+    const auto *w = shape[1].as<IntImmNode>();
+    if (h && w && h->value * w->value < 4096) {
+      constexpr int kStageAlignBytes = 4096;
+      int dtype_bytes = buffer->dtype.bytes();
+      int64_t tile_elems = h->value * w->value;
+      int64_t tile_bytes = tile_elems * dtype_bytes;
+      int64_t padded_bytes =
+          ((tile_bytes + kStageAlignBytes - 1) / kStageAlignBytes) *
+          kStageAlignBytes;
+      return padded_bytes / dtype_bytes;
+    }
+    return 0;
+  }
+
   /*!
    * \brief Rewrite buffer allocation to keep multiple versions of original
    * buffer for pipelined accesses. \param buffer The buffer to be resized.
@@ -572,6 +612,13 @@ private:
   Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
     ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
+    // Preserve PH1 shared-memory stage alignment for SQMMA A/B tiles.
+    if (int64_t stage_stride_elems = PH1GemmABStageStrideElems(buffer)) {
+      new_buffer->strides = {Integer(stage_stride_elems),
+                             Integer(buffer->shape[1].as<IntImmNode>()->value),
+                             Integer(1)};
+      return Buffer(new_buffer);
+    }
     if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
       PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];

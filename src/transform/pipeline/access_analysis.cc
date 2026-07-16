@@ -11,7 +11,7 @@
 #include "op/parallel.h"
 #include "op/region.h"
 #include "op/utils.h"
-#include "target/utils.h"
+#include "backend/common/target_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -59,6 +59,39 @@ bool BufferRegionCollector::HasNonCopyTileOp() const {
 
 bool BufferRegionCollector::IsGlobalLikeBuffer(const Buffer &buffer) {
   return IsGlobalBuffer(buffer) || (buffer.defined() && buffer.scope().empty());
+}
+
+Optional<Buffer>
+BufferRegionCollector::TryGetBufFromAccessPtr(const PrimExpr &expr) const {
+  auto call = expr.as<CallNode>();
+  if (!call) {
+    return Optional<Buffer>();
+  }
+  if (call->op.same_as(builtin::tvm_access_ptr())) {
+    if (call->args.size() <= 1) {
+      return Optional<Buffer>();
+    }
+    auto *var = call->args[1].as<VarNode>();
+    if (!var) {
+      return Optional<Buffer>();
+    }
+    auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+    if (it == buffer_data_to_buffer_.end()) {
+      return Optional<Buffer>();
+    }
+    return (*it).second;
+  }
+  if (call->op.same_as(tl::access_ptr())) {
+    if (call->args.empty()) {
+      return Optional<Buffer>();
+    }
+    auto *load = call->args[0].as<BufferLoadNode>();
+    if (!load) {
+      return Optional<Buffer>();
+    }
+    return load->buffer;
+  }
+  return Optional<Buffer>();
 }
 
 void BufferRegionCollector::HandleTileOp(const TileOperator &tile_op) {
@@ -171,6 +204,30 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
       // because we only care about the buffer itself instead of indices
       reads_.push_back(buffer_region);
     }
+  } else if (op->op.same_as(builtin::ptx_cp_async()) ||
+             op->op.same_as(tl::ptx_cp_async())) {
+    if (op->args.size() >= 2) {
+      auto dst_buf = TryGetBufFromAccessPtr(op->args[0]);
+      auto src_buf = TryGetBufFromAccessPtr(op->args[1]);
+      if (src_buf.defined()) {
+        reads_.push_back(BufferRegion::FullRegion(src_buf.value()));
+      }
+      if (dst_buf.defined()) {
+        writes_.push_back(BufferRegion::FullRegion(dst_buf.value()));
+      }
+      if (src_buf.defined() && dst_buf.defined() &&
+          IsGlobalLikeBuffer(src_buf.value()) &&
+          IsSharedBuffer(dst_buf.value())) {
+        is_global_copy_pattern_ = true;
+      }
+    }
+    if (op->args.size() == 4) {
+      if (auto dst_buf = TryGetBufFromAccessPtr(op->args[0])) {
+        reads_.push_back(BufferRegion::FullRegion(dst_buf.value()));
+      }
+      this->VisitExpr(op->args[3]);
+    }
+    return;
   } else if (op->op.same_as(builtin::if_then_else())) {
     within_condition_expr_ = true;
     this->VisitExpr(op->args[0]);

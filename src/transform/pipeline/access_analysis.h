@@ -28,6 +28,7 @@ public:
 
 private:
   static bool IsGlobalLikeBuffer(const Buffer &buffer);
+  Optional<Buffer> TryGetBufFromAccessPtr(const PrimExpr &expr) const;
 
   void HandleTileOp(const TileOperator &tile_op);
   void VisitStmt_(const BufferStoreNode *op) final;

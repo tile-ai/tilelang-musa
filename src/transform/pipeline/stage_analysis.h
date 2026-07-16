@@ -6,11 +6,13 @@
 #include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <unordered_map>
@@ -24,7 +26,7 @@
 #include "op/parallel.h"
 #include "op/region.h"
 #include "op/utils.h"
-#include "target/utils.h"
+#include "backend/common/target_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -62,14 +64,27 @@ struct PipelineStageInfo {
   bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
   bool conditional_execution = false;
   bool producer_for_copy = false;
+  bool cp_async_commit_stage = false;
+  int cp_async_call_count = 0;
+  int cp_async_commit_count = 0;
+  int cp_async_wait_count = 0;
+  int cp_async_wait_min_inflight = std::numeric_limits<int>::max();
+  bool cp_async_wait_has_dynamic = false;
+  int cp_async_group = -1;
   int last_use_stmt_index =
       -1; // Initialized to -1, indicating no consumers found yet
 
 public:
-  bool is_first_stage() const { return copy_stage || producer_for_copy; }
+  bool is_first_stage() const {
+    return copy_stage || producer_for_copy || cp_async_commit_stage;
+  }
   bool is_copy_stage() const { return copy_stage; }
   bool is_tma_copy() const { return tma_copy; }
   bool is_producer_for_copy() const { return producer_for_copy; }
+  bool is_cp_async_commit_stage() const { return cp_async_commit_stage; }
+  bool has_cp_async_call() const { return cp_async_call_count > 0; }
+  bool has_cp_async_commit() const { return cp_async_commit_count > 0; }
+  bool has_cp_async_wait() const { return cp_async_wait_count > 0; }
   bool is_last_use_stmt_index_valid() const {
     return last_use_stmt_index != -1;
   }
@@ -105,6 +120,43 @@ public:
     std::unordered_set<const VarNode *> scalar_uses_;
   };
 
+  struct AsyncIntrinInfo {
+    int cp_async_call_count = 0;
+    int cp_async_commit_count = 0;
+    int cp_async_wait_count = 0;
+    int cp_async_wait_min_inflight = std::numeric_limits<int>::max();
+    bool cp_async_wait_has_dynamic = false;
+  };
+
+  AsyncIntrinInfo AnalyzeAsyncIntrinsics(const Stmt &stmt) {
+    AsyncIntrinInfo info;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      if (call->op.same_as(builtin::ptx_cp_async()) ||
+          call->op.same_as(tl::ptx_cp_async())) {
+        ++info.cp_async_call_count;
+      } else if (call->op.same_as(builtin::ptx_commit_group())) {
+        ++info.cp_async_commit_count;
+      } else if (call->op.same_as(builtin::ptx_wait_group())) {
+        ++info.cp_async_wait_count;
+        if (!call->args.empty()) {
+          if (const int64_t *imm = as_const_int(call->args[0])) {
+            info.cp_async_wait_min_inflight = std::min(
+                info.cp_async_wait_min_inflight, static_cast<int>(*imm));
+          } else {
+            info.cp_async_wait_has_dynamic = true;
+          }
+        } else {
+          info.cp_async_wait_has_dynamic = true;
+        }
+      }
+    });
+    return info;
+  }
+
   bool MayBeConditionallyExecuted(const Stmt &stmt) const {
     bool conditional = false;
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
@@ -131,7 +183,13 @@ public:
     if (pinfo.is_tma_copy()) {
       return false;
     }
-    return pinfo.is_copy_stage();
+    if (pinfo.has_cp_async_wait()) {
+      return false;
+    }
+    if (pinfo.has_cp_async_commit() && !pinfo.has_cp_async_call()) {
+      return false;
+    }
+    return pinfo.is_copy_stage() || pinfo.has_cp_async_call();
   }
 
   bool IsPureCopyStmt(const Stmt &stmt) const {
@@ -242,6 +300,11 @@ public:
       return;
     }
 
+    if (pinfo->has_cp_async_call()) {
+      pinfo->copy_stage = true;
+      return;
+    }
+
     if (pinfo->copy_stage) {
       return;
     }
@@ -287,7 +350,10 @@ public:
           }
         }
 
-        if (!pinfo.is_copy_stage()) {
+        if (!pinfo.is_copy_stage() ||
+            (pinfo.cp_async_group >= 0 &&
+             pinfo.cp_async_group ==
+                 (*pipeline_stage_infos)[i].cp_async_group)) {
           continue;
         }
 
@@ -449,7 +515,7 @@ public:
             continue;
           }
           auto &producer = (*pipeline_stage_infos)[it->second];
-          if (producer.is_copy_stage()) {
+          if (producer.is_copy_stage() || producer.is_cp_async_commit_stage()) {
             continue;
           }
           updated |= update_producer(&producer, consumer.last_use_stmt_index);
@@ -475,12 +541,11 @@ public:
           continue;
         }
         const auto &producer = pipeline_stage_infos[it->second];
-        ICHECK_EQ(producer.stage, consumer.stage)
+        ICHECK_LE(producer.stage, consumer.stage)
             << "Pipeline planning error: scalar dependency from statement "
             << producer.original_stmt_index << " to statement "
             << consumer.original_stmt_index
-            << " crosses pipeline stages. Scheduled scalar Bind statements "
-               "must stay in the same stage as their consumers.";
+            << " crosses from a later stage to an earlier stage.";
         if (producer.stage == consumer.stage) {
           ICHECK_LT(producer.order, consumer.order)
               << "Pipeline planning error: scalar dependency from statement "
@@ -492,14 +557,34 @@ public:
     }
   }
 
-  bool EmitImplicitAsyncAnnotations(
+  bool EmitAsyncAnnotations(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos,
+      const std::vector<std::vector<int>> &explicit_async_groups,
       Map<String, Any> *annotations) const {
     if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
       return false;
     }
 
     std::vector<int> async_group_ids(pipeline_stage_infos.size(), -1);
+    int next_async_group_id = 0;
+    for (const auto &group_stmt_indices : explicit_async_groups) {
+      bool emitted_group = false;
+      for (int stmt_idx : group_stmt_indices) {
+        if (stmt_idx < 0 ||
+            stmt_idx >= static_cast<int>(pipeline_stage_infos.size())) {
+          continue;
+        }
+        if (!IsAsyncProducerCandidate(pipeline_stage_infos[stmt_idx])) {
+          continue;
+        }
+        async_group_ids[stmt_idx] = next_async_group_id;
+        emitted_group = true;
+      }
+      if (emitted_group) {
+        ++next_async_group_id;
+      }
+    }
+
     std::vector<int> stmt_indices_by_order(pipeline_stage_infos.size());
     std::iota(stmt_indices_by_order.begin(), stmt_indices_by_order.end(), 0);
     std::stable_sort(stmt_indices_by_order.begin(), stmt_indices_by_order.end(),
@@ -512,11 +597,10 @@ public:
                        return lhs < rhs;
                      });
 
-    int next_async_group_id = 0;
     std::map<std::pair<int, int>, int> implicit_group_ids;
     for (int stmt_idx : stmt_indices_by_order) {
       const auto &pinfo = pipeline_stage_infos[stmt_idx];
-      if (!IsAsyncProducerCandidate(pinfo)) {
+      if (!IsAsyncProducerCandidate(pinfo) || async_group_ids[stmt_idx] != -1) {
         continue;
       }
       auto key = std::make_pair(pinfo.stage, pinfo.last_use_stmt_index);
@@ -561,6 +645,12 @@ public:
     annotations->Set(s_tir::attr::software_pipeline_async_stages,
                      Array<Integer>(async_stages));
     return true;
+  }
+
+  bool EmitImplicitAsyncAnnotations(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos,
+      Map<String, Any> *annotations) const {
+    return EmitAsyncAnnotations(pipeline_stage_infos, {}, annotations);
   }
 
   void MaybeAnnotateLegacyAsyncPipelineLoop(const Array<Stmt> &pipeline_stmts,
@@ -620,6 +710,12 @@ public:
         ScalarUseDefCollector::Collect(block->body);
     pinfo.scalar_defs = std::move(scalar_defs);
     pinfo.scalar_uses = std::move(scalar_uses);
+    auto async_info = AnalyzeAsyncIntrinsics(block->body);
+    pinfo.cp_async_call_count = async_info.cp_async_call_count;
+    pinfo.cp_async_commit_count = async_info.cp_async_commit_count;
+    pinfo.cp_async_wait_count = async_info.cp_async_wait_count;
+    pinfo.cp_async_wait_min_inflight = async_info.cp_async_wait_min_inflight;
+    pinfo.cp_async_wait_has_dynamic = async_info.cp_async_wait_has_dynamic;
     pinfo.original_stmt_index = idx;
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
     bool pure_copy_stage =

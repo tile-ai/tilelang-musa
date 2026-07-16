@@ -44,6 +44,7 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutReducer()(mod)
     if allow_warp_specialized(target=target):
         mod = musa_transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tilelang.transform.IfStmtBinding()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
@@ -62,7 +63,6 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistNonRestrictParams()(mod)
 
     mod = musa_transform.LowerSharedTmem()(mod)
-    mod = tilelang.transform.IfStmtBinding()(mod)
     has_tma = module_has_tma(mod)
     mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
     mod = musa_transform.LowerSharedBarrier()(mod)
