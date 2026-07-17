@@ -10,7 +10,7 @@ tilelang.disable_cache()
 def run_lower_shared_barrier(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(tvm.target.Target("musa", host="llvm"))(mod)
-    mod = tilelang.transform.LowerSharedBarrier()(mod)
+    mod = tilelang.musa.transform.LowerSharedBarrier()(mod)
     return mod["main"]
 
 
