@@ -60,6 +60,21 @@ def _assert_uses_musa_native_x2(src, op_name, dtype_name, native_type):
     assert "__mt_bfloat162" not in src
 
 
+def _assert_uses_musa_native_packed_vector(src, op_name, dtype_name):
+    """Auto-vectorization may legally widen a packed operation beyond x2."""
+    assert any(f"tl::{op_name}{width}" in src for width in (2, 4, 8))
+    assert "uint1" not in src
+    assert "uint2" not in src
+    assert "__half2" not in src
+    assert "__mt_bfloat162" not in src
+    type_prefix = {
+        "float32": "tl_f",
+        "float16": "tl_h",
+        "bfloat16": "tl_bf",
+    }[dtype_name]
+    assert type_prefix in src
+
+
 def _make_binary_kernel(op_func, dtype_tl):
     @T.prim_func
     def main(
@@ -173,7 +188,7 @@ def test_musa_codegen_auto_vec_uses_tilelang_interface(
     del torch_dtype
     py_op, tl_func = _AUTO_VEC_OPS[op_key]
     src = _lower_to_musa_source(_make_auto_vec_binary_kernel(py_op, dtype_tl))
-    _assert_uses_musa_native_x2(src, tl_func, dtype_name, native_type)
+    _assert_uses_musa_native_packed_vector(src, tl_func.removesuffix("2"), dtype_name)
 
 
 @pytest.mark.parametrize("dtype_name,dtype_tl,torch_dtype,native_type", _DTYPES)
@@ -182,7 +197,7 @@ def test_musa_codegen_auto_vec_fma_uses_tilelang_interface(
 ):
     del torch_dtype
     src = _lower_to_musa_source(_make_auto_vec_fma_kernel(dtype_tl))
-    _assert_uses_musa_native_x2(src, "fma2", dtype_name, native_type)
+    _assert_uses_musa_native_packed_vector(src, "fma", dtype_name)
 
 
 @tilelang.testing.requires_musa_compute_version_ge(3, 1)
