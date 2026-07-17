@@ -7,7 +7,7 @@ from tilelang.layout import (
     make_ph1_wmma_fragment_b,
     make_ph1_wmma_fragment_c,
 )
-from tilelang.utils.language import is_fragment, is_shared
+from tilelang.utils.language import is_fragment, is_shared, is_tensor_memory
 from tilelang import _ffi_api
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -21,6 +21,25 @@ GEMM_INST_WMMA = "musa.ph1wmma"
 
 
 class GemmWMMA(GemmBase):
+    def __post_init__(self) -> None:
+        if is_tensor_memory(self.A) or self.A.dtype == self.B.dtype:
+            return
+
+        a_dtype = tvm.DataType(self.A.dtype)
+        b_dtype = tvm.DataType(self.B.dtype)
+        a_name = str(a_dtype)
+        b_name = str(b_dtype)
+        both_fp8 = a_name.startswith("float8") and b_name.startswith("float8")
+        mixed_float_int8 = (
+            (a_name in ("float16", "bfloat16") and b_name == "int8")
+            or (b_name in ("float16", "bfloat16") and a_name == "int8")
+        )
+        if not (both_fp8 or mixed_float_int8):
+            raise ValueError(
+                "PH1 WMMA mixed operands support FP8/FP8 or float16|bfloat16 "
+                f"with int8, got A={a_dtype}, B={b_dtype}"
+            )
+
     @staticmethod
     def _as_const_bool(value, name: str) -> bool:
         if isinstance(value, bool):
