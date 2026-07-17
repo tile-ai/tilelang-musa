@@ -603,7 +603,7 @@ def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     kernel, batch_sizes = _compile_grouped_gemm_ws(target={"kind": "musa", "arch": "mp_31"})
     src = kernel.get_kernel_source()
 
-    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
+    branch = _find_after(src, "(int)threadIdx.x) < 128")
     cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
     m_start = _find_after(src, "int m_start =")
     actual_rows = _find_after(src, "int actual_rows =")
