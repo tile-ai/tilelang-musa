@@ -72,6 +72,15 @@ private:
       return StmtExprMutator::VisitStmt_(op);
     }
 
+    // MaterializeKernelLaunch may place thread_extent inside the root block
+    // that owns the barrier buffers, so discover it before rewriting the block.
+    if (!thread_var_.defined()) {
+      PostOrderVisit(block->body, [this](const ObjectRef &node) {
+        if (const auto *attr = node.as<AttrStmtNode>()) {
+          RecordThreadVar(attr);
+        }
+      });
+    }
     ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
 
     for (auto buffer : barrier_buffers) {
@@ -219,7 +228,7 @@ private:
     return store;
   }
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
+  void RecordThreadVar(const AttrStmtNode *op) {
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
@@ -227,6 +236,10 @@ private:
         thread_var_ = iv;
       }
     }
+  }
+
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    RecordThreadVar(op);
     return StmtExprMutator::VisitStmt_(op);
   }
 
