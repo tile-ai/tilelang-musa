@@ -4,7 +4,7 @@ from typing import Optional, Union
 import torch
 from tilelang import language as T
 from tilelang.contrib import nvcc
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 from .types import QuantTensor
 from ..utils import align, ceil_div
