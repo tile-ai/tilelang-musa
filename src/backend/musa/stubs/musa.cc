@@ -206,6 +206,16 @@ MUresult muFuncSetAttribute(MUfunction hfunc, MUfunction_attribute attrib,
   return MUSADriverAPI::get()->muFuncSetAttribute_(hfunc, attrib, value);
 }
 
+MUresult muTensorDescriptorEncode(
+    MUtensorDescriptor *tensorDesc, MUtensorDescriptorDataType tensorDataType,
+    muuint32_t tensorRank, void *globalAddress, const muuint64_t *globalDim,
+    const muuint64_t *globalStrides, MUtensorDescriptorInterleave interleave,
+    muuint64_t oobConstantFill) {
+  return MUSADriverAPI::get()->muTensorDescriptorEncode_(
+      tensorDesc, tensorDataType, tensorRank, globalAddress, globalDim,
+      globalStrides, interleave, oobConstantFill);
+}
+
 MUresult muLaunchKernel(MUfunction f, unsigned int gridDimX,
                         unsigned int gridDimY, unsigned int gridDimZ,
                         unsigned int blockDimX, unsigned int blockDimY,

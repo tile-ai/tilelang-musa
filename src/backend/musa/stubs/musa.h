@@ -76,6 +76,7 @@
   _(muModuleGetGlobal)                                                         \
   _(muFuncGetAttribute)                                                        \
   _(muFuncSetAttribute)                                                        \
+  _(muTensorDescriptorEncode)                                                  \
   _(muLaunchKernel)                                                            \
   _(muLaunchKernelEx)                                                          \
   _(muMemsetD32)                                                               \
@@ -182,6 +183,11 @@ TILELANG_MUSA_STUB_API MUresult muFuncGetAttribute(int *pi,
 TILELANG_MUSA_STUB_API MUresult muFuncSetAttribute(MUfunction hfunc,
                                                    MUfunction_attribute attrib,
                                                    int value);
+TILELANG_MUSA_STUB_API MUresult muTensorDescriptorEncode(
+    MUtensorDescriptor *tensorDesc, MUtensorDescriptorDataType tensorDataType,
+    muuint32_t tensorRank, void *globalAddress, const muuint64_t *globalDim,
+    const muuint64_t *globalStrides, MUtensorDescriptorInterleave interleave,
+    muuint64_t oobConstantFill);
 TILELANG_MUSA_STUB_API MUresult muLaunchKernel(
     MUfunction f, unsigned int gridDimX, unsigned int gridDimY,
     unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,

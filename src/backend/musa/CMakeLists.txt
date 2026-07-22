@@ -11,6 +11,12 @@ else()
   set(MUSA_HOME "/usr/local/musa")
 endif()
 list(APPEND CMAKE_MODULE_PATH ${MUSA_HOME}/cmake)
+if(TILELANG_USE_MUSA_STUBS)
+  set(MUSA_musart_LIBRARY "${CMAKE_BINARY_DIR}/lib/libmusart_stub.so" CACHE FILEPATH
+      "MUSA runtime library to link against" FORCE)
+  set(MUSA_musa_driver_LIBRARY "${CMAKE_BINARY_DIR}/lib/libmusa_stub.so" CACHE FILEPATH
+      "MUSA driver library to link against" FORCE)
+endif()
 find_package(MUSAToolkit REQUIRED)
 if(NOT MUSAToolkit_FOUND)
   message(FATAL_ERROR "Cannot find MUSA, USE_MUSA=" ${USE_MUSA})
@@ -48,6 +54,9 @@ if(TILELANG_USE_MUSA_STUBS)
       "MUSA runtime and driver stub libraries")
   list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK musa_stub musart_stub)
   list(APPEND TILELANG_ACTIVE_BACKEND_STUB_TARGETS musa_stub musart_stub)
+
+  set(TILELANG_ACTIVE_BACKEND_PATCHELF_REMOVE
+      "libmusa.so;libmusa.so.1")
 endif()
 
 add_compile_definitions("MUSA_MAJOR_VERSION=${MUSAToolkit_VERSION_MAJOR}")
