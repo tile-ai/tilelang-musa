@@ -59,6 +59,7 @@ smoke-ci-test:
     - "python3 -m build --wheel -C cmake.define.USE_ALTERNATIVE_LINKER=OFF"
     - "export LD_LIBRARY_PATH=${REPO_DIR}/build/lib:$LD_LIBRARY_PATH"
     - "python3 -m pip install --force-reinstall -i https://pypi.tuna.tsinghua.edu.cn/simple dist/*.whl"
+    - "python3 -m pip install --force-reinstall --no-deps 3rdparty/tvm/3rdparty/tvm-ffi"
     - "python3 -c \"import tilelang; print('tilelang', tilelang.__version__, tilelang.__file__)\""
     - "python3 -m pip install -r requirements-test.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
     - "bash testing/run_test.sh ci_smoke -vv -s --tb=short --durations=20 --timeout=60 --timeout-method=thread"
