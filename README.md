@@ -14,6 +14,10 @@ In most cases, you only need to:
 
 ## Latest News
 
+### 0.1.12+musa.1
+
+🚀 tilelang_musa0.1.12+musa.1 has been released. Based on TileLang 0.1.12, this release adds registry-based MUSA compiler and backend integration, buffer-view improvements, vectorization and pipeline correctness fixes, and lazy MUSA driver/runtime loading. See the [release notes](https://github.com/tile-ai/tilelang-musa/releases/tag/v0.1.12%2Bmusa.1) for details.You can use the latest tilelang syntax to write kernels that can run on the musa platform.
+
 ### 0.1.10+musa.1
 
 🚀 tilelang_musa0.1.10+musa.1 has been released. This version is based on tilelang 0.1.10 and is deeply adapted for the musa platform. You can use the latest tilelang syntax to write kernels that can run on the musa platform.
