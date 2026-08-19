@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import atexit
+
 import torch
 
 from tilelang import tvm
@@ -32,3 +34,16 @@ register_runtime_device(
     ),
     override=True,
 )
+
+
+def _mark_runtime_shutdown() -> None:
+    try:
+        mark_shutdown = tvm.get_global_func("runtime.musa.mark_shutdown", allow_missing=True)
+        if mark_shutdown is not None:
+            mark_shutdown()
+    except Exception:
+        # Interpreter shutdown must not fail because the optional runtime is gone.
+        pass
+
+
+atexit.register(_mark_runtime_shutdown)
