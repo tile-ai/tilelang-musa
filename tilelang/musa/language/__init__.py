@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from tilelang.language.common import *  # noqa: F401,F403
 from tilelang.language.common import __all__ as _COMMON_ALL
-from tilelang.language.builtin import get_warp_group_idx, shuffle_elect  # noqa: F401
+from tilelang.language.builtin import (  # noqa: F401
+    get_lane_idx,
+    get_warp_idx,
+    get_warp_idx_sync,
+    get_warp_group_idx,
+    shuffle_elect,
+)
 
 from .kernel import Kernel  # noqa: F401
 from .print import *  # noqa: F401,F403
@@ -12,6 +18,9 @@ from .print import __all__ as _PRINT_ALL
 
 _MUSA_API_ALL = (
     "Kernel",
+    "get_lane_idx",
+    "get_warp_idx",
+    "get_warp_idx_sync",
     "get_warp_group_idx",
     "shuffle_elect",
 )
