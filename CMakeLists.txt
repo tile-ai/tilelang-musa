@@ -335,6 +335,16 @@ option(TILELANG_USE_HIP_STUBS
        ${_TILELANG_USE_HIP_STUBS_DEFAULT})
 unset(_TILELANG_USE_HIP_STUBS_DEFAULT)
 
+if(WIN32 AND NOT CYGWIN)
+  set(_TILELANG_USE_MUSA_STUBS_DEFAULT OFF)
+else()
+  set(_TILELANG_USE_MUSA_STUBS_DEFAULT ON)
+endif()
+option(TILELANG_USE_MUSA_STUBS
+       "Use POSIX dlopen-based MUSA stub libraries (musa/musart) for portable wheels"
+       ${_TILELANG_USE_MUSA_STUBS_DEFAULT})
+unset(_TILELANG_USE_MUSA_STUBS_DEFAULT)
+
 # Optional path to HIP headers, used together with TILELANG_USE_HIP_STUBS=ON
 # when the build host has no ROCm runtime installed (e.g. an NV-only machine
 # producing a cross-target wheel). The directory must contain a `hip/` subtree.
