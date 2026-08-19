@@ -324,7 +324,7 @@ MUSA_UNSUPPORTED_HALF_MATH_UNARY(htanh, tanhf)
 MUSA_UNSUPPORTED_HALF_MATH_UNARY(htan, tanf)
 MUSA_UNSUPPORTED_HALF_MATH_UNARY(hatan, atanf)
 MUSA_UNSUPPORTED_HALF_MATH_UNARY(herf, erf)
-#else
+#elif (__MUSA_ARCH__ < 220)
 MUSA_UNSUPPORTED_HALF_MATH_UNARY(hexp, exp)
 #endif
 #endif
@@ -360,6 +360,7 @@ static inline __device__ __host__ mt_bfloat16 HALF_MATH_NAME(mt_bfloat16 x) {   
   return __float2bfloat16(result);                                       \
 }
 
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ < 220)
 MUSA_UNSUPPORTED_HALF_MATH_BINARY(hpow, powf)
 #if ((__MUSACC_VER_MAJOR__ < 12) || ((__MUSACC_VER_MAJOR__ == 12) && (__MUSACC_VER_MINOR__ < 8)))
 MUSA_UNSUPPORTED_HALF_MATH_UNARY(hsinh, sinhf)
@@ -368,6 +369,7 @@ MUSA_UNSUPPORTED_HALF_MATH_UNARY(htanh, tanhf)
 MUSA_UNSUPPORTED_HALF_MATH_UNARY(htan, tanf)
 MUSA_UNSUPPORTED_HALF_MATH_UNARY(hatan, atanf)
 MUSA_UNSUPPORTED_HALF_MATH_UNARY(herf, erf)
+#endif
 
 #undef MUSA_UNSUPPORTED_HALF_MATH_BINARY
 #undef MUSA_UNSUPPORTED_HALF_MATH_UNARY

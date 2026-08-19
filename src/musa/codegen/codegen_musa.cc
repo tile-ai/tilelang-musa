@@ -49,6 +49,7 @@
 #include "tirx/transform/ir_utils.h"
 #include "literal/musa_half_t.h"
 #include "literal/musa_int8_t.h"
+#include "op/builtin.h"
 
 #include "support/check.h"
 
@@ -207,7 +208,7 @@ std::string CodeGenMUSA::Finish() {
   decl_stream << "#include <tl_templates/musa/common/intrin.h>\n";
 
   if (enable_fp16_) {
-    decl_stream << "#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 530)\n";
+    decl_stream << "#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 220)\n";
     decl_stream << "#include <musa_fp16.h>\n";
     decl_stream << "__device__ half max"
                 << "(half a, half b)\n"
@@ -222,7 +223,7 @@ std::string CodeGenMUSA::Finish() {
   }
 
   if (enable_bf16_) {
-    decl_stream << "#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 800)\n";
+    decl_stream << "#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 220)\n";
     decl_stream << "#include <musa_bf16.h>\n";
     decl_stream << "__device__ mt_bfloat16 max"
                 << "(mt_bfloat16 a, mt_bfloat16 b)\n"
@@ -299,6 +300,16 @@ std::string CodeGenMUSA::Finish() {
 
   if (need_mma_h_) {
     decl_stream << "#include <mma.h>\n";
+  }
+
+  if (need_atomic_h_) {
+    if (enable_fp16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_FP16\n";
+    }
+    if (enable_bf16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_BF16\n";
+    }
+    decl_stream << "#include <tl_templates/musa/common/atomic.h>\n";
   }
 
   if (need_cast_smem_ptr_to_int_) {
@@ -1363,6 +1374,72 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
     ICHECK(thread_extent)
         << "tl.shuffle_elect expects a compile-time constant thread_extent.";
     os << "tl::tl_shuffle_elect<" << thread_extent->value << ">()";
+  } else if (op->op.same_as(tl::atomic_add_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicAdd(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicAddRet(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_max_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicMax(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicMaxRet(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_min_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicMin(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicMinRet(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_load_elem_op())) {
+    need_atomic_h_ = true;
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl::AtomicLoad(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_store_elem_op())) {
+    need_atomic_h_ = true;
+    ICHECK_EQ(op->args.size(), 3U);
+    os << "tl::AtomicStore(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
+  } else if (op->op.same_as(tl::atomic_or_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicOr(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else {
