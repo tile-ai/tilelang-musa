@@ -204,6 +204,7 @@ void CodeGenMUSA::PrintExtraAttrs(const PrimFunc& f, std::ostream& os) {
 
 std::string CodeGenMUSA::Finish() {
   decl_stream << "#include <musa.h>\n";
+  decl_stream << "#include <tl_templates/musa/common/intrin.h>\n";
 
   if (enable_fp16_) {
     decl_stream << "#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 530)\n";
@@ -1320,6 +1321,48 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
       TVM_FFI_THROW(InternalError) << "Invalid number of lanes for float4_e2m1fn reinterpret: " << lanes;
     }
     EndScope(ssa_scope);
+  } else if (op->op.same_as(Op::Get("tl.get_lane_idx"))) {
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_lane_idx expects at most one argument <warp_size>.";
+    os << "tl::get_lane_idx(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(Op::Get("tl.get_warp_idx_sync"))) {
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_warp_idx_sync expects at most one argument <warp_size>.";
+    os << "tl::get_warp_idx_sync(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(Op::Get("tl.get_warp_idx"))) {
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_warp_idx expects at most one argument <warp_size>.";
+    os << "tl::get_warp_idx(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(Op::Get("tl.get_warp_group_idx"))) {
+    ICHECK_LE(op->args.size(), 2U)
+        << "tl.get_warp_group_idx expects <warp_size, warps_per_group>.";
+    os << "tl::get_warp_group_idx(";
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      if (i != 0) {
+        os << ", ";
+      }
+      os << PrintExpr(op->args[i]);
+    }
+    os << ")";
+  } else if (op->op.same_as(Op::Get("tl.tl_shuffle_elect"))) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.shuffle_elect expects one argument <thread_extent>.";
+    const auto* thread_extent = op->args[0].as<IntImmNode>();
+    ICHECK(thread_extent)
+        << "tl.shuffle_elect expects a compile-time constant thread_extent.";
+    os << "tl::tl_shuffle_elect<" << thread_extent->value << ">()";
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else {
