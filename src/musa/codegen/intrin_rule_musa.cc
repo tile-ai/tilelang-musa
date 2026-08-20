@@ -162,6 +162,10 @@ template <typename T> static PrimExpr DispatchMUSAShuffle(const PrimExpr &e) {
               call->annotations);
 }
 
+TVM_REGISTER_OP("tirx.rsqrt")
+    .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic",
+                               DispatchPureExtern<MUSAMath>);
+
 TVM_REGISTER_OP("tirx.clz")
     .set_attr<FLowerIntrinsic>(
         "musa.FLowerIntrinsic",
