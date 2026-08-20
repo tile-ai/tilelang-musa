@@ -69,4 +69,5 @@ list(APPEND TILE_LANG_SRCS
   src/musa/op/reduce.cc
   src/musa/op/scan.cc
   src/musa/op/transpose.cc
+  src/musa/transform/async_copy_injector.cc
 )

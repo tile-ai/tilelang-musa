@@ -17,6 +17,9 @@ bool TargetHasAsyncCopy(Target target) {
   if (TargetIsRocm(target)) {
     return TargetRocmHasAsyncCopy(target);
   }
+  if (TargetIsMUSA(target)) {
+    return TargetMUSAHasAsyncCopy(target);
+  }
   return false;
 }
 

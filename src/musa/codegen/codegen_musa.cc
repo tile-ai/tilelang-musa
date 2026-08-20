@@ -37,6 +37,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -55,6 +56,52 @@
 
 namespace tvm {
 namespace codegen {
+
+namespace {
+
+std::optional<DataType> GetAsyncCopyElementType(const PrimExpr &expr) {
+  const auto *ptr_call = expr.as<CallNode>();
+  if (ptr_call == nullptr) {
+    return std::nullopt;
+  }
+  if (ptr_call->op.same_as(builtin::address_of())) {
+    const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+    ICHECK(buffer_load);
+    return buffer_load->buffer->dtype;
+  }
+  if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+    ICHECK(!ptr_call->args.empty());
+    return ptr_call->args[0].dtype();
+  }
+  if (ptr_call->op.same_as(tl::access_ptr())) {
+    ICHECK_EQ(ptr_call->args.size(), 3U);
+    const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+    ICHECK(buffer_load);
+    return buffer_load->buffer->dtype;
+  }
+  return std::nullopt;
+}
+
+int GetAsyncCopyTransferBytes(const CallNode *op) {
+  ICHECK(op->args.size() == 3U || op->args.size() == 4U);
+  const auto *count = op->args[2].as<IntImmNode>();
+  ICHECK(count);
+  auto dst_type = GetAsyncCopyElementType(op->args[0]);
+  auto src_type = GetAsyncCopyElementType(op->args[1]);
+  ICHECK(dst_type.has_value() && src_type.has_value());
+
+  int64_t dst_bits = count->value * dst_type->bits() * dst_type->lanes();
+  int64_t src_bits = count->value * src_type->bits() * src_type->lanes();
+  ICHECK_EQ(dst_bits, src_bits);
+  ICHECK_EQ(dst_bits % 8, 0);
+  int64_t bytes = dst_bits / 8;
+  ICHECK(bytes == 4 || bytes == 8 || bytes == 16)
+      << "T.async_copy requires a transfer width of 4, 8, or 16 bytes, got "
+      << bytes;
+  return static_cast<int>(bytes);
+}
+
+} // namespace
 
 struct MUSAFastMath {
   std::string operator()(DataType type, const std::string &name) const {
@@ -383,6 +430,10 @@ std::string CodeGenMUSA::Finish() {
       decl_stream << "#define TL_MUSA_ENABLE_BF16\n";
     }
     decl_stream << "#include <tl_templates/musa/common/scan.h>\n";
+  }
+
+  if (need_async_copy_h_) {
+    decl_stream << "#include <tl_templates/musa/common/async_copy.h>\n";
   }
 
   if (need_cast_smem_ptr_to_int_) {
@@ -1314,15 +1365,25 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string src = this->PrintExpr(op->args[2]);
     std::string src_offset = this->PrintExpr(op->args[3]);
     std::string size = this->PrintExpr(op->args[4]);
-    need_cast_smem_ptr_to_int_ = true;
-    // use size of argument list to indicate whether or not to use predicated
-    // cp.async
+    need_async_copy_h_ = true;
     if (op->args.size() == 5) {
-      this->stream << PrintCpAsyncAssembly(dst, dst_offset, src, src_offset,
-                                           size);
+      os << "tl::cp_async_gs<" << size << ">(" << dst << " + " << dst_offset
+         << ", " << src << " + " << src_offset << ")";
     } else {
-      this->stream << PrintPredicatedCpAsyncAssembly(
-          dst, dst_offset, src, src_offset, size, this->PrintExpr(op->args[5]));
+      os << "tl::cp_async_gs_conditional<" << size << ">(" << dst << " + "
+         << dst_offset << ", " << src << " + " << src_offset << ", "
+         << this->PrintExpr(op->args[5]) << ")";
+    }
+  } else if (op->op.same_as(tl::ptx_cp_async())) {
+    need_async_copy_h_ = true;
+    int size = GetAsyncCopyTransferBytes(op);
+    std::string dst = this->PrintExpr(op->args[0]);
+    std::string src = this->PrintExpr(op->args[1]);
+    if (op->args.size() == 3U) {
+      os << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src << ")";
+    } else {
+      os << "tl::cp_async_gs_conditional<" << size << ">(" << dst << ", " << src
+         << ", " << this->PrintExpr(op->args[3]) << ")";
     }
   } else if (op->op.same_as(builtin::ptx_cp_async_bulk())) {
     need_cast_smem_ptr_to_int_ = true;
@@ -1338,11 +1399,12 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << PrintCpAsyncBulkAsm(dst, dst_offset, src, src_offset, size,
                                         barrier);
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
-    this->stream << "__asm__ __volatile__(\"cp.async.commit_group;\");\n\n";
+    need_async_copy_h_ = true;
+    os << "tl::cp_async_commit()";
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
     int n = Downcast<IntImm>(op->args[0])->value;
-    this->stream << "__asm__ __volatile__(\"cp.async.wait_group " << n
-                 << ";\");\n\n";
+    need_async_copy_h_ = true;
+    os << "tl::cp_async_wait<" << n << ">()";
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;

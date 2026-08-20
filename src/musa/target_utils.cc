@@ -49,6 +49,13 @@ bool TargetIsMP31(Target target) {
 
 bool TargetMUSACanPropagateKernelErrors(Target) { return false; }
 
+bool TargetMUSAHasAsyncCopy(Target target) {
+  if (!TargetIsMUSA(target)) {
+    return false;
+  }
+  return GetMusaArchInt(target) >= 21;
+}
+
 int TargetMUSAGetWarpSize(Target target) {
   if (!TargetIsMUSA(target)) {
     return 32;
@@ -56,6 +63,7 @@ int TargetMUSAGetWarpSize(Target target) {
   int arch = GetMusaArchInt(target);
   return arch > 0 && arch <= 22 ? 128 : 32;
 }
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
@@ -63,6 +71,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsMUSA(target); })
       .def("tl.TargetIsMP31",
            [](Target target) { return TargetIsMP31(target); })
+      .def("tl.TargetMUSAHasAsyncCopy",
+           [](Target target) { return TargetMUSAHasAsyncCopy(target); })
       .def("tl.TargetMUSAGetWarpSize",
            [](Target target) { return TargetMUSAGetWarpSize(target); });
 }
