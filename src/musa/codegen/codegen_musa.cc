@@ -56,6 +56,27 @@
 namespace tvm {
 namespace codegen {
 
+struct MUSAFastMath {
+  std::string operator()(DataType type, const std::string& name) const {
+    if (type.is_float()) {
+      switch (type.bits()) {
+        case 64:
+          return name;
+        case 32:
+          return "__" + name + "f";
+        case 16:
+          return "h" + name;
+        default:
+          return "";
+      }
+    }
+    if (type.is_bfloat16()) {
+      return "h" + name;
+    }
+    return "";
+  }
+};
+
 std::string MUSAGetFP8Type(DataType type) {
   std::stringstream stream;
   int32_t lanes = type.lanes();
@@ -296,6 +317,16 @@ std::string CodeGenMUSA::Finish() {
 
   if (need_math_constants_h_) {
     decl_stream << "#include <math_constants.h>\n";
+  }
+
+  if (need_math_h_) {
+    if (enable_fp16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_FP16\n";
+    }
+    if (enable_bf16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_BF16\n";
+    }
+    decl_stream << "#include <tl_templates/musa/common/math.h>\n";
   }
 
   if (need_mma_h_) {
@@ -1519,6 +1550,41 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
   } else if (op->op.same_as(tl::warp_reduce_bitor())) {
     need_reduce_h_ = true;
     os << "tl::warp_reduce_bitor(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__exp()) || op->op.same_as(tl::__exp10()) ||
+             op->op.same_as(tl::__log()) || op->op.same_as(tl::__log2()) ||
+             op->op.same_as(tl::__log10()) || op->op.same_as(tl::__tan()) ||
+             op->op.same_as(tl::__cos()) || op->op.same_as(tl::__sin())) {
+    ICHECK_EQ(op->args.size(), 1U);
+    std::string name;
+    if (op->op.same_as(tl::__exp())) {
+      name = "exp";
+    } else if (op->op.same_as(tl::__exp10())) {
+      name = "exp10";
+    } else if (op->op.same_as(tl::__log())) {
+      name = "log";
+    } else if (op->op.same_as(tl::__log2())) {
+      name = "log2";
+    } else if (op->op.same_as(tl::__log10())) {
+      name = "log10";
+    } else if (op->op.same_as(tl::__tan())) {
+      name = "tan";
+    } else if (op->op.same_as(tl::__cos())) {
+      name = "cos";
+    } else {
+      name = "sin";
+    }
+    const std::string func_name = MUSAFastMath()(op->dtype, name);
+    ICHECK(!func_name.empty())
+        << "MUSA fast math " << name << " does not support dtype " << op->dtype;
+    need_math_h_ = true;
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::fast_rcp())) {
+    ICHECK_EQ(op->args.size(), 1U);
+    ICHECK(op->dtype.is_float() && op->dtype.bits() == 32 &&
+                   op->dtype.lanes() == 1)
+        << "tl.fast_rcp currently supports scalar float32 only";
+    need_math_h_ = true;
+    os << "tl::fast_rcp(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else {

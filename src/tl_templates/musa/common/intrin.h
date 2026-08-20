@@ -74,6 +74,15 @@ TL_DEVICE uint32_t elect_one_sync() { return get_lane_idx() == 0; }
 
 TL_DEVICE int canonical_warp_idx_sync() { return get_warp_idx_sync(); }
 
+template <int y = 1, typename T>
+TL_DEVICE T pow_of_int(T x) {
+  T result = x;
+  for (int i = 1; i < y; i++) {
+    result *= x;
+  }
+  return result;
+}
+
 template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
   if constexpr (thread_extent == 0) {
     return canonical_warp_idx_sync() == 0 && elect_one_sync();

@@ -157,6 +157,9 @@ static PrimExpr DispatchMUSAShuffle(const PrimExpr& e) {
   return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), musa_args, call->annotations);
 }
 
+TVM_REGISTER_OP("tirx.rsqrt")
+    .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic", DispatchPureExtern<MUSAMath>);
+
 TVM_REGISTER_OP("tirx.clz")
     .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic",
                                DispatchPureExtern<MUSAMath, /*dtype_from_arg=*/true>);
