@@ -14,6 +14,7 @@ namespace tl {
 bool TargetIsMUSA(Target target);
 bool TargetIsMP31(Target target);
 bool TargetMUSACanPropagateKernelErrors(Target target);
+int TargetMUSAGetWarpSize(Target target);
 
 } // namespace tl
 } // namespace tvm
