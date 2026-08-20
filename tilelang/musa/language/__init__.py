@@ -11,6 +11,25 @@ from tilelang.language.builtin import (  # noqa: F401
     get_warp_group_idx,
     shuffle_elect,
 )
+from tilelang.language.math_intrinsics import (  # noqa: F401
+    __cos,
+    __exp,
+    __exp10,
+    __log,
+    __log2,
+    __log10,
+    __sin,
+    __tan,
+    fast_rcp,
+    ieee_add,
+    ieee_fdiv,
+    ieee_fmaf,
+    ieee_frcp,
+    ieee_frsqrt,
+    ieee_fsqrt,
+    ieee_mul,
+    ieee_sub,
+)
 
 from .kernel import Kernel  # noqa: F401
 from .print import *  # noqa: F401,F403
@@ -18,10 +37,27 @@ from .print import __all__ as _PRINT_ALL
 
 _MUSA_API_ALL = (
     "Kernel",
+    "__cos",
+    "__exp",
+    "__exp10",
+    "__log",
+    "__log2",
+    "__log10",
+    "__sin",
+    "__tan",
+    "fast_rcp",
     "get_lane_idx",
     "get_warp_idx",
     "get_warp_idx_sync",
     "get_warp_group_idx",
+    "ieee_add",
+    "ieee_fdiv",
+    "ieee_fmaf",
+    "ieee_frcp",
+    "ieee_frsqrt",
+    "ieee_fsqrt",
+    "ieee_mul",
+    "ieee_sub",
     "shuffle_elect",
 )
 
