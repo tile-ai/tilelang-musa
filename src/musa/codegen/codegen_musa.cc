@@ -324,6 +324,16 @@ std::string CodeGenMUSA::Finish() {
     decl_stream << "#include <tl_templates/musa/common/atomic.h>\n";
   }
 
+  if (need_debug_h_) {
+    if (enable_fp16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_FP16\n";
+    }
+    if (enable_bf16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_BF16\n";
+    }
+    decl_stream << "#include <tl_templates/musa/common/debug.h>\n";
+  }
+
   if (need_cast_smem_ptr_to_int_) {
     decl_stream << "__forceinline__ __device__ unsigned int\n";
     decl_stream << "cast_smem_ptr_to_int(const void* const smem_ptr)\n";
@@ -912,6 +922,11 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
                                   const ffi::Array<PrimExpr> &args,
                                   bool skip_first_arg,
                                   std::ostream &os) { // NOLINT(*)
+  if (global_symbol == "debug_print_var" ||
+      global_symbol == "debug_print_buffer_value" ||
+      global_symbol == "debug_print_msg") {
+    need_debug_h_ = true;
+  }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   if (ret_dtype.is_fixed_length_vector()) {
     //
@@ -963,6 +978,27 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
   } else {
     CodeGenC::PrintCallExtern(ret_type, global_symbol, args, skip_first_arg,
                               os);
+  }
+}
+
+void CodeGenMUSA::VisitStmt_(const EvaluateNode *op) {
+  if (is_const_int(op->value)) {
+    return;
+  }
+  const CallNode *call = op->value.as<CallNode>();
+  if (call && call->op.same_as(tvm::tl::device_assert())) {
+    need_debug_h_ = true;
+    std::string condition = PrintExpr(call->args[0]);
+    this->PrintIndent();
+    stream << "device_assert(" << condition << ");\n";
+  } else if (call && call->op.same_as(tvm::tl::device_assert_with_msg())) {
+    need_debug_h_ = true;
+    std::string condition = PrintExpr(call->args[0]);
+    std::string msg = PrintExpr(call->args[1]);
+    this->PrintIndent();
+    stream << "device_assert_with_msg(" << condition << ", " << msg << ");\n";
+  } else {
+    CodeGenC::VisitStmt_(op);
   }
 }
 
