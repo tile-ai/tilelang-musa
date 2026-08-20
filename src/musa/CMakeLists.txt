@@ -66,4 +66,5 @@ list(APPEND TILE_LANG_SRCS
   src/musa/op/copy.cc
   src/musa/op/finalize_reducer.cc
   src/musa/op/reduce.cc
+  src/musa/op/scan.cc
 )

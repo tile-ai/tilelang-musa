@@ -344,6 +344,16 @@ std::string CodeGenMUSA::Finish() {
     decl_stream << "#include <tl_templates/musa/common/reduce.h>\n";
   }
 
+  if (need_scan_h_) {
+    if (enable_fp16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_FP16\n";
+    }
+    if (enable_bf16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_BF16\n";
+    }
+    decl_stream << "#include <tl_templates/musa/common/scan.h>\n";
+  }
+
   if (need_cast_smem_ptr_to_int_) {
     decl_stream << "__forceinline__ __device__ unsigned int\n";
     decl_stream << "cast_smem_ptr_to_int(const void* const smem_ptr)\n";
@@ -939,6 +949,10 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
   }
   if (static_cast<std::string>(global_symbol).rfind("tl::AllReduce<", 0) == 0) {
     need_reduce_h_ = true;
+  }
+  if (static_cast<std::string>(global_symbol).rfind("tl::CumSum", 0) == 0 ||
+      static_cast<std::string>(global_symbol).rfind("tl::CumMax", 0) == 0) {
+    need_scan_h_ = true;
   }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   if (ret_dtype.is_fixed_length_vector()) {
