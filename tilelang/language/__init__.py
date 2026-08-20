@@ -8,12 +8,12 @@ on ``tilelang.language.common``).
 
 from __future__ import annotations
 
-from tilelang.cuda.language import *  # noqa: F401,F403
-from tilelang.cuda.language import __all__ as __all__  # noqa: F401
+from tilelang.musa.language import *  # noqa: F401,F403
+from tilelang.musa.language import __all__ as __all__  # noqa: F401
 
-# Imported by name so static type checkers resolve the CUDA-typed signatures
+# Imported by name so static type checkers resolve the MUSA-typed signatures
 # through this facade (they cannot evaluate the dynamic __all__).
-from tilelang.cuda.language import (  # noqa: F401
+from tilelang.musa.language import (  # noqa: F401
     Kernel,
     Parallel,
     Unroll,
@@ -29,4 +29,4 @@ from tilelang.cuda.language import (  # noqa: F401
     unroll,
 )
 
-__tilelang_dialect__ = "cuda"
+__tilelang_dialect__ = "musa"
