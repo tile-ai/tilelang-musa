@@ -43,13 +43,15 @@ class CodeGenMUSA final : public CodeGenC {
   std::string Finish();
   bool need_include_path() {
     return (enable_fp16_ || enable_bf16_ || enable_int8_ || enable_fp8_ || enable_fp6_ ||
-            enable_fp4_ || need_math_constants_h_ || need_mma_h_ || need_atomic_h_);
+            enable_fp4_ || need_math_constants_h_ || need_mma_h_ || need_atomic_h_ ||
+            need_debug_h_);
   }
   // override behavior
   void PrintFunctionSignature(const ffi::String& function_name, const PrimFunc& func,
                               std::ostream& os) final;
   void PrintExtraAttrs(const PrimFunc& f, std::ostream& os) final;  // NOLINT(*)
   void VisitStmt_(const ForNode* op) final;
+  void VisitStmt_(const EvaluateNode* op) final;
   void PrintStorageSync(const CallNode* op) final;
   void PrintStorageScope(const std::string& scope, std::ostream& os) final;  // NOLINT(*)
   void PrintVecBinaryOp(const std::string& op, DataType t, PrimExpr lhs, PrimExpr rhs,
@@ -104,6 +106,8 @@ class CodeGenMUSA final : public CodeGenC {
   bool need_mma_h_{false};
   // whether need tl atomic helpers
   bool need_atomic_h_{false};
+  // whether need tl debug helpers
+  bool need_debug_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
   // Op attribute map
