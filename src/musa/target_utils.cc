@@ -49,13 +49,23 @@ bool TargetIsMP31(Target target) {
 }
 
 bool TargetMUSACanPropagateKernelErrors(Target) { return false; }
+
+int TargetMUSAGetWarpSize(Target target) {
+  if (!TargetIsMUSA(target)) {
+    return 32;
+  }
+  int arch = GetMusaArchInt(target);
+  return arch > 0 && arch <= 22 ? 128 : 32;
+}
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("tl.TargetIsMUSA",
            [](Target target) { return TargetIsMUSA(target); })
       .def("tl.TargetIsMP31",
-           [](Target target) { return TargetIsMP31(target); });
+           [](Target target) { return TargetIsMP31(target); })
+      .def("tl.TargetMUSAGetWarpSize",
+           [](Target target) { return TargetMUSAGetWarpSize(target); });
 }
 
 } // namespace tl

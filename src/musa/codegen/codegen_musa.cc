@@ -322,6 +322,16 @@ std::string CodeGenMUSA::Finish() {
     decl_stream << "#include <tl_templates/musa/common/debug.h>\n";
   }
 
+  if (need_reduce_h_) {
+    if (enable_fp16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_FP16\n";
+    }
+    if (enable_bf16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_BF16\n";
+    }
+    decl_stream << "#include <tl_templates/musa/common/reduce.h>\n";
+  }
+
   if (need_cast_smem_ptr_to_int_) {
     decl_stream << "__forceinline__ __device__ unsigned int\n";
     decl_stream << "cast_smem_ptr_to_int(const void* const smem_ptr)\n";
@@ -880,6 +890,9 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
       global_symbol == "debug_print_buffer_value" ||
       global_symbol == "debug_print_msg") {
     need_debug_h_ = true;
+  }
+  if (static_cast<std::string>(global_symbol).rfind("tl::AllReduce<", 0) == 0) {
+    need_reduce_h_ = true;
   }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   if (ret_dtype.is_fixed_length_vector()) {
@@ -1477,6 +1490,21 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
       os << ", " << PrintExpr(op->args[2]);
     }
     os << ")";
+  } else if (op->op.same_as(tl::warp_reduce_sum())) {
+    need_reduce_h_ = true;
+    os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_max())) {
+    need_reduce_h_ = true;
+    os << "tl::warp_reduce_max(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_min())) {
+    need_reduce_h_ = true;
+    os << "tl::warp_reduce_min(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitand())) {
+    need_reduce_h_ = true;
+    os << "tl::warp_reduce_bitand(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitor())) {
+    need_reduce_h_ = true;
+    os << "tl::warp_reduce_bitor(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else {
