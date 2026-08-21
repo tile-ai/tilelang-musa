@@ -1,13 +1,14 @@
 # Resolve each backend independently. Linux builds include ROCm and Ascend by
 # default: vendored/local headers and runtime stubs avoid a build-time dependency
 # on either SDK. CUDA still needs a toolkit, while macOS defaults to Metal.
-set(TILELANG_BACKENDS CUDA ROCM METAL LLVM ASCEND)
+set(TILELANG_BACKENDS CUDA ROCM METAL LLVM ASCEND MUSA)
 
 set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
 set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
 set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
 set(TILELANG_BACKEND_DOC_LLVM "Enable LLVM backend")
 set(TILELANG_BACKEND_DOC_ASCEND "Enable Ascend backend")
+set(TILELANG_BACKEND_DOC_MUSA "Enable MUSA backend")
 
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
   set(_backend_var "USE_${BACKEND}")
@@ -18,7 +19,7 @@ foreach(BACKEND IN LISTS TILELANG_BACKENDS)
   elseif(BACKEND STREQUAL "METAL" AND APPLE)
     set(_default ON)
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
-         (BACKEND STREQUAL "ROCM" OR BACKEND STREQUAL "ASCEND"))
+         (BACKEND STREQUAL "ROCM" OR BACKEND STREQUAL "ASCEND" OR BACKEND STREQUAL "MUSA"))
     set(_default ON)
   endif()
 

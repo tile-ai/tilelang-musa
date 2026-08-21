@@ -13,6 +13,7 @@
 #include "cpu/target_utils.h"
 #include "cuda/target_utils.h"
 #include "metal/target_utils.h"
+#include "musa/target_utils.h"
 #include "rocm/target_utils.h"
 
 namespace tvm {
