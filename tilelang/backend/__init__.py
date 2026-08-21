@@ -10,6 +10,11 @@ from .module import (  # noqa: F401
     list_backends,
     register_backend,
 )
+from .runtime_device import (  # noqa: F401
+    RuntimeDevice,
+    register_runtime_device,
+    resolve_runtime_device,
+)
 from .target import (  # noqa: F401
     auto_detect_target,
     list_target_detectors,

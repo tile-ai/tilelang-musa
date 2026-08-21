@@ -19,6 +19,7 @@ from tvm import runtime, tirx
 from tvm.target import Target
 from tvm.relax import TensorType
 from tilelang.backend.target import determine_target
+from tilelang.backend.runtime_device import resolve_runtime_device
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
@@ -115,6 +116,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.dynamic_symbolic_map = None if self._ffi_callee_allocated_output_abi else self._process_dynamic_symbolic()
         self.kernel_global_source = self.device_kernel_source
         self.executable = None
+        self._executables_by_device: dict[torch.device | str, tvm.runtime.Executable] = {}
+        self._last_executable_by_device: tuple[torch.device | str, tvm.runtime.Executable] | None = None
         self._executable_lock = threading.Lock()
 
         self._post_init()
@@ -127,18 +130,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             # Precompile jit module with extra arguments.
             executable.jit(**COMPILE_ARGS)
         return executable
-
-    def _get_executable(self) -> tvm.runtime.Executable:
-        executable = self.executable
-        if executable is not None:
-            return executable
-
-        with self._executable_lock:
-            executable = self.executable
-            if executable is None:
-                executable = self._make_executable()
-                self.executable = executable
-            return executable
 
     def get_exportable_executable(self) -> tvm.runtime.Executable:
         return self._get_executable()
@@ -155,6 +146,49 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             return False
         target_host = self.target.host
         return target_host is not None and target_host.kind.name == "c"
+
+    def _resolve_device_key(self, out_device: torch.device | None) -> torch.device | str:
+        runtime_device = resolve_runtime_device(self.target, allow_missing=True)
+        if runtime_device is not None:
+            return runtime_device.normalize_device(out_device)
+        return out_device if out_device is not None else "default"
+
+    def _get_executable(self, out_device: torch.device | None = None) -> tvm.runtime.Executable:
+        if self.executable is not None:
+            return self.executable
+
+        runtime_device = resolve_runtime_device(self.target, allow_missing=True)
+        if runtime_device is None:
+            with self._executable_lock:
+                if self.executable is None:
+                    self.executable = self._make_executable()
+                return self.executable
+
+        device_key = self._resolve_device_key(out_device)
+        last_executable = self._last_executable_by_device
+        if last_executable is not None and last_executable[0] == device_key:
+            return last_executable[1]
+
+        executable = self._executables_by_device.get(device_key)
+        if executable is None:
+            with self._executable_lock:
+                executable = self._executables_by_device.get(device_key)
+                if executable is None:
+                    if isinstance(device_key, torch.device) and device_key.type == runtime_device.target_kind:
+                        with runtime_device.device_guard(device_key):
+                            executable = self._make_executable()
+                    else:
+                        executable = self._make_executable()
+                    self._executables_by_device[device_key] = executable
+
+        self._last_executable_by_device = (device_key, executable)
+        return executable
+
+    def _current_device_for_target(self) -> torch.device:
+        runtime_device = resolve_runtime_device(self.target, allow_missing=True)
+        if runtime_device is not None:
+            return runtime_device.current_device()
+        return self.get_current_device_functor()()
 
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
@@ -196,7 +230,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # These are evaluated at call time to align TVM execution with the
         # caller's active PyTorch stream/device.
         # current_stream_functor = self.get_current_stream_functor()
-        current_device_functor = self.get_current_device_functor()
 
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
@@ -222,6 +255,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         dynamic_symbolic_map = self.dynamic_symbolic_map
         assert dynamic_symbolic_map is not None
+        set_device_packed = tvm.get_global_func("__tvm_set_device", allow_missing=True)
+        executable = self.executable
 
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
@@ -277,7 +312,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                             shape.append(s)
 
                     if out_device is None:
-                        out_device = current_device_functor()
+                        out_device = self._current_device_for_target()
 
                     if len(shape) == 0:
                         param_name = self.params[i].name if hasattr(self.params[i], "name") else f"parameter_{i}"
@@ -289,10 +324,24 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 else:
                     tensor = inputs[ins_idx]
                     ins_idx += 1
+                    if out_device is None and isinstance(tensor, torch.Tensor):
+                        out_device = tensor.device
                 tensor_list.append(tensor)
 
-            executable = self._get_executable()
-            executable(*tensor_list)
+            if not any(isinstance(t, torch.Tensor) for t in tensor_list) and set_device_packed is not None:
+                out_device = self._current_device_for_target()
+                runtime_device = resolve_runtime_device(self.target, allow_missing=True)
+                if runtime_device is not None and isinstance(out_device, torch.device):
+                    dev_id = out_device.index
+                    if dev_id is None:
+                        out_device = runtime_device.current_device()
+                        dev_id = out_device.index
+                    set_device_packed(runtime_device.tvm_device(dev_id).dlpack_device_type(), dev_id)
+
+            if executable is not None:
+                executable(*tensor_list)
+            else:
+                self._get_executable(out_device)(*tensor_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -375,6 +424,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter.executable = runtime.load_module(kernel_lib_path)
         adapter._ffi_callee_allocated_output_abi = adapter._uses_ffi_callee_allocated_output_abi()
         adapter.dynamic_symbolic_map = None if adapter._ffi_callee_allocated_output_abi else adapter._process_dynamic_symbolic()
+        adapter._executables_by_device = {}
+        adapter._last_executable_by_device = None
         adapter._executable_lock = threading.Lock()
         adapter._post_init()
         return adapter
