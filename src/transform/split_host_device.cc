@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "backend/common/target_utils.h"
 #include "common/assume.h"
 #include "common/attr.h"
 #include "tir/analysis/var_use_def_analysis.h"
@@ -482,16 +483,7 @@ private:
     // "ext_dev", and expects to be able to return a int32_t status
     // code.
 
-    bool can_propagate_errors = [&]() {
-      // Target kinds whose kernel ABI cannot return a status code override
-      // the device-type heuristic through this attribute.
-      if (auto status_return =
-              device_target->GetAttr<Bool>("supports_kernel_status_return")) {
-        return static_cast<bool>(status_return.value());
-      }
-      auto kind = device_target->GetTargetDeviceType();
-      return kind == kDLCPU || kind == kDLExtDev || kind == kDLHexagon;
-    }();
+    bool can_propagate_errors = TargetCanPropagateKernelErrors(device_target);
     IntImm success(DataType::Int(32), 0);
     Type kernel_ret_type;
     if (can_propagate_errors) {

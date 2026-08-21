@@ -20,6 +20,18 @@ bool TargetHasAsyncCopy(Target target) {
   return false;
 }
 
+bool TargetCanPropagateKernelErrors(Target target) {
+  if (auto status_return =
+          target->GetAttr<Bool>("supports_kernel_status_return")) {
+    return static_cast<bool>(status_return.value());
+  }
+  if (TargetIsMUSA(target)) {
+    return TargetMUSACanPropagateKernelErrors(target);
+  }
+  auto kind = target->GetTargetDeviceType();
+  return kind == kDLCPU || kind == kDLExtDev || kind == kDLHexagon;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.TargetHasAsyncCopy", [](Target target) {
