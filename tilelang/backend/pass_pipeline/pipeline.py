@@ -35,6 +35,8 @@ class PassPipeline:
 
 
 _PIPELINES: dict[str, PassPipeline] = {}
+_LAZY_PIPELINES: dict[str, str] = {}
+_LOADED_PIPELINES: set[str] = set()
 
 
 def register_pipeline(pipeline: PassPipeline) -> PassPipeline:
@@ -47,8 +49,27 @@ def register_pipeline(pipeline: PassPipeline) -> PassPipeline:
     return pipeline
 
 
+def register_lazy_pipeline(name: str, import_path: str) -> None:
+    """Register a backend module to import when its pipeline is first used."""
+
+    _LAZY_PIPELINES[name] = import_path
+    _LOADED_PIPELINES.discard(name)
+
+
+def _ensure_pipeline_loaded(name: str) -> None:
+    if name in _LOADED_PIPELINES:
+        return
+    import_path = _LAZY_PIPELINES.get(name)
+    if import_path is not None:
+        from importlib import import_module
+
+        import_module(import_path)
+    _LOADED_PIPELINES.add(name)
+
+
 def get_pipeline(name: str) -> PassPipeline:
     """Return the registered Pipeline for *name*."""
+    _ensure_pipeline_loaded(name)
     if name not in _PIPELINES:
         raise ValueError(f"No pipeline registered for backend '{name}'. Available backends: {list(_PIPELINES.keys())}")
     return _PIPELINES[name]
