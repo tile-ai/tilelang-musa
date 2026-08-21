@@ -7,8 +7,16 @@ import numpy as np
 from tilelang.contrib import nvcc
 from tilelang.backend.target import determine_target
 from tilelang.cuda.target import target_is_cuda
+from tilelang.musa.target import musa_arch_to_compute_version, target_get_arch, target_is_musa
 from tilelang.rocm.target import target_is_cdna, target_is_gfx950
-from tvm.testing.utils import requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
+from tvm.testing.utils import (
+    requires_cuda,
+    requires_package,
+    requires_llvm,
+    requires_metal,
+    requires_rocm,
+    _compose,
+)
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
 from .perf_regression import process_func, regression
@@ -16,6 +24,7 @@ from .perf_regression import process_func, regression
 __all__ = [
     "requires_package",
     "requires_cuda",
+    "requires_musa",
     "requires_metal",
     "requires_rocm",
     "requires_llvm",
@@ -24,9 +33,12 @@ __all__ = [
     "requires_gfx950",
     "main",
     "requires_cuda_compute_version",
+    "requires_musa_compute_version",
     "process_func",
     "regression",
-] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
+] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")] + [
+    f"requires_musa_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")
+]
 
 
 def _check_is_gfx950() -> bool:
@@ -53,6 +65,15 @@ def _check_is_cuda_or_cdna() -> bool:
         return False
 
 
+def _check_is_musa() -> bool:
+    try:
+        from tvm import musa as tvm_musa
+
+        return tvm_musa().exist
+    except (AttributeError, RuntimeError, ValueError):
+        return False
+
+
 def requires_cdna(func):
     """Skip the test unless the ROCm device is a CDNA GPU."""
     is_cdna = _check_is_cdna()
@@ -76,6 +97,20 @@ def requires_cuda_or_cdna(func):
         ),
     ]
     return _compose([func], marks)
+
+
+def requires_musa(func):
+    """Skip the test unless the MUSA device is available."""
+    is_musa = _check_is_musa()
+    return _compose(
+        [func],
+        [
+            pytest.mark.skipif(
+                not is_musa,
+                reason="Requires MUSA runtime",
+            ),
+        ],
+    )
 
 
 def requires_gfx950(func):
@@ -190,3 +225,70 @@ def requires_cuda_compute_version_lt(major_version, minor_version=0):
 
 def requires_cuda_compute_version_le(major_version, minor_version=0):
     return requires_cuda_compute_version(major_version, minor_version, mode="le")
+
+
+def _get_musa_compute_version() -> tuple[int, int]:
+    try:
+        target = determine_target("auto", return_object=True)
+    except (ValueError, RuntimeError):
+        return (0, 0)
+
+    if not target_is_musa(target):
+        return (0, 0)
+
+    compute_version = musa_arch_to_compute_version(target_get_arch(target))
+    return compute_version if compute_version is not None else (0, 0)
+
+
+def requires_musa_compute_version(major_version, minor_version=0, mode="ge"):
+    min_version = (major_version, minor_version)
+    compute_version = _get_musa_compute_version()
+
+    min_version_str = ".".join(str(v) for v in min_version)
+    compute_version_str = ".".join(str(v) for v in compute_version)
+
+    def compare(compute_version, min_version, mode) -> bool:
+        if mode == "ge":
+            return compute_version >= min_version
+        elif mode == "gt":
+            return compute_version > min_version
+        elif mode == "le":
+            return compute_version <= min_version
+        elif mode == "lt":
+            return compute_version < min_version
+        elif mode == "eq":
+            return compute_version == min_version
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
+
+    requires = [
+        pytest.mark.skipif(
+            not compare(compute_version, min_version, mode),
+            reason=f"Requires MUSA compute {mode} {min_version_str}, but have {compute_version_str}",
+        ),
+    ]
+
+    def inner(func):
+        return requires_musa(_compose([func], requires))
+
+    return inner
+
+
+def requires_musa_compute_version_ge(major_version, minor_version=0):
+    return requires_musa_compute_version(major_version, minor_version, mode="ge")
+
+
+def requires_musa_compute_version_gt(major_version, minor_version=0):
+    return requires_musa_compute_version(major_version, minor_version, mode="gt")
+
+
+def requires_musa_compute_version_eq(major_version, minor_version=0):
+    return requires_musa_compute_version(major_version, minor_version, mode="eq")
+
+
+def requires_musa_compute_version_lt(major_version, minor_version=0):
+    return requires_musa_compute_version(major_version, minor_version, mode="lt")
+
+
+def requires_musa_compute_version_le(major_version, minor_version=0):
+    return requires_musa_compute_version(major_version, minor_version, mode="le")
