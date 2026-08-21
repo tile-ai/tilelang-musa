@@ -26,6 +26,11 @@ from .execution_backend import (  # noqa: F401
     resolve_execution_backend,
     resolve_execution_backend_spec,
 )
+from .runtime_device import (  # noqa: F401
+    RuntimeDevice,
+    register_runtime_device,
+    resolve_runtime_device,
+)
 from .target import (  # noqa: F401
     auto_detect_target,
     list_target_detectors,
