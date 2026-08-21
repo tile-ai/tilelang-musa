@@ -1,4 +1,4 @@
-from .pass_pipeline import PassPipeline  # noqa: F401
+from .pass_pipeline import PassPipeline, register_lazy_pipeline  # noqa: F401
 from .device_codegen import DeviceCodegen  # noqa: F401
 from .host_codegen import HostCodegen, HostCodegenHook  # noqa: F401
 from .execution_backend import ExecutionBackendSpec  # noqa: F401
@@ -16,3 +16,5 @@ from .target import (  # noqa: F401
     register_target_detector,
     register_target_normalizer,
 )
+
+register_lazy_pipeline("musa", "tilelang.musa.pipeline")

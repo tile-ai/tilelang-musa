@@ -7,3 +7,8 @@ if(NOT USE_MUSA)
 endif()
 
 message(STATUS "MUSA Backend is enabled")
+
+list(APPEND TILE_LANG_SRCS
+  src/musa/codegen/codegen_musa.cc
+  src/musa/codegen/intrin_rule_musa.cc
+)
