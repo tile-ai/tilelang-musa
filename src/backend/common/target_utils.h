@@ -19,6 +19,7 @@ namespace tvm {
 namespace tl {
 
 bool TargetHasAsyncCopy(Target target);
+bool TargetCanPropagateKernelErrors(Target target);
 } // namespace tl
 } // namespace tvm
 

@@ -48,6 +48,7 @@ bool TargetIsMP31(Target target) {
   return GetMusaArchInt(target) == 31;
 }
 
+bool TargetMUSACanPropagateKernelErrors(Target) { return false; }
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
