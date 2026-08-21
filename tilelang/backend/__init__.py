@@ -1,4 +1,4 @@
-from .pass_pipeline import PassPipeline, register_pipeline, resolve_pipeline  # noqa: F401
+from .pass_pipeline import PassPipeline, register_lazy_pipeline, register_pipeline, resolve_pipeline  # noqa: F401
 from .device_codegen import (  # noqa: F401
     DeviceCodegen,
     allowed_device_codegens_for_target,
@@ -39,6 +39,8 @@ register_lazy_execution_backends("c", "tilelang.cpu.execution_backend")
 register_lazy_execution_backends("llvm", "tilelang.cpu.execution_backend")
 register_lazy_execution_backends("metal", "tilelang.metal.execution_backend")
 register_lazy_execution_backends("musa", "tilelang.musa.execution_backend")
+
+register_lazy_pipeline("musa", "tilelang.musa.pipeline")
 
 register_lazy_device_codegen("cuda", "tilelang.cuda.codegen")
 register_lazy_device_codegen("hip", "tilelang.rocm.codegen")
