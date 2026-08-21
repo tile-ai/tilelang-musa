@@ -36,8 +36,6 @@ def resolve_pass_profile_threshold_ms(pass_configs: Mapping[object, object], key
 
 
 # SETUP ENVIRONMENT VARIABLES
-CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
-", which may lead to compilation bugs when utilize tilelang backend."
 TL_TEMPLATE_NOT_FOUND_MESSAGE = "TileLang is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
 TVM_LIBRARY_NOT_FOUND_MESSAGE = "TVM is not installed or found in the expected path"
@@ -628,13 +626,9 @@ else:
 if os.environ.get("TVM_LIBRARY_PATH") is None:
     os.environ["TVM_LIBRARY_PATH"] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
 
-# Initialize CUTLASS paths
-if os.environ.get("TL_CUTLASS_PATH", None) is None:
-    cutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, "cutlass", "include")
-    if os.path.exists(cutlass_inc_path):
-        os.environ["TL_CUTLASS_PATH"] = env.CUTLASS_INCLUDE_DIR = cutlass_inc_path
-    else:
-        logger.warning(CUTLASS_NOT_FOUND_MESSAGE)
+# CUTLASS and Composable Kernel are not bundled by the MUSA distribution.
+# Keep the environment variables available for explicit external configuration,
+# but do not probe for these unrelated backend dependencies during import.
 
 # Initialize TL_TEMPLATE_PATH
 if os.environ.get("TL_TEMPLATE_PATH", None) is None:
