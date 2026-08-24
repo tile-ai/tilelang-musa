@@ -9,7 +9,15 @@ from tilelang.language.builtin import (  # noqa: F401
     get_warp_idx,
     get_warp_idx_sync,
     get_warp_group_idx,
+    ldg128,
+    ldg256,
+    ldg32,
+    ldg64,
     shuffle_elect,
+    stg128,
+    stg256,
+    stg32,
+    stg64,
 )
 from tilelang.language.math_intrinsics import (  # noqa: F401
     __cos,
@@ -58,7 +66,15 @@ _MUSA_API_ALL = (
     "ieee_fsqrt",
     "ieee_mul",
     "ieee_sub",
+    "ldg128",
+    "ldg256",
+    "ldg32",
+    "ldg64",
     "shuffle_elect",
+    "stg128",
+    "stg256",
+    "stg32",
+    "stg64",
 )
 
 __tilelang_dialect__ = "musa"
