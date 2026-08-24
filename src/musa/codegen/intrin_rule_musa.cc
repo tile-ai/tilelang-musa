@@ -148,6 +148,21 @@ static PrimExpr DispatchMUSAWarpActiveMask(const PrimExpr& e) {
   return Call(call->dtype, Op::Get("tirx.musa.__activemask"), call->args, call->annotations);
 }
 
+static PrimExpr DispatchMUSAIsFinite(const PrimExpr& e) {
+  const CallNode* call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  ICHECK_EQ(call->args.size(), 1U);
+
+  DataType arg_dtype = call->args[0].dtype();
+  if (arg_dtype.is_float() &&
+      (arg_dtype.bits() == 32 || arg_dtype.bits() == 64)) {
+    ffi::Array<PrimExpr> new_args = {StringImm("isfinite"), call->args[0]};
+    return Call(call->dtype, builtin::call_pure_extern(), new_args, call->annotations);
+  }
+
+  return e;
+}
+
 template <typename T>
 static PrimExpr DispatchMUSAShuffle(const PrimExpr& e) {
   const CallNode* call = e.as<CallNode>();
@@ -159,6 +174,9 @@ static PrimExpr DispatchMUSAShuffle(const PrimExpr& e) {
 
 TVM_REGISTER_OP("tirx.rsqrt")
     .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic", DispatchPureExtern<MUSAMath>);
+
+TVM_REGISTER_OP("tirx.isfinite")
+    .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic", DispatchMUSAIsFinite);
 
 TVM_REGISTER_OP("tirx.clz")
     .set_attr<FLowerIntrinsic>("musa.FLowerIntrinsic",
