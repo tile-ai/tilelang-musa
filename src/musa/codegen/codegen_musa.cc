@@ -422,6 +422,9 @@ std::string CodeGenMUSA::Finish() {
   if (need_copy_h_) {
     decl_stream << "#include <tl_templates/musa/common/copy.h>\n";
   }
+  if (need_cvt_h_) {
+    decl_stream << "#include <tl_templates/musa/common/cvt.h>\n";
+  }
 
   if (need_fast_divmod_h_) {
     decl_stream << "#include <tl_templates/musa/common/fast_divmod.h>\n";
@@ -930,6 +933,33 @@ void CodeGenMUSA::VisitExpr_(const CastNode* op, std::ostream& os) {
 
   // Emit simple C-style type conversion.
   if (from_ty.is_scalar()) return CodeGenC::VisitExpr_(op, os);
+
+  auto cvt_type_name = [](DataType type) -> std::string {
+    if (type.code() == DataType::kFloat && type.bits() == 32) return "float";
+    if (type.code() == DataType::kFloat && type.bits() == 16) return "half";
+    if (type.code() == DataType::kBFloat && type.bits() == 16) return "bfloat16";
+    if (type.code() == DataType::kFloat8_e4m3fn) return "fp8e4m3";
+    if (type.code() == DataType::kFloat8_e5m2) return "fp8e5m2";
+    if (type.code() == DataType::kFloat8_e8m0fnu) return "fp8e8m0";
+    return "";
+  };
+  const std::string from_name = cvt_type_name(from_ty);
+  const std::string target_name = cvt_type_name(target_ty);
+  const bool float_pair = (from_name == "float" || target_name == "float");
+  const bool half_fp8_pair =
+      (from_name == "half" && (target_name == "fp8e4m3" || target_name == "fp8e5m2")) ||
+      (target_name == "half" && (from_name == "fp8e4m3" || from_name == "fp8e5m2"));
+  if (!from_name.empty() && !target_name.empty() && (float_pair || half_fp8_pair)) {
+    ICHECK(target_ty.lanes() == 2 || target_ty.lanes() == 4)
+        << "MUSA vectorized cast only supports x2/x4";
+    need_cvt_h_ = true;
+    enable_fp16_ = true;
+    enable_bf16_ = true;
+    enable_fp8_ = true;
+    os << "tl::cvt_" << from_name << "_to_" << target_name << "_x" << target_ty.lanes()
+       << "(" << PrintExpr(op->value) << ")";
+    return;
+  }
 
   if (target_ty.code() == DataType::kFloat8_e3m4 || target_ty.code() == DataType::kFloat8_e4m3 ||
       target_ty.code() == DataType::kFloat8_e4m3b11fnuz ||

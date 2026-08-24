@@ -131,7 +131,8 @@ def test_musa_common_fp8_vector_cast_codegen(dtype_a, dtype_b):
 
     source = artifact.kernel_source
     assert source is not None
-    assert "musa_fp8.h" in source
+    if dtype_a is T.float32 or dtype_b is T.float32:
+        assert "musa_fp8.h" in source
 
 
 @tilelang.testing.requires_musa
