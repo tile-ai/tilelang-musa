@@ -388,6 +388,10 @@ std::string CodeGenMUSA::Finish() {
     }
     decl_stream << "#include <tl_templates/musa/common/math.h>\n";
   }
+  // Fast-div/mod intrinsics can be discovered while emitting the body, after
+  // this declaration preamble is assembled; include the lightweight header
+  // unconditionally so generated kernels always see their declarations.
+  decl_stream << "#include <tl_templates/musa/common/fast_divmod.h>\n";
 
   if (need_mma_h_) {
     decl_stream << "#include <mma.h>\n";

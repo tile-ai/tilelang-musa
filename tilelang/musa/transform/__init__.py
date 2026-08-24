@@ -8,4 +8,9 @@ def LowerLDGSTG():
     return _ffi_api.LowerLDGSTG()  # type: ignore
 
 
-__all__ = ["LowerLDGSTG"]
+def LowerFastDivmod():
+    """Lower explicit MUSA fast integer division operations."""
+    return _ffi_api.LowerFastDivmod()  # type: ignore
+
+
+__all__ = ["LowerLDGSTG", "LowerFastDivmod"]

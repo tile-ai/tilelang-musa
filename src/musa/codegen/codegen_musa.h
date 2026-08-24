@@ -126,6 +126,8 @@ private:
   bool need_async_copy_h_{false};
   // whether need vectorized global load/store helpers
   bool need_ldg_stg_h_{false};
+  // whether Common MUSA fast-divmod helpers are required
+  bool need_fast_divmod_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
   // Op attribute map

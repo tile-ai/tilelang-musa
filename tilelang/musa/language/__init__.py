@@ -42,6 +42,8 @@ from tilelang.language.math_intrinsics import (  # noqa: F401
 from .kernel import Kernel  # noqa: F401
 from .print import *  # noqa: F401,F403
 from .print import __all__ as _PRINT_ALL
+from .fast_divmod import *  # noqa: F401,F403
+from .fast_divmod import __all__ as _FAST_DIVMOD_ALL
 
 _MUSA_API_ALL = (
     "Kernel",
@@ -78,6 +80,6 @@ _MUSA_API_ALL = (
 )
 
 __tilelang_dialect__ = "musa"
-__all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_MUSA_API_ALL, *_PRINT_ALL)))
+__all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_MUSA_API_ALL, *_PRINT_ALL, *_FAST_DIVMOD_ALL)))
 
-del _COMMON_ALL, _MUSA_API_ALL, _PRINT_ALL
+del _COMMON_ALL, _MUSA_API_ALL, _PRINT_ALL, _FAST_DIVMOD_ALL

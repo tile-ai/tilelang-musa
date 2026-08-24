@@ -66,6 +66,10 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = s_tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.musa.transform.LowerLDGSTG()(mod)
+    # Run immediately before host/device splitting. Public fast-div markers
+    # remain opaque until here so a fast_divmod pair can share its quotient;
+    # host-side magic parameter setup must not be inlined into device code.
+    mod = tilelang.musa.transform.LowerFastDivmod()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
