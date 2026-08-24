@@ -443,6 +443,9 @@ std::string CodeGenMUSA::Finish() {
   if (need_ldg_stg_h_) {
     decl_stream << "#include <tl_templates/musa/common/ldg_stg.h>\n";
   }
+  if (need_cvt_h_) {
+    decl_stream << "#include <tl_templates/musa/common/cvt.h>\n";
+  }
 
   if (need_cast_smem_ptr_to_int_) {
     decl_stream << "__forceinline__ __device__ unsigned int\n";
@@ -975,6 +978,48 @@ void CodeGenMUSA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // Emit simple C-style type conversion.
   if (from_ty.is_scalar())
     return CodeGenC::VisitExpr_(op, os);
+
+  auto cvt_type_name = [](DataType type) -> std::string {
+    if (type.code() == DataType::kFloat && type.bits() == 32)
+      return "float";
+    if (type.code() == DataType::kFloat && type.bits() == 16)
+      return "half";
+    if (type.code() == DataType::kBFloat && type.bits() == 16)
+      return "bfloat16";
+    if (type.code() == DataType::kFloat8_e4m3fn)
+      return "fp8e4m3";
+    if (type.code() == DataType::kFloat8_e5m2)
+      return "fp8e5m2";
+    if (type.code() == DataType::kFloat8_e8m0fnu)
+      return "fp8e8m0";
+    return "";
+  };
+  const std::string from_name = cvt_type_name(from_ty);
+  const std::string target_name = cvt_type_name(target_ty);
+  const bool float_pair = (from_name == "float" || target_name == "float");
+  const bool half_fp8_pair =
+      (from_name == "half" &&
+       (target_name == "fp8e4m3" || target_name == "fp8e5m2")) ||
+      (target_name == "half" &&
+       (from_name == "fp8e4m3" || from_name == "fp8e5m2"));
+  if (!from_name.empty() && !target_name.empty() &&
+      (float_pair || half_fp8_pair)) {
+    const int lanes = target_ty.lanes();
+    const int max_lanes =
+        (from_ty.is_float8() || target_ty.is_float8()) ? 4 : 8;
+    ICHECK_EQ(lanes % 2, 0)
+        << "MUSA vectorized cast requires an even lane count.";
+    ICHECK_LE(lanes, max_lanes)
+        << "MUSA vectorized cast from " << from_ty << " to " << target_ty
+        << " supports up to " << max_lanes << " lanes.";
+    need_cvt_h_ = true;
+    enable_fp16_ = true;
+    enable_bf16_ = true;
+    enable_fp8_ = true;
+    os << "tl::cvt_" << from_name << "_to_" << target_name << "_x"
+       << lanes << "(" << PrintExpr(op->value) << ")";
+    return;
+  }
 
   if (target_ty.code() == DataType::kFloat8_e3m4 ||
       target_ty.code() == DataType::kFloat8_e4m3 ||
