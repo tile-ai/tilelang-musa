@@ -166,9 +166,10 @@ int GetMaxAtomicVectorSize(DataType dtype, const String &storage_scope,
     return 2;
   }
   if (dtype.is_float() && dtype.bits() == 32 &&
-      TargetHasSMVersionGE(target, 90) &&
-      (storage_scope.empty() || storage_scope == "global")) {
-    // CUDA's float2/float4 atomicAdd overloads support global memory only.
+      (TargetIsMUSA(target) ||
+       (TargetHasSMVersionGE(target, 90) &&
+        (storage_scope.empty() || storage_scope == "global")))) {
+    // CUDA's float2/float4 atomicAdd overloads support global memory only;
     // An empty pointer storage scope denotes global memory, as in
     // Buffer::scope.
     return 4;

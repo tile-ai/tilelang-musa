@@ -58,14 +58,13 @@ def test_musa_tiled_atomic_codegen():
 
     source = artifact.kernel_source
     assert source is not None
-    assert "tl::AtomicAdd(" in source
+    assert "tl::AtomicAddx2(" in source or "tl::AtomicAddx4(" in source
     assert "tl::AtomicMax(" in source
     assert "tl::AtomicMin(" in source
-    assert "AtomicAddx" not in source
 
     scalar_source = scalar_artifact.kernel_source
     assert scalar_source is not None
-    assert "tl::AtomicAdd(" in scalar_source
+    assert "tl::AtomicAddx2(" in scalar_source or "tl::AtomicAddx4(" in scalar_source
 
 
 @tilelang.testing.requires_musa
