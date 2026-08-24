@@ -63,6 +63,7 @@ endif()
 list(APPEND TILE_LANG_SRCS
   src/musa/codegen/codegen_musa.cc
   src/musa/codegen/intrin_rule_musa.cc
+  src/musa/op/fast_divmod.cc
   src/musa/op/atomic_add.cc
   src/musa/op/atomic_reduce.cc
   src/musa/op/copy.cc
@@ -72,4 +73,5 @@ list(APPEND TILE_LANG_SRCS
   src/musa/op/scan.cc
   src/musa/op/transpose.cc
   src/musa/transform/lower_ldg_stg.cc
+  src/musa/transform/lower_fast_divmod.cc
 )

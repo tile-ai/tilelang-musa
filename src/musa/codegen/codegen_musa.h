@@ -116,6 +116,8 @@ class CodeGenMUSA final : public CodeGenC {
   bool need_scan_h_{false};
   // whether need tl async-copy helpers
   bool need_copy_h_{false};
+  // whether Common MUSA fast-divmod helpers are required
+  bool need_fast_divmod_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
   // Op attribute map

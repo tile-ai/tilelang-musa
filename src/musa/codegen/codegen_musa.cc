@@ -423,6 +423,10 @@ std::string CodeGenMUSA::Finish() {
     decl_stream << "#include <tl_templates/musa/common/copy.h>\n";
   }
 
+  if (need_fast_divmod_h_) {
+    decl_stream << "#include <tl_templates/musa/common/fast_divmod.h>\n";
+  }
+
   if (need_cast_smem_ptr_to_int_) {
     decl_stream << "__forceinline__ __device__ unsigned int\n";
     decl_stream << "cast_smem_ptr_to_int(const void* const smem_ptr)\n";
@@ -977,6 +981,9 @@ void CodeGenMUSA::VisitExpr_(const CastNode* op, std::ostream& os) {
 void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
                                   const ffi::Array<PrimExpr>& args, bool skip_first_arg,
                                   std::ostream& os) {  // NOLINT(*)
+  if (global_symbol == "tl::fast_div" || global_symbol == "tl::fast_mod") {
+    need_fast_divmod_h_ = true;
+  }
   if (global_symbol == "debug_print_var" ||
       global_symbol == "debug_print_buffer_value" ||
       global_symbol == "debug_print_msg") {
