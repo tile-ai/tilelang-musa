@@ -71,4 +71,5 @@ list(APPEND TILE_LANG_SRCS
   src/musa/op/reduce.cc
   src/musa/op/scan.cc
   src/musa/op/transpose.cc
+  src/musa/transform/lower_ldg_stg.cc
 )

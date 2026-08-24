@@ -3,3 +3,4 @@ from . import execution_backend  # noqa: F401
 from . import codegen  # noqa: F401
 from . import runtime  # noqa: F401
 from . import language  # noqa: F401
+from . import transform  # noqa: F401

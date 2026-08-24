@@ -1414,6 +1414,58 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr << ")), \"r\"((int)"
            << guard << ")\n";
     stream << ");\n";
+  } else if (op->op.same_as(tl::ldg32()) || op->op.same_as(tl::ldg64()) ||
+             op->op.same_as(tl::ldg128()) || op->op.same_as(tl::ldg256())) {
+    need_copy_h_ = true;
+    ICHECK(op->args.size() == 1U || op->args.size() == 2U)
+        << "T.ldg expects a pointer and an optional predicate.";
+
+    int bits = 256;
+    if (op->op.same_as(tl::ldg32())) {
+      bits = 32;
+    } else if (op->op.same_as(tl::ldg64())) {
+      bits = 64;
+    } else if (op->op.same_as(tl::ldg128())) {
+      bits = 128;
+    }
+    os << "tl::load_global_" << bits;
+    if (op->args.size() == 2U) {
+      os << "_conditional";
+    }
+    os << "(";
+    this->PrintExpr(op->args[0], os);
+    if (op->args.size() == 2U) {
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::stg32()) || op->op.same_as(tl::stg64()) ||
+             op->op.same_as(tl::stg128()) || op->op.same_as(tl::stg256())) {
+    need_copy_h_ = true;
+    ICHECK(op->args.size() == 2U || op->args.size() == 3U)
+        << "T.stg expects a pointer, a value, and an optional predicate.";
+
+    int bits = 256;
+    if (op->op.same_as(tl::stg32())) {
+      bits = 32;
+    } else if (op->op.same_as(tl::stg64())) {
+      bits = 64;
+    } else if (op->op.same_as(tl::stg128())) {
+      bits = 128;
+    }
+    os << "tl::store_global_" << bits;
+    if (op->args.size() == 3U) {
+      os << "_conditional";
+    }
+    os << "(";
+    this->PrintExpr(op->args[0], os);
+    os << ", ";
+    this->PrintExpr(op->args[1], os);
+    if (op->args.size() == 3U) {
+      os << ", ";
+      this->PrintExpr(op->args[2], os);
+    }
+    os << ")";
   } else if (op->op.same_as(builtin::reinterpret())) {
     DataType tgt_dtype = op->dtype;
     DataType src_dtype = op->args[0]->dtype;
