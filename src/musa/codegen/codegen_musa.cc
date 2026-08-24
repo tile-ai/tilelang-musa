@@ -1548,6 +1548,38 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
       os << ", " << PrintExpr(op->args[2]);
     }
     os << ")";
+  } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicAddx2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_addx2_ret_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicAddx2Ret(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicAddx4(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_addx4_ret_elem_op())) {
+    need_atomic_h_ = true;
+    os << "tl::AtomicAddx4Ret(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::atomic_max_elem_op())) {
     need_atomic_h_ = true;
     os << "tl::AtomicMax(" << PrintExpr(op->args[0]) << ", "

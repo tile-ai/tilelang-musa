@@ -525,11 +525,13 @@ private:
                       "tl.access_ptr, or address_of call, but got "
                    << node->args[0];
       }
+      Target target = Target::Current(false);
       int vectorize_length = 1;
       if (dtype.is_float16() || dtype.is_bfloat16()) {
         vectorize_length = 2;
       } else if (dtype.is_float() && dtype.bits() == 32 &&
-                 TargetHasSMVersionGE(Target::Current(false), 90)) {
+                 (TargetIsMUSA(target) ||
+                  TargetHasSMVersionGE(target, 90))) {
         vectorize_length = 4;
       }
 

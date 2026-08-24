@@ -466,6 +466,202 @@ TL_DEVICE T1 AtomicMinRet(T1 *address, T2 value, int memory_order = 0) {
   }
 }
 
+namespace atomic_detail {
+
+struct Float2Values {
+  float x;
+  float y;
+};
+
+struct Float4Values {
+  float x;
+  float y;
+  float z;
+  float w;
+};
+
+template <typename T> TL_DEVICE Float2Values ToFloat2Values(const T *value) {
+  return {static_cast<float>(value[0]), static_cast<float>(value[1])};
+}
+
+TL_DEVICE Float2Values ToFloat2Values(float2 value) {
+  return {value.x, value.y};
+}
+
+#if defined(TL_MUSA_ENABLE_FP16)
+TL_DEVICE Float2Values ToFloat2Values(half2 value) {
+  return {__half2float(value.x), __half2float(value.y)};
+}
+#endif
+
+#if defined(TL_MUSA_ENABLE_BF16)
+TL_DEVICE Float2Values ToFloat2Values(mt_bfloat162 value) {
+  return {static_cast<float>(value.x), static_cast<float>(value.y)};
+}
+#endif
+
+template <typename T> TL_DEVICE Float4Values ToFloat4Values(const T *value) {
+  return {static_cast<float>(value[0]), static_cast<float>(value[1]),
+          static_cast<float>(value[2]), static_cast<float>(value[3])};
+}
+
+TL_DEVICE Float4Values ToFloat4Values(float4 value) {
+  return {value.x, value.y, value.z, value.w};
+}
+
+#if defined(TL_MUSA_ENABLE_FP16)
+TL_DEVICE Float4Values ToFloat4Values(half4 value) {
+  return {__half2float(value.x), __half2float(value.y),
+          __half2float(value.z), __half2float(value.w)};
+}
+#endif
+
+#if defined(TL_MUSA_ENABLE_BF16)
+TL_DEVICE Float4Values ToFloat4Values(mt_bfloat164 value) {
+  return {static_cast<float>(value.x), static_cast<float>(value.y),
+          static_cast<float>(value.z), static_cast<float>(value.w)};
+}
+#endif
+
+TL_DEVICE float2 AtomicAddFloat2Ret(float *address, Float2Values value) {
+  return make_float2(AtomicAddRet(address, value.x),
+                     AtomicAddRet(address + 1, value.y));
+}
+
+TL_DEVICE float4 AtomicAddFloat4Ret(float *address, Float4Values value) {
+  return make_float4(AtomicAddRet(address, value.x),
+                     AtomicAddRet(address + 1, value.y),
+                     AtomicAddRet(address + 2, value.z),
+                     AtomicAddRet(address + 3, value.w));
+}
+
+#if defined(TL_MUSA_ENABLE_FP16)
+TL_DEVICE half2 AtomicAddHalf2Ret(half *address, Float2Values value) {
+  __half x = __float2half(static_cast<float>(AtomicAddRet(address, value.x)));
+  __half y =
+      __float2half(static_cast<float>(AtomicAddRet(address + 1, value.y)));
+  return __halves2half2(x, y);
+}
+#endif
+
+#if defined(TL_MUSA_ENABLE_BF16)
+TL_DEVICE mt_bfloat162 AtomicAddBFloat162Ret(mt_bfloat16 *address,
+                                             Float2Values value) {
+  return make_bfloat162(AtomicAddRet(address, value.x),
+                        AtomicAddRet(address + 1, value.y));
+}
+#endif
+
+} // namespace atomic_detail
+
+template <typename Value>
+TL_DEVICE void AtomicAddx2(float *address, Value value,
+                           int memory_order = 0) {
+  (void)memory_order;
+  (void)atomic_detail::AtomicAddFloat2Ret(
+      address, atomic_detail::ToFloat2Values(value));
+}
+
+template <typename Value>
+TL_DEVICE float2 AtomicAddx2Ret(float *address, Value value,
+                                int memory_order = 0) {
+  (void)memory_order;
+  return atomic_detail::AtomicAddFloat2Ret(
+      address, atomic_detail::ToFloat2Values(value));
+}
+
+template <typename Value>
+TL_DEVICE void AtomicAddx4(float *address, Value value,
+                           int memory_order = 0) {
+  (void)memory_order;
+  (void)atomic_detail::AtomicAddFloat4Ret(
+      address, atomic_detail::ToFloat4Values(value));
+}
+
+template <typename Value>
+TL_DEVICE float4 AtomicAddx4Ret(float *address, Value value,
+                                int memory_order = 0) {
+  (void)memory_order;
+  return atomic_detail::AtomicAddFloat4Ret(
+      address, atomic_detail::ToFloat4Values(value));
+}
+
+#if defined(TL_MUSA_ENABLE_FP16)
+template <typename Value>
+TL_DEVICE void AtomicAddx2(half *address, Value value, int memory_order = 0) {
+  (void)memory_order;
+  (void)atomic_detail::AtomicAddHalf2Ret(
+      address, atomic_detail::ToFloat2Values(value));
+}
+
+template <typename Value>
+TL_DEVICE half2 AtomicAddx2Ret(half *address, Value value,
+                               int memory_order = 0) {
+  (void)memory_order;
+  return atomic_detail::AtomicAddHalf2Ret(
+      address, atomic_detail::ToFloat2Values(value));
+}
+
+template <typename Value>
+TL_DEVICE void AtomicAddx4(half *address, Value value, int memory_order = 0) {
+  (void)memory_order;
+  auto values = atomic_detail::ToFloat4Values(value);
+  (void)atomic_detail::AtomicAddHalf2Ret(address, {values.x, values.y});
+  (void)atomic_detail::AtomicAddHalf2Ret(address + 2, {values.z, values.w});
+}
+
+template <typename Value>
+TL_DEVICE half4 AtomicAddx4Ret(half *address, Value value,
+                               int memory_order = 0) {
+  (void)memory_order;
+  auto values = atomic_detail::ToFloat4Values(value);
+  half2 lo = atomic_detail::AtomicAddHalf2Ret(address, {values.x, values.y});
+  half2 hi =
+      atomic_detail::AtomicAddHalf2Ret(address + 2, {values.z, values.w});
+  return make_half4(lo.x, lo.y, hi.x, hi.y);
+}
+#endif
+
+#if defined(TL_MUSA_ENABLE_BF16)
+template <typename Value>
+TL_DEVICE void AtomicAddx2(mt_bfloat16 *address, Value value,
+                           int memory_order = 0) {
+  (void)memory_order;
+  (void)atomic_detail::AtomicAddBFloat162Ret(
+      address, atomic_detail::ToFloat2Values(value));
+}
+
+template <typename Value>
+TL_DEVICE mt_bfloat162 AtomicAddx2Ret(mt_bfloat16 *address, Value value,
+                                      int memory_order = 0) {
+  (void)memory_order;
+  return atomic_detail::AtomicAddBFloat162Ret(
+      address, atomic_detail::ToFloat2Values(value));
+}
+
+template <typename Value>
+TL_DEVICE void AtomicAddx4(mt_bfloat16 *address, Value value,
+                           int memory_order = 0) {
+  (void)memory_order;
+  auto values = atomic_detail::ToFloat4Values(value);
+  (void)atomic_detail::AtomicAddBFloat162Ret(address, {values.x, values.y});
+  (void)atomic_detail::AtomicAddBFloat162Ret(address + 2,
+                                             {values.z, values.w});
+}
+
+template <typename Value>
+TL_DEVICE mt_bfloat164 AtomicAddx4Ret(mt_bfloat16 *address, Value value,
+                                      int memory_order = 0) {
+  (void)memory_order;
+  auto values = atomic_detail::ToFloat4Values(value);
+  mt_bfloat162 lo =
+      atomic_detail::AtomicAddBFloat162Ret(address, {values.x, values.y});
+  mt_bfloat162 hi = atomic_detail::AtomicAddBFloat162Ret(
+      address + 2, {values.z, values.w});
+  return make_mt_bfloat164(lo.x, lo.y, hi.x, hi.y);
+}
+#endif
+
 template <typename T> TL_DEVICE T AtomicLoad(T *address, int memory_order) {
   volatile T *volatile_address = reinterpret_cast<volatile T *>(address);
   T value = *volatile_address;

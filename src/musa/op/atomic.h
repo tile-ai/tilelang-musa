@@ -39,7 +39,7 @@ inline Stmt LowerSIMT(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
       fused_loop, loop_layout, lower_args.thread_index, analyzer,
       lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
       /*parallel_loop=*/true,
-      /*should_vectorize=*/false, par_op->LoopLayoutRequiresPaddingGuard());
+      /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 } // namespace atomic

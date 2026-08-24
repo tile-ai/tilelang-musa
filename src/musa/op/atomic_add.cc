@@ -42,8 +42,6 @@ struct AtomicAdd {
                     arith::Analyzer *analyzer) {
     ICHECK(!UseTMA(op))
         << "TME atomic_add is not supported by the MUSA backend";
-    // Keep tiled atomic_add scalar until the MUSA vector atomic helpers are
-    // available. This prevents VectorizeLoop from producing atomic_addx2/x4.
     return atomic::LowerSIMT(op, lower_args, analyzer);
   }
 };
