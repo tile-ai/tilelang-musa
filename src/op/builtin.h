@@ -331,6 +331,7 @@ TVM_DLL const Op &prefetch_tma_descriptor();
  */
 TVM_DLL const Op &tma_load();
 
+
 /*!
  * \brief tvm intrinsics for loading image from global tensor to columns in
  * shared memory

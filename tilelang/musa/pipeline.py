@@ -38,6 +38,7 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutInference()(mod)
     LayoutVisual(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
+    mod = tilelang.musa.transform.LowerTMEIntrin()(mod)
 
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
