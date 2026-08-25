@@ -24,11 +24,13 @@ enum class CopyInst : uint8_t {
   kNormal = 0,
   kAsync = 1,
   kTMELoad = 2,
+  kTMEStore = 3,
   kInvalid = 255,
 };
 
 const char *CopyInstToString(CopyInst inst);
 bool CopyInstIsTME(CopyInst inst);
+bool CopyInstIsTMEStore(CopyInst inst);
 bool CopyInstIsAsync(CopyInst inst);
 
 struct TMEDesc {

@@ -114,7 +114,7 @@ int GetTmaDescriptorDataType(DataType dtype) {
       break;
     }
   }
-  LOG(FATAL) << "MP31 TME load does not support descriptor dtype " << dtype;
+  LOG(FATAL) << "MP31 TME does not support descriptor dtype " << dtype;
   return 0;
 }
 
@@ -136,31 +136,82 @@ Array<PrimExpr> ReverseRanges(const Array<Range> &ranges, bool extent) {
   return values;
 }
 
-Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
-                  arith::Analyzer *analyzer) {
-  ICHECK(TargetIsMP31(args.target))
-      << "MP31 TME load requires an MP31 MUSA target, got " << args.target;
-  ICHECK(IsExplicitTmaCopy(op)) << "MUSA MP31 TME lowering requires T.tma_copy";
-  ICHECK(IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst))
-      << "MP31 TME load only supports global-to-shared copies, got src="
-      << op.src.scope() << ", dst=" << op.dst.scope();
-  ICHECK_EQ(op.src->dtype, op.dst->dtype)
-      << "MP31 TME load requires matching source and destination dtypes";
+bool AlignTmeSharedRangeToGlobal(const Array<Range> &global_range,
+                                 const Array<Range> &shared_range,
+                                 arith::Analyzer *analyzer,
+                                 Array<Range> *aligned_shared_range) {
+  aligned_shared_range->clear();
+  aligned_shared_range->reserve(global_range.size());
 
-  const size_t rank = op.src_range.size();
+  size_t global_dim = 0;
+  size_t shared_dim = 0;
+  while (global_dim < global_range.size() &&
+         shared_dim < shared_range.size()) {
+    const Range &global = global_range[global_dim];
+    const Range &shared = shared_range[shared_dim];
+    if (analyzer->CanProveEqual(shared->extent, Integer(1))) {
+      ++shared_dim;
+      continue;
+    }
+    if (analyzer->CanProveEqual(global->extent, Integer(1))) {
+      aligned_shared_range->push_back(Range::FromMinExtent(0, 1));
+      ++global_dim;
+      continue;
+    }
+    if (!analyzer->CanProveEqual(global->extent, shared->extent)) {
+      return false;
+    }
+    aligned_shared_range->push_back(shared);
+    ++global_dim;
+    ++shared_dim;
+  }
+
+  while (shared_dim < shared_range.size()) {
+    if (!analyzer->CanProveEqual(shared_range[shared_dim]->extent,
+                                 Integer(1))) {
+      return false;
+    }
+    ++shared_dim;
+  }
+  while (global_dim < global_range.size()) {
+    if (!analyzer->CanProveEqual(global_range[global_dim]->extent,
+                                 Integer(1))) {
+      return false;
+    }
+    aligned_shared_range->push_back(Range::FromMinExtent(0, 1));
+    ++global_dim;
+  }
+  return aligned_shared_range->size() == global_range.size();
+}
+
+struct LoweredTMEDesc {
+  PrimExpr descriptor;
+  Array<PrimExpr> global_coords;
+  Array<PrimExpr> box_dims;
+};
+
+LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
+                                 const Array<Range> &global_range,
+                                 const Array<Range> &shared_range,
+                                 arith::Analyzer *analyzer) {
+  const size_t rank = global_range.size();
   ICHECK_GE(rank, 1U);
   ICHECK_LE(rank, 5U);
-  ICHECK_EQ(op.dst_range.size(), rank);
+  Array<Range> logical_shared_range;
+  ICHECK(AlignTmeSharedRangeToGlobal(global_range, shared_range, analyzer,
+                                     &logical_shared_range))
+      << "MP31 TME requires matching non-unit global/shared tile extents; "
+         "unmatched dimensions must have extent one";
 
   // TME descriptors are expressed in bytes and use the innermost dimension
   // first. Restrict the first vertical slice to a row-major contiguous tile;
   // swizzle and split-box support will be added in later MP31 commits.
-  Array<PrimExpr> global_shape = Reverse(op.src->shape);
-  Array<PrimExpr> global_coords = ReverseRanges(op.src_range, false);
-  Array<PrimExpr> box_dims = ReverseRanges(op.dst_range, true);
+  Array<PrimExpr> global_shape = Reverse(global_buffer->shape);
+  Array<PrimExpr> global_coords = ReverseRanges(global_range, false);
+  Array<PrimExpr> box_dims = ReverseRanges(logical_shared_range, true);
   Array<PrimExpr> global_stride;
-  if (!op.src->strides.empty()) {
-    global_stride = Reverse(op.src->strides);
+  if (!global_buffer->strides.empty()) {
+    global_stride = Reverse(global_buffer->strides);
   } else {
     PrimExpr stride = 1;
     Array<PrimExpr> row_major;
@@ -177,7 +228,7 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
   Array<PrimExpr> global_stride_bytes;
   for (size_t i = 0; i < rank; ++i) {
     PrimExpr stride =
-        analyzer->Simplify(global_stride[i] * op.src->dtype.bytes());
+        analyzer->Simplify(global_stride[i] * global_buffer->dtype.bytes());
     if (i != 0) {
       if (auto imm = stride.as<IntImmNode>()) {
         ICHECK_EQ(imm->value % 16, 0)
@@ -187,24 +238,18 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
     global_stride_bytes.push_back(cast(DataType::UInt(64), stride));
   }
 
-  for (size_t i = 0; i < rank; ++i) {
-    ICHECK(analyzer->CanProveEqual(op.src_range[rank - i - 1]->extent,
-                                   op.dst_range[rank - i - 1]->extent))
-        << "MP31 TME load requires matching global/shared tile extents";
-  }
-
   Array<PrimExpr> smem_stride;
   for (size_t i = 0; i < rank; ++i) {
     smem_stride.push_back(1);
   }
   TMEDesc desc{
       rank,
-      GetTmaDescriptorDataType(op.src->dtype),
+      GetTmaDescriptorDataType(global_buffer->dtype),
       global_shape,
       global_stride_bytes,
       box_dims,
       smem_stride,
-      op.src->data,
+      global_buffer->data,
       /*interleave=*/0,
       /*swizzle=*/0,
       /*l2_promotion=*/0,
@@ -212,37 +257,61 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
   };
   PrimExpr descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
+  return {descriptor, global_coords, box_dims};
+}
 
+PrimExpr MakeTmaSharedPtr(const Buffer &shared_buffer,
+                          const Array<Range> &shared_range, int rw_mask) {
   std::vector<PrimExpr> shared_strides;
-  if (!op.dst->strides.empty()) {
-    shared_strides.assign(op.dst->strides.begin(), op.dst->strides.end());
+  if (!shared_buffer->strides.empty()) {
+    shared_strides.assign(shared_buffer->strides.begin(),
+                          shared_buffer->strides.end());
   } else {
     PrimExpr stride = 1;
-    for (auto it = op.dst->shape.rbegin(); it != op.dst->shape.rend(); ++it) {
+    for (auto it = shared_buffer->shape.rbegin();
+         it != shared_buffer->shape.rend(); ++it) {
       shared_strides.insert(shared_strides.begin(), stride);
       stride *= *it;
     }
   }
-  ICHECK_EQ(shared_strides.size(), op.dst_range.size());
+  ICHECK_EQ(shared_strides.size(), shared_range.size());
   PrimExpr shared_offset = 0;
   PrimExpr shared_elements = 1;
-  for (size_t i = 0; i < op.dst_range.size(); ++i) {
-    shared_offset += op.dst_range[i]->min * shared_strides[i];
-    shared_elements *= op.dst_range[i]->extent;
+  for (size_t i = 0; i < shared_range.size(); ++i) {
+    shared_offset += shared_range[i]->min * shared_strides[i];
+    shared_elements *= shared_range[i]->extent;
   }
-  PrimExpr shared_ptr = op.dst.access_ptr(/*rw_mask=*/2, DataType::Handle(), 1,
-                                          shared_offset, shared_elements);
+  return shared_buffer.access_ptr(rw_mask, DataType::Handle(), 1, shared_offset,
+                                  shared_elements);
+}
+
+Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
+                  arith::Analyzer *analyzer) {
+  ICHECK(TargetIsMP31(args.target))
+      << "MP31 TME load requires an MP31 MUSA target, got " << args.target;
+  ICHECK(IsExplicitTmaCopy(op)) << "MUSA MP31 TME lowering requires T.tma_copy";
+  ICHECK(IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst))
+      << "MP31 TME load only supports global-to-shared copies, got src="
+      << op.src.scope() << ", dst=" << op.dst.scope();
+  ICHECK_EQ(op.src->dtype, op.dst->dtype)
+      << "MP31 TME load requires matching source and destination dtypes";
+
+  LoweredTMEDesc lowered =
+      MakeTmaDescriptor(op.src, op.src_range, op.dst_range, analyzer);
+  PrimExpr shared_ptr = MakeTmaSharedPtr(op.dst, op.dst_range, /*rw_mask=*/2);
 
   Array<PrimExpr> tma_args;
-  tma_args.push_back(descriptor);
+  tma_args.push_back(lowered.descriptor);
   tma_args.push_back(GetTmaBarrier(op));
   tma_args.push_back(shared_ptr);
-  tma_args.insert(tma_args.end(), global_coords.begin(), global_coords.end());
-  tma_args.insert(tma_args.end(), box_dims.begin(), box_dims.end());
+  tma_args.insert(tma_args.end(), lowered.global_coords.begin(),
+                  lowered.global_coords.end());
+  tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
+                  lowered.box_dims.end());
   Stmt load = Evaluate(Call(DataType::Handle(), tma_load(), tma_args));
 
   PrimExpr bytes = 1;
-  for (auto dim : box_dims) {
+  for (auto dim : lowered.box_dims) {
     bytes *= dim;
   }
   bytes = analyzer->Simplify(bytes * op.dst->dtype.bytes());
@@ -250,6 +319,34 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
                               {GetTmaBarrier(op), bytes}));
   load = SeqStmt({expect, load});
   return IfThenElse(EQ(args.thread_index, args.thread_bounds->min), load);
+}
+
+Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
+                   arith::Analyzer *analyzer) {
+  ICHECK(TargetIsMP31(args.target))
+      << "MP31 TME store requires an MP31 MUSA target, got " << args.target;
+  ICHECK(IsExplicitTmaCopy(op)) << "MUSA MP31 TME lowering requires T.tma_copy";
+  ICHECK(IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst))
+      << "MP31 TME store only supports shared-to-global copies, got src="
+      << op.src.scope() << ", dst=" << op.dst.scope();
+  ICHECK_EQ(op.src->dtype, op.dst->dtype)
+      << "MP31 TME store requires matching source and destination dtypes";
+
+  LoweredTMEDesc lowered =
+      MakeTmaDescriptor(op.dst, op.dst_range, op.src_range, analyzer);
+  PrimExpr shared_ptr = MakeTmaSharedPtr(op.src, op.src_range, /*rw_mask=*/1);
+
+  Array<PrimExpr> tma_args;
+  tma_args.push_back(lowered.descriptor);
+  tma_args.push_back(shared_ptr);
+  tma_args.insert(tma_args.end(), lowered.global_coords.begin(),
+                  lowered.global_coords.end());
+  tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
+                  lowered.box_dims.end());
+  Stmt store = Evaluate(Call(DataType::Handle(), tma_store(), tma_args));
+  Stmt commit = Evaluate(Call(DataType::Handle(), tma_store_arrive(), {}));
+  return IfThenElse(EQ(args.thread_index, args.thread_bounds->min),
+                    SeqStmt({store, commit}));
 }
 
 Stmt LowerAsyncCopy(const CopyNode &op, const LowerArgs &lower_args,
@@ -304,13 +401,19 @@ const char *CopyInstToString(CopyInst inst) {
     return "async";
   case CopyInst::kTMELoad:
     return "tme_load";
+  case CopyInst::kTMEStore:
+    return "tme_store";
   case CopyInst::kInvalid:
     return "invalid";
   }
   return "unknown";
 }
 
-bool CopyInstIsTME(CopyInst inst) { return inst == CopyInst::kTMELoad; }
+bool CopyInstIsTME(CopyInst inst) {
+  return inst == CopyInst::kTMELoad || inst == CopyInst::kTMEStore;
+}
+
+bool CopyInstIsTMEStore(CopyInst inst) { return inst == CopyInst::kTMEStore; }
 
 bool CopyInstIsAsync(CopyInst inst) { return inst == CopyInst::kAsync; }
 
@@ -322,7 +425,15 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
               "T.tma_copy() is currently supported only on MP31 MUSA "
               "targets"};
     }
-    return {CopyInst::kTMELoad, true, {}};
+    if (IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst)) {
+      return {CopyInst::kTMELoad, true, {}};
+    }
+    if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst)) {
+      return {CopyInst::kTMEStore, true, {}};
+    }
+    return {CopyInst::kInvalid, false,
+            "T.tma_copy() only supports global-to-shared loads or "
+            "shared-to-global stores on MP31"};
   }
   if (IsExplicitAsyncCopy(op)) {
     return {CopyInst::kAsync, true, {}};
@@ -347,6 +458,9 @@ struct Copy {
                             true};
     CopyInstSelection selection = SelectCopyInstForLowering(op, ctx);
     ICHECK(selection.supported) << selection.reason;
+    if (CopyInstIsTMEStore(selection.inst)) {
+      return LowerTmaStore(op, lower_args, analyzer);
+    }
     if (CopyInstIsTME(selection.inst)) {
       return LowerTmaLoad(op, lower_args, analyzer);
     }

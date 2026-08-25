@@ -1271,6 +1271,37 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintExpr(op->args[i], os);
     }
     os << ")";
+  } else if (op->op.same_as(tl::tma_store())) {
+    // MP31 TME store arguments are descriptor, shared pointer, rank
+    // coordinates and rank box dimensions.
+    ICHECK_GE(op->args.size(), 4U);
+    ICHECK_EQ((op->args.size() - 2) % 2, 0U);
+    size_t rank = (op->args.size() - 2) / 2;
+    ICHECK_GE(rank, 1U);
+    ICHECK_LE(rank, 5U);
+    need_mp31_tme_h_ = true;
+    os << "tl::tme_store(";
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      if (i != 0) {
+        os << ", ";
+      }
+      this->PrintExpr(op->args[i], os);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::tma_store_arrive())) {
+    ICHECK_EQ(op->args.size(), 0U);
+    need_mp31_tme_h_ = true;
+    os << "tl::tme_store_commit()";
+  } else if (op->op.same_as(tl::tma_store_wait())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    const auto *count = op->args[0].as<IntImmNode>();
+    const auto *read = op->args[1].as<IntImmNode>();
+    ICHECK(count && count->value == 0)
+        << "MP31 TME store wait only supports count=0";
+    ICHECK(read && read->value != 0)
+        << "MP31 TME store wait only supports read=True";
+    need_mp31_tme_h_ = true;
+    os << "tl::tme_store_read_wait()";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);
