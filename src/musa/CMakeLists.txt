@@ -26,6 +26,8 @@ find_package(MUSAToolkit REQUIRED)
 if(NOT MUSAToolkit_FOUND)
   message(FATAL_ERROR "Cannot find MUSA, USE_MUSA=" ${USE_MUSA})
 endif()
+include_directories(${MUSAToolkit_INCLUDE_DIRS})
+list(APPEND TILE_LANG_INCLUDES ${MUSAToolkit_INCLUDE_DIRS})
 
 if(TILELANG_USE_MUSA_STUBS)
   if(WIN32 AND NOT CYGWIN)
@@ -75,4 +77,6 @@ list(APPEND TILE_LANG_SRCS
   src/musa/transform/async_copy_injector.cc
   src/musa/transform/lower_ldg_stg.cc
   src/musa/transform/lower_fast_divmod.cc
+  src/musa/transform/lower_tme.cc
+  src/musa/runtime.cc
 )

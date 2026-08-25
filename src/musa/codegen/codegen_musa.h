@@ -47,7 +47,7 @@ public:
             need_math_h_ || need_mma_h_ || need_atomic_h_ || need_debug_h_ ||
             need_reduce_h_ || need_scan_h_ || need_async_copy_h_ ||
             need_ldg_stg_h_ || need_cvt_h_ || need_threadblock_swizzle_h_ ||
-            need_dp4a_h_);
+            need_dp4a_h_ || need_mp31_tme_h_);
   }
   // override behavior
   void PrintFunctionSignature(const ffi::String &function_name,
@@ -130,6 +130,8 @@ private:
   bool need_async_copy_h_{false};
   // whether need vectorized global load/store helpers
   bool need_ldg_stg_h_{false};
+  // Whether an MP31 TME load helper is referenced by the generated kernel.
+  bool need_mp31_tme_h_{false};
   // whether Common MUSA fast-divmod helpers are required
   bool need_fast_divmod_h_{false};
   // whether need cast_smem_ptr_to_int helper function
