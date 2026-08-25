@@ -425,6 +425,9 @@ std::string CodeGenMUSA::Finish() {
   if (need_cvt_h_) {
     decl_stream << "#include <tl_templates/musa/common/cvt.h>\n";
   }
+  if (need_threadblock_swizzle_h_) {
+    decl_stream << "#include <tl_templates/musa/common/threadblock_swizzle.h>\n";
+  }
 
   if (need_fast_divmod_h_) {
     decl_stream << "#include <tl_templates/musa/common/fast_divmod.h>\n";
@@ -1802,6 +1805,24 @@ void CodeGenMUSA::VisitStmt_(const AttrStmtNode* op) {
     auto inner = op->body.as<AttrStmtNode>();
     ICHECK(inner);
     this->VisitStmt(inner->body);
+    return;
+  } else if (op->attr_key == "threadblock_swizzle_pattern") {
+    const auto* call = op->value.as<CallNode>();
+    ICHECK(call && call->op.same_as(tirx::builtin::tvm_tuple()) &&
+                   call->args.size() >= 2)
+        << "threadblock_swizzle_pattern expects tvm_tuple(device_func, panel_size)";
+    const auto* name_node = call->args[0].as<StringImmNode>();
+    const auto* size_node = call->args[1].as<IntImmNode>();
+    ICHECK(name_node && size_node && size_node->value > 0)
+        << "threadblock_swizzle_pattern expects a function name and positive panel size";
+    ICHECK(name_node->value == "rasterization2DRow" ||
+                   name_node->value == "rasterization2DColumn")
+        << "Unsupported MUSA threadblock swizzle function: " << name_node->value;
+    need_threadblock_swizzle_h_ = true;
+    PrintIndent();
+    stream << "const dim3 blockIdx = tl::" << name_node->value << "<" << size_node->value
+           << ">();\n";
+    VisitStmt(op->body);
     return;
   }
   CodeGenC::VisitStmt_(op);
