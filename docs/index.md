@@ -43,6 +43,15 @@ programming_guides/type_system
 
 :::{toctree}
 :maxdepth: 1
+:caption: MUSA
+
+tilelang_musa_programming_guide
+tilelang_musa_accelerated_ops_guide
+tileops_musa_integration_baseline
+:::
+
+:::{toctree}
+:maxdepth: 1
 :caption: DEEP LEARNING OPERATORS
 
 deeplearning_operators/elementwise
