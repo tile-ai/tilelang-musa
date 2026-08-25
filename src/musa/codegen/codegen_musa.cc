@@ -235,7 +235,45 @@ void CodeGenMUSA::PrintFunctionSignature(const ffi::String &function_name,
     TVM_FFI_THROW(InternalError)
         << "Unsupported calling convention for musa codegen: " << calling_conv;
   }
-  CodeGenC::PrintFunctionSignature(function_name, func, os);
+  CodeGenC::PrintType(func->ret_type, os);
+  CodeGenC::PrintExtraAttrs(func, os);
+  bool no_alias = func->HasNonzeroAttr(tirx::attr::kNoAlias);
+  std::unordered_set<const VarNode *> non_restrict;
+  if (auto opt =
+          func->GetAttr<ffi::Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
+    for (const tirx::Var &var : opt.value())
+      non_restrict.insert(var.get());
+  }
+  os << " " << function_name << "(";
+  for (size_t i = 0; i < func->params.size(); ++i) {
+    tirx::Var var = func->params[i];
+    if (i != 0)
+      os << ", ";
+    std::string vid = AllocVarID(var.get());
+    if (var.dtype().is_handle()) {
+      if (auto *ptr = var->type_annotation.as<PointerTypeNode>()) {
+        auto *prim = ptr->element_type.as<PrimTypeNode>();
+        bool is_tensormap =
+            ptr->element_type.as<TensorMapTypeNode>() != nullptr ||
+            (prim != nullptr && prim->dtype == tl::MUTensorMapType());
+        if (ptr->storage_scope == "grid_constant" && is_tensormap) {
+          os << "__attribute__((grid_constant)) const MUtensorDescriptor "
+             << vid;
+          continue;
+        }
+      }
+      auto it = alloc_storage_scope_.find(var.get());
+      if (it != alloc_storage_scope_.end())
+        PrintStorageScope(it->second, os);
+      CodeGenC::PrintType(GetType(var), os);
+      if (no_alias && !non_restrict.count(var.get()))
+        PrintRestrict(var, os);
+    } else {
+      CodeGenC::PrintType(GetType(var), os);
+    }
+    os << " " << vid;
+  }
+  os << ")";
 }
 
 class ThreadIdxExtractor : public tirx::StmtVisitor {
@@ -443,6 +481,9 @@ std::string CodeGenMUSA::Finish() {
   if (need_ldg_stg_h_) {
     decl_stream << "#include <tl_templates/musa/common/ldg_stg.h>\n";
   }
+  if (need_mp31_tme_h_) {
+    decl_stream << "#include <tl_templates/musa/mp31/tme.h>\n";
+  }
   if (need_cvt_h_) {
     decl_stream << "#include <tl_templates/musa/common/cvt.h>\n";
   }
@@ -506,6 +547,11 @@ void CodeGenMUSA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 
   if (t.is_void()) {
     os << "void";
+    return;
+  }
+
+  if (t == tl::MUTensorMapType()) {
+    os << "MUtensorDescriptor";
     return;
   }
 
@@ -953,7 +999,10 @@ void CodeGenMUSA::PrintStorageScope(const std::string &scope,
   if (scope == "shared") {
     os << "__shared__ ";
   } else if (scope == "shared.dyn") {
-    os << "extern __shared__ ";
+    // MP31 TME requires the shared base to satisfy the descriptor transfer
+    // alignment. Keep the dynamic shared arena over-aligned; sub-buffers are
+    // laid out by the allocator after this base.
+    os << "extern __shared__ __align__(4096) ";
   }
 }
 
@@ -1204,7 +1253,25 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
   }
 
-  if (op->op.same_as(builtin::tvm_fill_fragment())) {
+  if (op->op.same_as(tl::tma_load())) {
+    // MP31 TME load arguments are descriptor, barrier, shared pointer,
+    // rank coordinates and rank box dimensions.  The MP31 template exposes
+    // rank-specific overloads, so keep this emission independent of T.copy.
+    ICHECK_GE(op->args.size(), 5U);
+    ICHECK_EQ((op->args.size() - 3) % 2, 0U);
+    size_t rank = (op->args.size() - 3) / 2;
+    ICHECK_GE(rank, 1U);
+    ICHECK_LE(rank, 5U);
+    need_mp31_tme_h_ = true;
+    os << "tl::tme_load(";
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      if (i != 0) {
+        os << ", ";
+      }
+      this->PrintExpr(op->args[i], os);
+    }
+    os << ")";
+  } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);
     os << "mtmusa::wmma::fill_fragment(";
@@ -1489,51 +1556,51 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << PrintCpAsyncBarrierAsm(barrier);
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
-    need_cast_smem_ptr_to_int_ = true;
-    int barrier_id = Downcast<IntImm>(op->args[0])->value;
-    ICHECK(barrier_id < barrier_count_);
-    std::string barrier =
-        barrier_name_ + "[" + std::to_string(barrier_id) + "]";
+    ICHECK_EQ(op->args.size(), 2U);
+    std::string barrier = this->PrintExpr(op->args[0]);
     std::string thread_count = this->PrintExpr(op->args[1]);
-    this->stream << PrintInitBarrierThreadCountAsm(barrier, thread_count);
+    need_mp31_tme_h_ = true;
+    this->stream << "if (tl::tl_shuffle_elect<0>()) {\n"
+                 << "  tl::tme_barrier_init_arrival(" << barrier << ", (("
+                 << thread_count << " + 31) / 32), 0);\n"
+                 << "}\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
-    need_cast_smem_ptr_to_int_ = true;
-    int barrier_id = Downcast<IntImm>(op->args[0])->value;
-    ICHECK(barrier_id < barrier_count_);
-    std::string barrier =
-        barrier_name_ + "[" + std::to_string(barrier_id) + "]";
-    this->stream << PrintArriveBarrierAsm(barrier);
+    ICHECK_EQ(op->args.size(), 1U);
+    need_mp31_tme_h_ = true;
+    this->stream << "tl::tme_barrier_arrive(" << this->PrintExpr(op->args[0])
+                 << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
-    need_cast_smem_ptr_to_int_ = true;
-    int barrier_id = Downcast<IntImm>(op->args[0])->value;
-    ICHECK(barrier_id < barrier_count_);
-    std::string barrier =
-        barrier_name_ + "[" + std::to_string(barrier_id) + "]";
+    ICHECK_EQ(op->args.size(), 2U);
+    std::string barrier = this->PrintExpr(op->args[0]);
     std::string byte_count = this->PrintExpr(op->args[1]);
-    this->stream << PrintArriveBarrierExpectTxAsm(barrier, byte_count);
+    need_mp31_tme_h_ = true;
+    this->stream << "tl::tme_barrier_add_trans(" << barrier << ", "
+                 << byte_count << ");\ntl::tme_barrier_arrive(" << barrier
+                 << ");\n";
   } else if (op->op.same_as(builtin::ptx_wait_barrier())) {
-    need_cast_smem_ptr_to_int_ = true;
-    int barrier_id = Downcast<IntImm>(op->args[0])->value;
-    ICHECK(barrier_id < barrier_count_);
-    std::string barrier =
-        barrier_name_ + "[" + std::to_string(barrier_id) + "]";
-    this->stream << PrintWaitBarrierAsm(barrier);
+    ICHECK_EQ(op->args.size(), 2U);
+    need_mp31_tme_h_ = true;
+    this->stream << "tl::tme_barrier_wait(" << this->PrintExpr(op->args[0])
+                 << ", " << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(builtin::create_barriers())) {
     ICHECK_EQ(barrier_count_, -1);
-    int barrier_count = Downcast<IntImm>(op->args[0])->value;
-    // pad barrier alignment to avoid runtime alignment errors
-    ICHECK_EQ(barrier_alignment_bytes_ % sizeof(uint64_t), 0);
-    int barrier_alignment_count = barrier_alignment_bytes_ / sizeof(uint64_t);
-    if (barrier_count % barrier_alignment_count != 0) {
-      barrier_count = ((barrier_count / barrier_alignment_count) + 1) *
-                      barrier_alignment_count;
-    }
-    barrier_count_ = barrier_count;
-    this->stream << "__shared__ __align__(" << barrier_alignment_bytes_
-                 << ") uint64_t " << barrier_name_ << "[" << barrier_count
-                 << "];\n";
-    this->stream << "for (int i = 0; i < " << barrier_count << "; ++i) { "
-                 << barrier_name_ << "[i] = 0; }\n";
+    barrier_count_ = Downcast<IntImm>(op->args[0])->value;
+    need_mp31_tme_h_ = true;
+    this->stream << "tl::tme_barrier_record(" << barrier_count_ << ");\n";
+  } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    need_mp31_tme_h_ = true;
+    this->stream << "tl::tme_barrier_add_trans(" << this->PrintExpr(op->args[0])
+                 << ", " << this->PrintExpr(op->args[1]) << ");\n";
+  } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    need_mp31_tme_h_ = true;
+    this->stream << "tl::tme_barrier_wait(" << this->PrintExpr(op->args[0])
+                 << ", " << this->PrintExpr(op->args[1]) << ");\n";
+  } else if (op->op.same_as(tl::ptx_fence_barrier_init())) {
+    // MP31 barrier initialization is ordered by the generated barrier record
+    // and the producer/consumer synchronization; MTCC has no separate fence
+    // C API for this operation.
   } else if (op->op.same_as(builtin::ptx_ldg32())) {
     /*
     asm volatile (

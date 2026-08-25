@@ -13,4 +13,9 @@ def LowerFastDivmod():
     return _ffi_api.LowerFastDivmod()  # type: ignore
 
 
-__all__ = ["LowerLDGSTG", "LowerFastDivmod"]
+def LowerTMEIntrin():
+    """Lower MP31 TME descriptors and barrier handles."""
+    return _ffi_api.LowerTMEIntrin()  # type: ignore
+
+
+__all__ = ["LowerLDGSTG", "LowerFastDivmod", "LowerTMEIntrin"]

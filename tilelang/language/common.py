@@ -70,6 +70,7 @@ from .allocate import (
 from tvm.tirx.script.builder.ir import alloc_buffer as allocate  # noqa: F401
 from .copy_op import (  # noqa: F401
     copy,
+    tma_copy,
     async_copy,
     transpose,
     im2col,
@@ -253,6 +254,7 @@ _LOCAL_EXPORTS = (
     "clamp",
     "clear",
     "copy",
+    "tma_copy",
     "cummax",
     "cumsum",
     "dynamic",

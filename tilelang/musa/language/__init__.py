@@ -5,6 +5,8 @@ from __future__ import annotations
 from tilelang.language.common import *  # noqa: F401,F403
 from tilelang.language.common import __all__ as _COMMON_ALL
 from tilelang.language.builtin import (  # noqa: F401
+    barrier_arrive,
+    barrier_wait,
     get_lane_idx,
     get_warp_idx,
     get_warp_idx_sync,
@@ -55,6 +57,8 @@ _MUSA_API_ALL = (
     "__log10",
     "__sin",
     "__tan",
+    "barrier_arrive",
+    "barrier_wait",
     "fast_rcp",
     "get_lane_idx",
     "get_warp_idx",
