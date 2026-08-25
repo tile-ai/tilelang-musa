@@ -1,6 +1,7 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+import pytest
 import torch
 from tilelang import tvm
 
@@ -91,6 +92,31 @@ def _tme_load_nonzero_outer_slice(
             C[i, j] = smem[1, 0, i, j]
 
 
+@T.prim_func
+def _tme_load_singleton_aligned_regions(
+    A: T.Tensor((2, 8, 3, 16), "float32"),
+    C: T.Tensor((8, 16), "float32"),
+):
+    with T.Kernel(1, threads=128):
+        smem = T.alloc_shared((8, 16), "float32")
+        barrier = T.alloc_barrier(128)
+        T.tma_copy(A[1, 0:8, 2:3, 0:16], smem, barrier=barrier)
+        T.barrier_arrive(barrier)
+        T.barrier_wait(barrier, 0)
+        for i, j in T.Parallel(8, 16):
+            C[i, j] = smem[i, j]
+
+
+@T.prim_func
+def _tme_load_mismatched_nonunit_regions(
+    A: T.Tensor((4, 32), "float32"),
+):
+    with T.Kernel(1, threads=128):
+        smem = T.alloc_shared((8, 16), "float32")
+        barrier = T.alloc_barrier(128)
+        T.tma_copy(A[0:4, 0:32], smem, barrier=barrier)
+
+
 @tilelang.testing.requires_musa_compute_version_eq(3, 1)
 def test_mp31_tme_load_ranks_codegen():
     target = tvm.target.Target({"kind": "musa", "arch": "mp_31"})
@@ -131,3 +157,30 @@ def test_mp31_tme_load_nonzero_outer_slice():
     result = kernel(values.to("musa"))
     torch.musa.synchronize()
     torch.testing.assert_close(result.cpu(), values[1, 0])
+
+
+@tilelang.testing.requires_musa_compute_version_eq(3, 1)
+def test_mp31_tme_load_singleton_aligned_regions():
+    kernel = tilelang.compile(
+        _tme_load_singleton_aligned_regions,
+        out_idx=[1],
+        target={"kind": "musa", "arch": "mp_31"},
+        execution_backend="tvm_ffi",
+    )
+    values = torch.randn((2, 8, 3, 16), dtype=torch.float32)
+    result = kernel(values.to("musa"))
+    torch.musa.synchronize()
+    torch.testing.assert_close(result.cpu(), values[1, :, 2, :])
+
+
+@tilelang.testing.requires_musa_compute_version_eq(3, 1)
+def test_mp31_tme_load_rejects_mismatched_nonunit_regions():
+    with pytest.raises(
+        tvm.TVMError,
+        match="matched non-1 dimension|tile shape mismatch|matching non-unit",
+    ):
+        tilelang.lower(
+            _tme_load_mismatched_nonunit_regions,
+            target={"kind": "musa", "arch": "mp_31"},
+            enable_device_compile=False,
+        )
