@@ -41,6 +41,13 @@ TL_DEVICE void tme_barrier_wait(int barrier_id, int phase_id) {
   barrier.wait(phase_id);
 }
 
+TL_DEVICE void prefetch_tma_descriptor(const MUtensorDescriptor &descriptor) {
+  // The installed MTCC exposes descriptor prefetch through the public
+  // prefetch wrapper; the newer tme_desc_prefetch wrapper is not available
+  // in this toolkit yet.
+  ::prefetch(&descriptor);
+}
+
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
                         int dim0) {
