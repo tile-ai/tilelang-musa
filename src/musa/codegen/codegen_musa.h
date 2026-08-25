@@ -46,7 +46,7 @@ public:
             enable_fp6_ || enable_fp4_ || need_math_constants_h_ ||
             need_math_h_ || need_mma_h_ || need_atomic_h_ || need_debug_h_ ||
             need_reduce_h_ || need_scan_h_ || need_async_copy_h_ ||
-            need_ldg_stg_h_ || need_cvt_h_);
+            need_ldg_stg_h_ || need_cvt_h_ || need_threadblock_swizzle_h_);
   }
   // override behavior
   void PrintFunctionSignature(const ffi::String &function_name,
@@ -105,6 +105,7 @@ private:
   // whether enable fp4
   bool enable_fp4_{false};
   bool need_cvt_h_{false};
+  bool need_threadblock_swizzle_h_{false};
   // whether enable int8
   bool enable_int8_{false};
   // whether enable warp shuffle intrinsics
