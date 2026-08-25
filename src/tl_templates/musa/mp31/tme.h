@@ -96,4 +96,60 @@ TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                        __musa::SZ_NONE);
 }
 
+TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
+                         const void *smem_ptr, int coord0, int dim0) {
+  __musa::memcpy(smem_ptr, &descriptor, dim0, coord0, __musa::SG_NONE,
+                 __musa::SS_256B, __musa::SL_256B);
+}
+
+TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
+                         const void *smem_ptr, int coord0, int coord1,
+                         int dim0, int dim1) {
+  __musa::i2 coord = {coord0, coord1};
+  __musa::i2 dims = {dim0, dim1};
+  __musa::memcpy(smem_ptr, &descriptor, dims, coord, __musa::SG_NONE,
+                 __musa::SS_256B, __musa::SL_256B);
+}
+
+TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
+                         const void *smem_ptr, int coord0, int coord1,
+                         int coord2, int dim0, int dim1, int dim2) {
+  __musa::i3 coord = {coord0, coord1, coord2};
+  __musa::i3 dims = {dim0, dim1, dim2};
+  __musa::memcpy(smem_ptr, &descriptor, dims, coord, __musa::SG_NONE,
+                 __musa::SS_256B, __musa::SL_256B);
+}
+
+TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
+                         const void *smem_ptr, int coord0, int coord1,
+                         int coord2, int coord3, int dim0, int dim1, int dim2,
+                         int dim3) {
+  __musa::i4 coord = {coord0, coord1, coord2, coord3};
+  __musa::i4 dims = {dim0, dim1, dim2, dim3};
+  __musa::memcpy(smem_ptr, &descriptor, dims, coord, __musa::SG_NONE,
+                 __musa::SS_256B, __musa::SL_256B);
+}
+
+TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
+                         const void *smem_ptr, int coord0, int coord1,
+                         int coord2, int coord3, int coord4, int dim0,
+                         int dim1, int dim2, int dim3, int dim4) {
+  __musa::i5 coord = {coord0, coord1, coord2, coord3, coord4};
+  __musa::i5 dims = {dim0, dim1, dim2, dim3, dim4};
+  __musa::memcpy(smem_ptr, &descriptor, dims, coord, __musa::SG_NONE,
+                 __musa::SS_256B, __musa::SL_256B);
+}
+
+TL_DEVICE void tme_store_commit() {
+  // MTCC currently exposes no public __musa wrapper for the MP31 TME store
+  // commit instruction, so keep this builtin at the architecture boundary.
+  __musa_tme_store_commit();
+}
+
+TL_DEVICE void tme_store_read_wait() {
+  // MTCC currently exposes no public __musa wrapper for the MP31 TME store
+  // read-wait instruction, so keep this builtin at the architecture boundary.
+  __musa_tme_store_read_wait();
+}
+
 } // namespace tl
