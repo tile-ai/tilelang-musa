@@ -428,6 +428,9 @@ std::string CodeGenMUSA::Finish() {
   if (need_threadblock_swizzle_h_) {
     decl_stream << "#include <tl_templates/musa/common/threadblock_swizzle.h>\n";
   }
+  if (need_dp4a_h_) {
+    decl_stream << "#include <tl_templates/musa/common/dp4a.h>\n";
+  }
 
   if (need_fast_divmod_h_) {
     decl_stream << "#include <tl_templates/musa/common/fast_divmod.h>\n";
@@ -1110,6 +1113,21 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
     // A macro will be used to replace *_sync calls to legacy ones.
     if (op_need_warp_shuffle_.get(call_op, false)) {
       enable_warp_shuffle_ = true;
+    }
+  }
+
+  if (op->op.same_as(builtin::call_extern()) && !op->args.empty()) {
+    const auto* name = op->args[0].as<StringImmNode>();
+    if (name && name->value == "DP4A") {
+      ICHECK_EQ(op->args.size(), 4U);
+      need_dp4a_h_ = true;
+      os << "tl::DP4A(";
+      for (size_t i = 1; i < op->args.size(); ++i) {
+        if (i != 1) os << ", ";
+        os << PrintExpr(op->args[i]);
+      }
+      os << ")";
+      return;
     }
   }
 
