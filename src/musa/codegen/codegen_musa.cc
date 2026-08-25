@@ -1175,7 +1175,13 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
     }
   }
 
-  if (op->op.same_as(tl::tma_load())) {
+  if (op->op.same_as(tl::prefetch_tma_descriptor())) {
+    ICHECK_EQ(op->args.size(), 1U);
+    need_mp31_tme_h_ = true;
+    os << "tl::prefetch_tma_descriptor(";
+    this->PrintExpr(op->args[0], os);
+    os << ")";
+  } else if (op->op.same_as(tl::tma_load())) {
     // MP31 TME load arguments are descriptor, barrier, shared pointer,
     // rank coordinates and rank box dimensions.  The MP31 template exposes
     // rank-specific overloads, so keep this emission independent of T.copy.

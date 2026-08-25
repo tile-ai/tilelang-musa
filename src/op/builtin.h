@@ -121,6 +121,8 @@ static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
+static constexpr const char *kEnableMusaTmaPrefetch =
+    "tl.enable_musa_tma_prefetch";
 static constexpr const char *kDisableLoopUnswitching =
     "tl.disable_loop_unswitching";
 // Allow loop unswitching even when the else-version of the loop body is

@@ -23,8 +23,11 @@ using namespace ffi;
 
 class LowerTMEIntrinPass : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
-    LowerTMEIntrinPass pass;
+  explicit LowerTMEIntrinPass(bool enable_prefetch)
+      : enable_prefetch_(enable_prefetch) {}
+
+  static PrimFunc Substitute(PrimFunc f, bool enable_prefetch) {
+    LowerTMEIntrinPass pass(enable_prefetch);
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = pass.VisitStmt(f->body);
 
@@ -47,6 +50,33 @@ public:
   }
 
 private:
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    bool is_thread_extent = op->attr_key == tirx::attr::thread_extent;
+    const auto *iter_var = op->node.as<IterVarNode>();
+    bool is_thread_idx_x =
+        iter_var != nullptr && iter_var->thread_tag == "threadIdx.x";
+    if (!is_thread_extent || !is_thread_idx_x) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    AttrStmt result = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+    if (!enable_prefetch_ || prefetch_calls_.empty()) {
+      return result;
+    }
+
+    Array<Stmt> body;
+    Stmt prefetch = prefetch_calls_.size() == 1
+                        ? prefetch_calls_[0]
+                        : Stmt(SeqStmt(prefetch_calls_));
+    body.push_back(IfThenElse(
+        Call(DataType::Bool(), Op::Get("tl.tl_shuffle_elect"), {32}),
+        prefetch));
+    body.push_back(result->body);
+    result.CopyOnWrite()->body = SeqStmt(body);
+    prefetch_calls_.clear();
+    return result;
+  }
+
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (!op->op.same_as(create_tma_descriptor())) {
       return StmtExprMutator::VisitExpr_(op);
@@ -71,6 +101,8 @@ private:
     init_args.insert(init_args.end(), op->args.begin(), op->args.end());
     desc_init_args_.Set(descriptor, init_args);
     desc_inits_.push_back({descriptor, init_args});
+    prefetch_calls_.push_back(Evaluate(Call(
+        DataType::Handle(), prefetch_tma_descriptor(), {descriptor})));
     return descriptor;
   }
 
@@ -153,18 +185,22 @@ private:
   Map<Var, Array<PrimExpr>> desc_init_args_;
   std::vector<std::pair<Var, Array<PrimExpr>>> desc_inits_;
   std::unordered_map<const VarNode *, int> barrier_base_;
+  Array<Stmt> prefetch_calls_;
+  bool enable_prefetch_{false};
 };
 
 namespace transform {
 using namespace tirx::transform;
 
 tvm::transform::Pass LowerTMEIntrin() {
-  auto pass_func = [=](PrimFunc f, const IRModule &, PassContext) {
+  auto pass_func = [=](PrimFunc f, const IRModule &, PassContext ctx) {
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     if (!target.defined() || !TargetIsMP31(target.value())) {
       return f;
     }
-    return LowerTMEIntrinPass::Substitute(std::move(f));
+    bool enable_prefetch =
+        ctx->GetConfig<Bool>(kEnableMusaTmaPrefetch, Bool(false)).value();
+    return LowerTMEIntrinPass::Substitute(std::move(f), enable_prefetch);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.musa.LowerTMEIntrin", {});
 }
