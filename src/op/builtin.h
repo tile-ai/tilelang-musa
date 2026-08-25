@@ -88,6 +88,8 @@ static constexpr const char *kEnableReducerPlanVerbose =
 static constexpr const char *kLayoutCostModel = "tl.layout_cost_model";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
+static constexpr const char *kEnableMusaTmaPrefetch =
+    "tl.enable_musa_tma_prefetch";
 static constexpr const char *kDisableLoopUnswitching =
     "tl.disable_loop_unswitching";
 static constexpr const char *kLoopUnswitchingAllowNonTrivialElse =

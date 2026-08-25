@@ -138,6 +138,9 @@ class PassConfigKey(str, Enum):
     v0.1.10.
     """
 
+    TL_ENABLE_MUSA_TMA_PREFETCH = "tl.enable_musa_tma_prefetch"
+    """Enable MP31 TME descriptor prefetch in the kernel prologue."""
+
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
     """Disable safe memory access optimization. Default: False"""
 
