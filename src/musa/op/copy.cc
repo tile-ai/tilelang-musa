@@ -208,6 +208,9 @@ LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
   // swizzle and split-box support will be added in later MP31 commits.
   Array<PrimExpr> global_shape = Reverse(global_buffer->shape);
   Array<PrimExpr> global_coords = ReverseRanges(global_range, false);
+  // Keep the descriptor's true global shape while the TME box follows the
+  // normalized shared tile. Coordinates plus box dimensions may cross the
+  // descriptor boundary; MP31 then fills those load elements with zero.
   Array<PrimExpr> box_dims = ReverseRanges(logical_shared_range, true);
   Array<PrimExpr> global_stride;
   if (!global_buffer->strides.empty()) {

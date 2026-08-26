@@ -24,6 +24,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         int rank = static_cast<int>(args[2].cast<int64_t>());
         ICHECK_GE(rank, 1);
         ICHECK_LE(rank, 5);
+        ICHECK_EQ(args.size(), static_cast<size_t>(rank * 4 + 8));
         void *global_addr = args[3].cast<void *>();
 
         muuint64_t global_dim[5] = {};
@@ -35,12 +36,15 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         for (int i = 0; i < rank; ++i) {
           global_stride[i] = args[index++].cast<muuint64_t>();
         }
+        auto oob_constant_fill =
+            static_cast<muuint64_t>(args[args.size() - 1].cast<int64_t>());
         // Skip shared-memory box/stride and the descriptor policy fields. The
-        // first MP31 slice uses no interleave and no swizzle.
+        // first MP31 slice uses no interleave and no swizzle. Forward the final
+        // descriptor argument as the hardware OOB fill constant.
         MUresult result = muTensorDescriptorEncode(
             desc, static_cast<MUtensorDescriptorDataType>(dtype), rank,
             global_addr, global_dim, global_stride + 1,
-            MU_TENSOR_DESCRIPTOR_INTERLEAVE_NONE, 0);
+            MU_TENSOR_DESCRIPTOR_INTERLEAVE_NONE, oob_constant_fill);
         ICHECK_EQ(result, MUSA_SUCCESS)
             << "Failed to initialize MP31 TME descriptor, error=" << result;
         *ret = static_cast<int>(result);
