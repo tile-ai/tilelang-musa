@@ -1199,6 +1199,17 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
       this->PrintExpr(op->args[i], os);
     }
     os << ")";
+  } else if (op->op.same_as(tl::tma_load_im2col())) {
+    ICHECK_EQ(op->args.size(), 15U);
+    need_mp31_tme_h_ = true;
+    os << "tl::tme_load_im2col(";
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      if (i != 0) {
+        os << ", ";
+      }
+      this->PrintExpr(op->args[i], os);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::tma_store())) {
     // MP31 TME store arguments are descriptor, shared pointer, rank
     // coordinates and rank box dimensions.

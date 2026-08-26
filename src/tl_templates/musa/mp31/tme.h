@@ -49,6 +49,20 @@ TL_DEVICE void prefetch_tma_descriptor(
   ::prefetch(&descriptor);
 }
 
+TL_DEVICE void tme_load_im2col(const MUtensorDescriptor &descriptor,
+                               int32_t barrier_id, void *smem_ptr,
+                               int32_t range_c, int32_t range_npq, int32_t c,
+                               int32_t q, int32_t p, int32_t n,
+                               int32_t weight_pos, int32_t output_p,
+                               int32_t output_q, int32_t conv_padding,
+                               int32_t conv_stride, int32_t conv_dilation) {
+  __musa::async_barrier barrier(barrier_id);
+  __musa::memcpy_async(barrier, smem_ptr, &descriptor,
+                       __musa::i2{range_c, range_npq}, __musa::i4{c, q, p, n},
+                       0, weight_pos, __musa::i2{output_q, output_p},
+                       __musa::i3{conv_padding, conv_stride, conv_dilation});
+}
+
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
                         int dim0) {
