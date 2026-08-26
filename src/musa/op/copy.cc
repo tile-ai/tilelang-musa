@@ -17,6 +17,7 @@
 
 #include "support/check.h"
 
+#include <optional>
 #include <vector>
 
 namespace tvm {
@@ -189,6 +190,78 @@ struct LoweredTMEDesc {
   Array<PrimExpr> global_coords;
   Array<PrimExpr> box_dims;
 };
+
+bool TmaDescriptorSupportsDataType(DataType dtype) {
+  if (dtype.is_bfloat16()) {
+    return true;
+  }
+  if (dtype.is_float()) {
+    return dtype.bits() == 16 || dtype.bits() == 32 || dtype.bits() == 64;
+  }
+  if (dtype.is_int() || dtype.is_uint()) {
+    return dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32 ||
+           dtype.bits() == 64;
+  }
+  return false;
+}
+
+std::optional<Array<PrimExpr>>
+GetTmaGlobalStrideBytes(const Buffer &global_buffer,
+                        arith::Analyzer *analyzer) {
+  const size_t rank = global_buffer->shape.size();
+  Array<PrimExpr> global_shape = Reverse(global_buffer->shape);
+  Array<PrimExpr> global_stride;
+  if (!global_buffer->strides.empty()) {
+    global_stride = Reverse(global_buffer->strides);
+  } else {
+    PrimExpr stride = Integer(1);
+    for (const PrimExpr &shape : global_shape) {
+      global_stride.push_back(stride);
+      stride = analyzer->Simplify(stride * shape);
+    }
+  }
+  if (global_stride.size() != rank ||
+      !analyzer->CanProveEqual(global_stride[0], Integer(1))) {
+    return std::nullopt;
+  }
+
+  Array<PrimExpr> result;
+  result.reserve(rank);
+  for (size_t i = 0; i < rank; ++i) {
+    PrimExpr stride =
+        analyzer->Simplify(global_stride[i] * global_buffer->dtype.bytes());
+    if (i != 0) {
+      if (const auto *imm = stride.as<IntImmNode>()) {
+        if (imm->value % 16 != 0) {
+          return std::nullopt;
+        }
+      }
+    }
+    result.push_back(cast(DataType::UInt(64), stride));
+  }
+  return result;
+}
+
+PrimExpr MakeIm2ColTmaDescriptor(const Buffer &global_buffer,
+                                 const Array<PrimExpr> &box_dims,
+                                 const Array<PrimExpr> &global_stride_bytes) {
+  size_t rank = global_buffer->shape.size();
+  ICHECK_EQ(rank, 4) << "MP31 TME im2col requires an NHWC 4D input";
+  Array<PrimExpr> global_shape = Reverse(global_buffer->shape);
+  TMEDesc desc{/*rank=*/rank,
+               /*data_type=*/GetTmaDescriptorDataType(global_buffer->dtype),
+               /*global_shape=*/global_shape,
+               /*global_stride=*/global_stride_bytes,
+               /*smem_box=*/box_dims,
+               /*smem_stride=*/Array<PrimExpr>(rank, Integer(1)),
+               /*global_addr=*/global_buffer->data,
+               /*interleave=*/0,
+               /*swizzle=*/0,
+               /*l2_promotion=*/0,
+               /*oob_fill=*/0};
+  return Call(DataType::Handle(), create_tma_descriptor(),
+              desc.EncodeCallArgs());
+}
 
 LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
                                  const Array<Range> &global_range,
@@ -474,6 +547,172 @@ struct Copy {
   }
 };
 
+struct Im2Col {
+  static Stmt Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                    arith::Analyzer *analyzer) {
+    ICHECK(TargetIsMP31(lower_args.target))
+        << "T.im2col is supported only on MP31 MUSA targets";
+    const Buffer &src = op.src_;
+    const Buffer &dst_unmapped = op.dst_;
+    const BufferRegion &dst_region = op.dstRegion_;
+    ICHECK(src.scope() == "global")
+        << "MP31 TME im2col requires a global input buffer";
+    ICHECK(dst_unmapped.scope() == "shared" ||
+           dst_unmapped.scope() == "shared.dyn")
+        << "MP31 TME im2col requires a shared-memory destination";
+    ICHECK_EQ(src->shape.size(), 4)
+        << "MP31 TME im2col requires a 4D NHWC input";
+    ICHECK_GE(dst_region->region.size(), 2)
+        << "MP31 TME im2col destination must have at least two dimensions";
+    ICHECK_EQ(dst_region->region.size(), dst_unmapped->shape.size())
+        << "MP31 TME im2col requires a complete destination region rank";
+    ICHECK(src->dtype == dst_unmapped->dtype)
+        << "MP31 TME im2col requires matching source/destination dtypes";
+    ICHECK(TmaDescriptorSupportsDataType(src->dtype))
+        << "MP31 TME im2col does not support dtype " << src->dtype;
+
+    int64_t kernel = op.kernel_;
+    int64_t stride = op.stride_;
+    int64_t dilation = op.dilation_;
+    int64_t padding = op.padding_;
+    ICHECK_GT(kernel, 0) << "MP31 TME im2col requires kernel > 0";
+    ICHECK_GT(stride, 0) << "MP31 TME im2col requires stride > 0";
+    ICHECK_GT(dilation, 0) << "MP31 TME im2col requires dilation > 0";
+    ICHECK_GE(padding, 0) << "MP31 TME im2col requires padding >= 0";
+
+    const size_t dst_rank = dst_region->region.size();
+    PrimExpr block_m = dst_region->region[dst_rank - 2]->extent;
+    PrimExpr block_k = dst_region->region[dst_rank - 1]->extent;
+    PrimExpr transaction_bytes =
+        analyzer->Simplify(block_m * block_k * dst_unmapped->dtype.bytes());
+    PrimExpr channel_bytes =
+        analyzer->Simplify(block_k * dst_unmapped->dtype.bytes());
+    ICHECK(analyzer->CanProveEqual(floormod(channel_bytes, Integer(16)),
+                                   Integer(0)))
+        << "MP31 TME im2col requires block_K * dtype_bytes to be 16-byte "
+           "aligned, got "
+        << channel_bytes << " bytes";
+
+    PrimExpr h = src->shape[1];
+    PrimExpr w = src->shape[2];
+    PrimExpr c = src->shape[3];
+    // One MP31 im2col transaction cannot cross a kernel-position channel
+    // slice. TileLang's c_step is a tile index, so C divisible by block_k
+    // guarantees every legal tile starts and ends within one such slice.
+    ICHECK(analyzer->CanProveEqual(floormod(c, block_k), Integer(0)))
+        << "MP31 TME im2col requires input channels to be divisible by "
+           "block_K";
+    auto global_stride_bytes = GetTmaGlobalStrideBytes(src, analyzer);
+    ICHECK(global_stride_bytes.has_value())
+        << "MP31 TME im2col requires a contiguous innermost dimension and "
+           "16-byte aligned outer strides";
+
+    PrimExpr pad_term = Integer(2 * padding - dilation * (kernel - 1) - 1);
+    PrimExpr p = analyzer->Simplify(floordiv(h + pad_term, stride) + 1);
+    PrimExpr q = analyzer->Simplify(floordiv(w + pad_term, stride) + 1);
+    PrimExpr m_start = analyzer->Simplify(op.nhw_step_ * block_m);
+    PrimExpr k_start = analyzer->Simplify(op.c_step_ * block_k);
+    PrimExpr rs = analyzer->Simplify(floordiv(k_start, c));
+    PrimExpr kernel_r = analyzer->Simplify(floordiv(rs, kernel));
+    PrimExpr kernel_s = analyzer->Simplify(floormod(rs, kernel));
+    // MP31 packs the W/S kernel position in the low byte and H/R in the next
+    // byte, matching the old architecture instruction contract.
+    PrimExpr weight_pos =
+        analyzer->Simplify(kernel_s + kernel_r * Integer(256));
+
+    Array<PrimExpr> box_dims = {block_k, block_m, Integer(1), Integer(1)};
+    PrimExpr descriptor =
+        MakeIm2ColTmaDescriptor(src, box_dims, global_stride_bytes.value());
+    Buffer shared = dst_unmapped;
+    if (lower_args.buffer_remap.count(shared)) {
+      shared = lower_args.buffer_remap.at(shared);
+    }
+    if (lower_args.require_smem_alignment) {
+      lower_args.require_smem_alignment(shared->data, 128);
+    }
+
+    PrimExpr shared_offset = Integer(0);
+    PrimExpr shared_stride = Integer(1);
+    for (size_t i = 0; i < dst_unmapped->shape.size(); ++i) {
+      size_t axis = dst_unmapped->shape.size() - i - 1;
+      shared_offset += dst_region->region[axis]->min * shared_stride;
+      shared_stride *= dst_unmapped->shape[axis];
+    }
+    shared_offset = analyzer->Simplify(shared_offset);
+    PrimExpr shared_ptr = shared.access_ptr(2, DataType::Handle(), 1,
+                                            shared_offset, block_m * block_k);
+
+    PrimExpr output_volume = analyzer->Simplify(p * q);
+    Array<PrimExpr> block_pos = {
+        analyzer->Simplify(floormod(k_start, c)),
+        analyzer->Simplify(floormod(floormod(m_start, output_volume), q)),
+        analyzer->Simplify(floordiv(floormod(m_start, output_volume), q)),
+        analyzer->Simplify(floordiv(m_start, output_volume))};
+
+    PrimExpr barrier;
+    bool user_managed_barrier = false;
+    if (auto user_barrier = op.annotations_.Get("barrier")) {
+      barrier = Downcast<PrimExpr>(user_barrier.value());
+      user_managed_barrier = true;
+    } else {
+      ICHECK(lower_args.alloc_mbarrier && lower_args.mbarrier_buffer != nullptr)
+          << "MP31 TME im2col requires mbarrier allocation support";
+      int barrier_slot =
+          lower_args.alloc_mbarrier(1, std::string("im2col_mbarrier"));
+      ICHECK(lower_args.mbarrier_buffer->defined());
+      barrier = BufferLoad(lower_args.mbarrier_buffer->value(),
+                           {IntImm(DataType::Int(32), barrier_slot)});
+    }
+
+    Array<PrimExpr> args = {descriptor,
+                            barrier,
+                            shared_ptr,
+                            block_k,
+                            block_m,
+                            block_pos[0],
+                            block_pos[1],
+                            block_pos[2],
+                            block_pos[3],
+                            weight_pos,
+                            p,
+                            q,
+                            Integer(padding * 257),
+                            Integer(65536 + stride * 257),
+                            Integer(65536 + dilation * 257)};
+    Stmt load =
+        Evaluate(Call(DataType::Handle(), tma_load_im2col(), std::move(args)));
+    Stmt expect = Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                                {barrier, transaction_bytes}));
+
+    Array<Stmt> producer_seq{expect, load};
+    if (user_managed_barrier) {
+      if (auto emit_arrive = op.annotations_.Get("emit_arrive")) {
+        if (Downcast<IntImm>(emit_arrive.value())->value != 0) {
+          producer_seq.push_back(Evaluate(Call(
+              DataType::Handle(), builtin::ptx_arrive_barrier(), {barrier})));
+        }
+      }
+    } else {
+      producer_seq.push_back(Evaluate(
+          Call(DataType::Handle(), builtin::ptx_arrive_barrier(), {barrier})));
+    }
+
+    Stmt producer = IfThenElse(Call(DataType::Bool(), tl_shuffle_elect(),
+                                    {lower_args.thread_bounds->extent}),
+                               SeqStmt(producer_seq));
+    if (user_managed_barrier) {
+      return producer;
+    }
+    PrimExpr phase = lower_args.mbar_phase_expr;
+    if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(op.annotations_)) {
+      phase = explicit_phase.value();
+    }
+    Stmt wait = Evaluate(
+        Call(DataType::Handle(), mbarrier_wait_parity(), {barrier, phase}));
+    return SeqStmt({producer, wait});
+  }
+};
+
 } // namespace musa
 
 namespace {
@@ -492,6 +731,18 @@ bool RegisterMUSACopy() {
 }
 
 const bool musa_copy_registered = RegisterMUSACopy();
+
+bool RegisterMUSAIm2Col() {
+  RegisterIm2ColImpl(Im2ColImpl{
+      "musa.Im2Col",
+      MatchMUSACopyTarget,
+      100,
+      musa::Im2Col::Lower,
+  });
+  return true;
+}
+
+const bool musa_im2col_registered = RegisterMUSAIm2Col();
 
 } // namespace
 
