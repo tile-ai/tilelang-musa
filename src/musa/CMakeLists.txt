@@ -65,12 +65,15 @@ endif()
 list(APPEND TILE_LANG_SRCS
   src/musa/codegen/codegen_musa.cc
   src/musa/codegen/intrin_rule_musa.cc
+  src/musa/layout/mp31_sqmma_layouts.cc
   src/musa/op/fast_divmod.cc
   src/musa/op/atomic_add.cc
   src/musa/op/atomic_reduce.cc
   src/musa/op/copy.cc
   src/musa/op/fill.cc
   src/musa/op/finalize_reducer.cc
+  src/musa/op/gemm.cc
+  src/musa/op/gemm/mp31_sqmma.cc
   src/musa/op/reduce.cc
   src/musa/op/scan.cc
   src/musa/op/transpose.cc
