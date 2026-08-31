@@ -11,6 +11,8 @@ TORCH_DTYPE_TO_TILELANG = {
     torch.bfloat16: "bfloat16",
     torch.int8: "int8",
     torch.uint8: "uint8",
+    torch.float8_e4m3fn: "float8_e4m3fn",
+    torch.float8_e5m2: "float8_e5m2",
 }
 
 TOLERANCE_BY_DTYPE = {
@@ -18,6 +20,8 @@ TOLERANCE_BY_DTYPE = {
     torch.bfloat16: (7.9e-3, 7.9e-3),
     torch.int8: (0.0, 0.0),
     torch.uint8: (0.0, 0.0),
+    torch.float8_e4m3fn: (1.25e-1, 1.25e-1),
+    torch.float8_e5m2: (2.5e-1, 2.5e-1),
 }
 
 ACCUM_DTYPE = {
@@ -25,6 +29,8 @@ ACCUM_DTYPE = {
     torch.bfloat16: "float32",
     torch.int8: "int32",
     torch.uint8: "int32",
+    torch.float8_e4m3fn: "float32",
+    torch.float8_e5m2: "float32",
 }
 
 OUTPUT_DTYPE = {
@@ -32,6 +38,8 @@ OUTPUT_DTYPE = {
     torch.bfloat16: "bfloat16",
     torch.int8: "int32",
     torch.uint8: "int32",
+    torch.float8_e4m3fn: "float32",
+    torch.float8_e5m2: "float32",
 }
 
 
