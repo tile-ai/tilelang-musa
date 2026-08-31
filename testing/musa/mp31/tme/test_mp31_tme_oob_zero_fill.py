@@ -92,7 +92,7 @@ def test_mp31_tme_oob_zero_fill_codegen():
         rank = len(shared_shape)
         call = next(line for line in source.splitlines() if "tl::tme_load(" in line)
         assert len(re.findall(r"\b32\b", call)) >= 1
-        assert call.count(",") == 2 * rank + 2
+        assert call.count(",") == 2 * rank + 5
         assert f"tl::tme_barrier_add_trans(1, {prod(shared_shape) * 4});" in source
 
 

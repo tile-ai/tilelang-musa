@@ -4,6 +4,7 @@
  */
 
 #include "layout/layout.h"
+#include "musa/layout/swizzle_layout.h"
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
@@ -23,47 +24,22 @@ int GetConstInt(const PrimExpr &value, const char *name) {
   return static_cast<int>(*const_value);
 }
 
-Layout MakeMP31SQMMAABSwizzleLayout(int rows, int cols, int element_size,
-                                    int swizzle_granularity, int swizzle_stride,
-                                    int swizzle_line) {
-  Var row = InputPlaceholder(0);
-  Var col = InputPlaceholder(1);
-  PrimExpr addr = (row * cols + col) * (element_size / 8);
-
-  PrimExpr line_id = FloorDiv(addr, swizzle_line);
-  PrimExpr line_offset = FloorMod(addr, swizzle_line);
-  PrimExpr granules_per_stride = swizzle_stride / swizzle_granularity;
-  PrimExpr cycle_line_id = FloorMod(line_id, granules_per_stride);
-  PrimExpr granule_id = FloorDiv(line_offset, swizzle_granularity);
-  PrimExpr granule_offset = FloorMod(line_offset, swizzle_granularity);
-  PrimExpr target_granule_id = granule_id ^ cycle_line_id;
-  PrimExpr target_addr = line_id * swizzle_line +
-                         target_granule_id * swizzle_granularity +
-                         granule_offset;
-
-  PrimExpr target_linear = FloorDiv(target_addr, element_size / 8);
-  return Layout(Array<PrimExpr>{rows, cols},
-                {FloorDiv(target_linear, cols), FloorMod(target_linear, cols)});
-}
-
 Layout MakeMP31SQMMASharedAB(const tirx::Buffer &buffer, bool k_major) {
   ICHECK(buffer.defined()) << "MP31 SQMMA shared layout expects a buffer";
   ICHECK_EQ(buffer->shape.size(), 2)
       << "MP31 SQMMA shared layout expects a 2D buffer, got rank="
       << buffer->shape.size();
 
-  const int rows = GetConstInt(buffer->shape[0], "rows");
-  const int cols = GetConstInt(buffer->shape[1], "cols");
   const int element_size = buffer->dtype.bits();
   ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
       << "Unsupported MP31 SQMMA shared layout with element_size="
       << element_size;
 
-  const int sg = k_major ? 16 : element_size * 2;
-  constexpr int kSwizzleStride = 256;
-  constexpr int kSwizzleLine = 256;
-  return MakeMP31SQMMAABSwizzleLayout(rows, cols, element_size, sg,
-                                      kSwizzleStride, kSwizzleLine);
+  const SwizzleGranularity sg =
+      k_major ? SwizzleGranularity::k16B
+              : static_cast<SwizzleGranularity>(element_size * 2);
+  const SwizzleLayout swizzle{sg, SwizzleStride::k256B, SwizzleLine::k256B};
+  return MakeSwizzleLayout(buffer, swizzle);
 }
 
 Fragment MakeMP31SQMMAFragmentC(const Array<PrimExpr> &buffer_shape, int warp_m,

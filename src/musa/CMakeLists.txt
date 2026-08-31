@@ -66,6 +66,7 @@ list(APPEND TILE_LANG_SRCS
   src/musa/codegen/codegen_musa.cc
   src/musa/codegen/intrin_rule_musa.cc
   src/musa/layout/mp31_sqmma_layouts.cc
+  src/musa/layout/swizzle_layout.cc
   src/musa/op/fast_divmod.cc
   src/musa/op/atomic_add.cc
   src/musa/op/atomic_reduce.cc
