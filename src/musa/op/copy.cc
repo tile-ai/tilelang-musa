@@ -56,6 +56,21 @@ constexpr int kDescInt16 = 2;
 constexpr int kDescUInt16 = 3;
 constexpr int kDescFloat16 = 4;
 constexpr int kDescBFloat16 = 5;
+
+SwizzleLayout GetSwizzleParams(const Buffer &shared_buffer,
+                               const LowerArgs &args) {
+  const SwizzleLayout no_swizzle{SwizzleGranularity::kNone,
+                                 SwizzleStride::k256B, SwizzleLine::k256B};
+  if (shared_buffer->shape.size() != 2) {
+    return no_swizzle;
+  }
+  auto layout_it = args.layout_map.find(shared_buffer);
+  if (layout_it == args.layout_map.end()) {
+    return no_swizzle;
+  }
+
+  return AnalyzeSwizzleLayout(shared_buffer, (*layout_it).second);
+}
 constexpr int kDescInt32 = 6;
 constexpr int kDescUInt32 = 7;
 constexpr int kDescFloat32 = 8;
@@ -277,8 +292,9 @@ LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
          "unmatched dimensions must have extent one";
 
   // TME descriptors are expressed in bytes and use the innermost dimension
-  // first. Restrict the first vertical slice to a row-major contiguous tile;
-  // swizzle and split-box support will be added in later MP31 commits.
+  // first. Restrict the first vertical slice to a row-major contiguous tile.
+  // MP31 shared-memory swizzle is selected by the device TME instruction and
+  // therefore does not change this global tensor descriptor.
   Array<PrimExpr> global_shape = Reverse(global_buffer->shape);
   Array<PrimExpr> global_coords = ReverseRanges(global_range, false);
   // Keep the descriptor's true global shape while the TME box follows the
@@ -375,6 +391,11 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
   LoweredTMEDesc lowered =
       MakeTmaDescriptor(op.src, op.src_range, op.dst_range, analyzer);
   PrimExpr shared_ptr = MakeTmaSharedPtr(op.dst, op.dst_range, /*rw_mask=*/2);
+  SwizzleLayout swizzle = GetSwizzleParams(op.dst, args);
+  if (swizzle.swizzle_granularity != SwizzleGranularity::kNone &&
+      args.require_smem_alignment) {
+    args.require_smem_alignment(op.dst->data, 256);
+  }
 
   Array<PrimExpr> tma_args;
   tma_args.push_back(lowered.descriptor);
@@ -384,6 +405,9 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
                   lowered.global_coords.end());
   tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
                   lowered.box_dims.end());
+  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_granularity)));
+  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_stride)));
+  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_line)));
   Stmt load = Evaluate(Call(DataType::Handle(), tma_load(), tma_args));
 
   PrimExpr bytes = 1;
@@ -411,6 +435,11 @@ Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
   LoweredTMEDesc lowered =
       MakeTmaDescriptor(op.dst, op.dst_range, op.src_range, analyzer);
   PrimExpr shared_ptr = MakeTmaSharedPtr(op.src, op.src_range, /*rw_mask=*/1);
+  SwizzleLayout swizzle = GetSwizzleParams(op.src, args);
+  if (swizzle.swizzle_granularity != SwizzleGranularity::kNone &&
+      args.require_smem_alignment) {
+    args.require_smem_alignment(op.src->data, 256);
+  }
 
   Array<PrimExpr> tma_args;
   tma_args.push_back(lowered.descriptor);
@@ -419,6 +448,9 @@ Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
                   lowered.global_coords.end());
   tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
                   lowered.box_dims.end());
+  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_granularity)));
+  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_stride)));
+  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_line)));
   Stmt store = Evaluate(Call(DataType::Handle(), tma_store(), tma_args));
   Stmt commit = Evaluate(Call(DataType::Handle(), tma_store_arrive(), {}));
   return IfThenElse(EQ(args.thread_index, args.thread_bounds->min),

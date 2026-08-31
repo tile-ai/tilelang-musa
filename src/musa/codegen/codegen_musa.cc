@@ -1267,22 +1267,31 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::tma_load())) {
     // MP31 TME load arguments are descriptor, barrier, shared pointer,
-    // rank coordinates and rank box dimensions.  The MP31 template exposes
-    // rank-specific overloads, so keep this emission independent of T.copy.
-    ICHECK_GE(op->args.size(), 5U);
-    ICHECK_EQ((op->args.size() - 3) % 2, 0U);
-    size_t rank = (op->args.size() - 3) / 2;
+    // rank coordinates, rank box dimensions, and swizzle parameters.  The
+    // MP31 template exposes rank-specific overloads, so keep this emission
+    // independent of T.copy.
+    ICHECK_GE(op->args.size(), 8U);
+    ICHECK_EQ((op->args.size() - 6) % 2, 0U);
+    size_t rank = (op->args.size() - 6) / 2;
     ICHECK_GE(rank, 1U);
     ICHECK_LE(rank, 5U);
     need_mp31_tme_h_ = true;
     os << "tl::tme_load(";
-    for (size_t i = 0; i < op->args.size(); ++i) {
+    const size_t swizzle_begin = op->args.size() - 3;
+    for (size_t i = 0; i < swizzle_begin; ++i) {
       if (i != 0) {
         os << ", ";
       }
       this->PrintExpr(op->args[i], os);
     }
-    os << ")";
+    os << ", tl::SwizzleLayout{";
+    for (size_t i = swizzle_begin; i < op->args.size(); ++i) {
+      if (i != swizzle_begin) {
+        os << ", ";
+      }
+      this->PrintExpr(op->args[i], os);
+    }
+    os << "})";
   } else if (op->op.same_as(tl::tma_load_im2col())) {
     ICHECK_EQ(op->args.size(), 15U);
     need_mp31_tme_h_ = true;
@@ -1296,21 +1305,29 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::tma_store())) {
     // MP31 TME store arguments are descriptor, shared pointer, rank
-    // coordinates and rank box dimensions.
-    ICHECK_GE(op->args.size(), 4U);
-    ICHECK_EQ((op->args.size() - 2) % 2, 0U);
-    size_t rank = (op->args.size() - 2) / 2;
+    // coordinates, rank box dimensions, and swizzle parameters.
+    ICHECK_GE(op->args.size(), 7U);
+    ICHECK_EQ((op->args.size() - 5) % 2, 0U);
+    size_t rank = (op->args.size() - 5) / 2;
     ICHECK_GE(rank, 1U);
     ICHECK_LE(rank, 5U);
     need_mp31_tme_h_ = true;
     os << "tl::tme_store(";
-    for (size_t i = 0; i < op->args.size(); ++i) {
+    const size_t swizzle_begin = op->args.size() - 3;
+    for (size_t i = 0; i < swizzle_begin; ++i) {
       if (i != 0) {
         os << ", ";
       }
       this->PrintExpr(op->args[i], os);
     }
-    os << ")";
+    os << ", tl::SwizzleLayout{";
+    for (size_t i = swizzle_begin; i < op->args.size(); ++i) {
+      if (i != swizzle_begin) {
+        os << ", ";
+      }
+      this->PrintExpr(op->args[i], os);
+    }
+    os << "})";
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     ICHECK_EQ(op->args.size(), 0U);
     need_mp31_tme_h_ = true;

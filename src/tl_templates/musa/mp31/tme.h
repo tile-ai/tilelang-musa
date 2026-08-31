@@ -16,6 +16,44 @@ namespace tl {
 #define TL_DEVICE __forceinline__ __device__
 #endif
 
+struct SwizzleLayout {
+  // Values are byte sizes; the Encode* helpers below convert them to MTCC
+  // enum encodings at the device API boundary.
+  int swizzle_granularity;
+  int swizzle_stride;
+  int swizzle_line;
+};
+
+TL_DEVICE int EncodeSwizzleGranularity(int value) {
+  switch (value) {
+  case 16:
+    return __musa::SG_16B;
+  case 32:
+    return __musa::SG_32B;
+  case 64:
+    return __musa::SG_64B;
+  default:
+    return __musa::SG_NONE;
+  }
+}
+
+TL_DEVICE int EncodeSwizzleStride(int value) {
+  switch (value) {
+  case 32:
+    return __musa::SS_32B;
+  case 64:
+    return __musa::SS_64B;
+  case 128:
+    return __musa::SS_128B;
+  default:
+    return __musa::SS_256B;
+  }
+}
+
+TL_DEVICE int EncodeSwizzleLine(int value) {
+  return value == 128 ? __musa::SL_128B : __musa::SL_256B;
+}
+
 TL_DEVICE void tme_barrier_record(int barrier_id) {
   __musa::async_barrier barrier(barrier_id);
 }
@@ -64,101 +102,125 @@ TL_DEVICE void tme_load_im2col(const MUtensorDescriptor &descriptor,
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
-                        int dim0) {
+                        int dim0, SwizzleLayout swizzle) {
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dim0, coord0, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                       EncodeSwizzleStride(swizzle.swizzle_stride),
+                       EncodeSwizzleLine(swizzle.swizzle_line),
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
-                        int coord1, int dim0, int dim1) {
+                        int coord1, int dim0, int dim1, SwizzleLayout swizzle) {
   __musa::i2 coord = {coord0, coord1};
   __musa::i2 dims = {dim0, dim1};
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dims, coord, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                       EncodeSwizzleStride(swizzle.swizzle_stride),
+                       EncodeSwizzleLine(swizzle.swizzle_line),
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
-                        int coord1, int coord2, int dim0, int dim1, int dim2) {
+                        int coord1, int coord2, int dim0, int dim1, int dim2,
+                        SwizzleLayout swizzle) {
   __musa::i3 coord = {coord0, coord1, coord2};
   __musa::i3 dims = {dim0, dim1, dim2};
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dims, coord, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                       EncodeSwizzleStride(swizzle.swizzle_stride),
+                       EncodeSwizzleLine(swizzle.swizzle_line),
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
                         int coord1, int coord2, int coord3, int dim0, int dim1,
-                        int dim2, int dim3) {
+                        int dim2, int dim3, SwizzleLayout swizzle) {
   __musa::i4 coord = {coord0, coord1, coord2, coord3};
   __musa::i4 dims = {dim0, dim1, dim2, dim3};
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dims, coord, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                       EncodeSwizzleStride(swizzle.swizzle_stride),
+                       EncodeSwizzleLine(swizzle.swizzle_line),
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
                         int coord1, int coord2, int coord3, int coord4,
-                        int dim0, int dim1, int dim2, int dim3, int dim4) {
+                        int dim0, int dim1, int dim2, int dim3, int dim4,
+                        SwizzleLayout swizzle) {
   __musa::i5 coord = {coord0, coord1, coord2, coord3, coord4};
   __musa::i5 dims = {dim0, dim1, dim2, dim3, dim4};
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dims, coord, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                       EncodeSwizzleStride(swizzle.swizzle_stride),
+                       EncodeSwizzleLine(swizzle.swizzle_line),
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
-                         const void *smem_ptr, int coord0, int dim0) {
-  __musa::memcpy(smem_ptr, &descriptor, dim0, coord0, __musa::SG_NONE,
-                 __musa::SS_256B, __musa::SL_256B);
+                         const void *smem_ptr, int coord0, int dim0,
+                         SwizzleLayout swizzle) {
+  __musa::memcpy(smem_ptr, &descriptor, dim0, coord0,
+                 EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                 EncodeSwizzleStride(swizzle.swizzle_stride),
+                 EncodeSwizzleLine(swizzle.swizzle_line));
 }
 
 TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
                          const void *smem_ptr, int coord0, int coord1, int dim0,
-                         int dim1) {
+                         int dim1, SwizzleLayout swizzle) {
   __musa::i2 coord = {coord0, coord1};
   __musa::i2 dims = {dim0, dim1};
-  __musa::memcpy(smem_ptr, &descriptor, dims, coord, __musa::SG_NONE,
-                 __musa::SS_256B, __musa::SL_256B);
+  __musa::memcpy(smem_ptr, &descriptor, dims, coord,
+                 EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                 EncodeSwizzleStride(swizzle.swizzle_stride),
+                 EncodeSwizzleLine(swizzle.swizzle_line));
 }
 
 TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
                          const void *smem_ptr, int coord0, int coord1,
-                         int coord2, int dim0, int dim1, int dim2) {
+                         int coord2, int dim0, int dim1, int dim2,
+                         SwizzleLayout swizzle) {
   __musa::i3 coord = {coord0, coord1, coord2};
   __musa::i3 dims = {dim0, dim1, dim2};
-  __musa::memcpy(smem_ptr, &descriptor, dims, coord, __musa::SG_NONE,
-                 __musa::SS_256B, __musa::SL_256B);
+  __musa::memcpy(smem_ptr, &descriptor, dims, coord,
+                 EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                 EncodeSwizzleStride(swizzle.swizzle_stride),
+                 EncodeSwizzleLine(swizzle.swizzle_line));
 }
 
 TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
                          const void *smem_ptr, int coord0, int coord1,
                          int coord2, int coord3, int dim0, int dim1, int dim2,
-                         int dim3) {
+                         int dim3, SwizzleLayout swizzle) {
   __musa::i4 coord = {coord0, coord1, coord2, coord3};
   __musa::i4 dims = {dim0, dim1, dim2, dim3};
-  __musa::memcpy(smem_ptr, &descriptor, dims, coord, __musa::SG_NONE,
-                 __musa::SS_256B, __musa::SL_256B);
+  __musa::memcpy(smem_ptr, &descriptor, dims, coord,
+                 EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                 EncodeSwizzleStride(swizzle.swizzle_stride),
+                 EncodeSwizzleLine(swizzle.swizzle_line));
 }
 
 TL_DEVICE void tme_store(const MUtensorDescriptor &descriptor,
                          const void *smem_ptr, int coord0, int coord1,
                          int coord2, int coord3, int coord4, int dim0, int dim1,
-                         int dim2, int dim3, int dim4) {
+                         int dim2, int dim3, int dim4, SwizzleLayout swizzle) {
   __musa::i5 coord = {coord0, coord1, coord2, coord3, coord4};
   __musa::i5 dims = {dim0, dim1, dim2, dim3, dim4};
-  __musa::memcpy(smem_ptr, &descriptor, dims, coord, __musa::SG_NONE,
-                 __musa::SS_256B, __musa::SL_256B);
+  __musa::memcpy(smem_ptr, &descriptor, dims, coord,
+                 EncodeSwizzleGranularity(swizzle.swizzle_granularity),
+                 EncodeSwizzleStride(swizzle.swizzle_stride),
+                 EncodeSwizzleLine(swizzle.swizzle_line));
 }
 
 TL_DEVICE void tme_store_commit() {
