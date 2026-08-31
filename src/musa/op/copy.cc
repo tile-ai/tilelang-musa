@@ -87,6 +87,11 @@ PrimExpr GetTmaBarrier(const CopyNode &op) {
 }
 
 int GetTmaDescriptorDataType(DataType dtype) {
+  // MUSA TME descriptors have no native FP8 data type. FP8 values are
+  // byte-preserving for TME, so describe them as UINT8 in the descriptor.
+  if (dtype.is_float8()) {
+    return kDescUInt8;
+  }
   if (dtype.is_bfloat16()) {
     return kDescBFloat16;
   }
