@@ -487,6 +487,9 @@ std::string CodeGenMUSA::Finish() {
   if (need_mp31_sqmma_h_) {
     decl_stream << "#include <tl_templates/musa/mp31/sqmma.h>\n";
   }
+  if (need_mp31_wmma_h_) {
+    decl_stream << "#include <tl_templates/musa/mp31/wmma.h>\n";
+  }
   if (need_cvt_h_) {
     decl_stream << "#include <tl_templates/musa/common/cvt.h>\n";
   }
@@ -1157,6 +1160,9 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
   }
   if (static_cast<std::string>(global_symbol).rfind("tl::sqmma_", 0) == 0) {
     need_mp31_sqmma_h_ = true;
+  }
+  if (static_cast<std::string>(global_symbol).rfind("tl::wmma_", 0) == 0) {
+    need_mp31_wmma_h_ = true;
   }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   if (ret_dtype.is_fixed_length_vector()) {
