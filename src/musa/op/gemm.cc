@@ -6,6 +6,7 @@
 #include "op/gemm.h"
 
 #include "musa/op/gemm/mp31_sqmma.h"
+#include "musa/op/gemm/mp31_wmma.h"
 #include "musa/target_utils.h"
 
 #include <tvm/runtime/logging.h>
@@ -21,20 +22,30 @@ namespace musa {
 
 struct Gemm {
   static String SelectInst(const GemmNode &op, int block_size, Target target) {
-    if (!op.annotations_.Get("is_sqmma")) {
-      LOG(FATAL) << "MUSA T.gemm instruction selection is not implemented; "
-                    "use T.sqmma_gemm to request MP31 SQMMA explicitly";
+    if (op.annotations_.Get("is_wmma")) {
+      ICHECK(TargetIsMP31(target))
+          << "T.wmma_gemm is only supported on MP31, target=" << target;
+      return mp31::WMMA::SelectInst(op, block_size, target);
     }
-    if (TargetIsMP31(target)) {
+
+    if (op.annotations_.Get("is_sqmma")) {
+      ICHECK(TargetIsMP31(target))
+          << "T.sqmma_gemm is only supported on MP31, target=" << target;
       return mp31::SQMMA::SelectInst(op, block_size, target);
     }
-    LOG(FATAL) << "T.sqmma_gemm is only supported on MP31, target=" << target;
+
+    LOG(FATAL) << "MUSA T.gemm instruction selection is not implemented; "
+                  "use T.sqmma_gemm or T.wmma_gemm explicitly";
     return {};
   }
 
   static std::pair<int, int>
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, String gemm_inst) {
+    if (mp31::WMMA::IsInstruction(gemm_inst)) {
+      return mp31::WMMA::ComputeWarpPartition(policy, M, N, block_size, target,
+                                              gemm_inst);
+    }
     if (mp31::SQMMA::IsInstruction(gemm_inst)) {
       return mp31::SQMMA::ComputeWarpPartition(policy, M, N, block_size, target,
                                                gemm_inst);
@@ -45,6 +56,9 @@ struct Gemm {
   }
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
+    if (mp31::WMMA::IsInstruction(gemm_inst)) {
+      return mp31::WMMA::ReuseExistingSharedLayout(gemm_inst);
+    }
     if (mp31::SQMMA::IsInstruction(gemm_inst)) {
       return mp31::SQMMA::ReuseExistingSharedLayout(gemm_inst);
     }
@@ -70,6 +84,18 @@ TVM_REGISTER_OP("tl.tileop.sqmma_gemm")
                                        IntImm(DataType::Int(32), 1));
                                return Gemm(args, ann);
                              });
+
+TVM_REGISTER_OP("tl.tileop.wmma_gemm")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "wmma_gemm")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_wmma", IntImm(DataType::Int(32), 1));
+                               return Gemm(args, ann);
+                             })
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
 bool MatchMUSAGemmTarget(Target target) { return TargetIsMUSA(target); }
 

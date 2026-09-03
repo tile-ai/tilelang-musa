@@ -46,3 +46,43 @@ def make_mp31_sqmma_fragment_c(
     if inst_shape is None:
         inst_shape = []
     return _ffi_api.make_mp31_sqmma_fragment_c(buffer_shape, int(warp_m), int(warp_n), list(inst_shape))
+
+
+def make_mp31_wmma_fragment_a(
+    buffer: BufferLikeType,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    transposed: bool,
+    inst_shape: tuple[int, int, int] | list[int],
+) -> Fragment:
+    """Create the MP31 WMMA A fragment layout."""
+
+    _, buffer_shape, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_mp31_wmma_fragment_a(buffer_shape, int(warp_m), int(warp_n), int(element_size), bool(transposed), list(inst_shape))
+
+
+def make_mp31_wmma_fragment_b(
+    buffer: BufferLikeType,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    transposed: bool,
+    inst_shape: tuple[int, int, int] | list[int],
+) -> Fragment:
+    """Create the MP31 WMMA B fragment layout."""
+
+    _, buffer_shape, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_mp31_wmma_fragment_b(buffer_shape, int(warp_m), int(warp_n), int(element_size), bool(transposed), list(inst_shape))
+
+
+def make_mp31_wmma_fragment_c(
+    buffer: BufferLikeType,
+    warp_m: int,
+    warp_n: int,
+    inst_shape: tuple[int, int, int] | list[int],
+) -> Fragment:
+    """Create the MP31 WMMA accumulator fragment layout."""
+
+    _, buffer_shape, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_mp31_wmma_fragment_c(buffer_shape, int(warp_m), int(warp_n), list(inst_shape))
