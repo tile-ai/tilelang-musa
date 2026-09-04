@@ -47,14 +47,35 @@ bool IsPipelineManagedAsyncCopy(const CopyNode &op) {
   return false;
 }
 
-bool PreferAsyncCopy(const CopyNode &op) {
+std::string GetCopyPreference(const CopyNode &op) {
   auto value = op.annotations.Get("prefer_instruction");
   if (!value) {
-    return false;
+    return "";
   }
   const auto *prefer = value->as<StringImmNode>();
   ICHECK(prefer) << "T.copy prefer_instruction annotation must be a string";
-  return prefer->value == "cp_async";
+  return prefer->value;
+}
+
+bool PreferAsyncCopy(const CopyNode &op) {
+  return GetCopyPreference(op) == "cp_async";
+}
+
+bool PreferTmaCopy(const CopyNode &op) {
+  return GetCopyPreference(op) == "tma";
+}
+
+bool PreferSyncCopy(const CopyNode &op) {
+  return GetCopyPreference(op) == "sync";
+}
+
+bool DisableTmaCopy(const CopyNode &op) {
+  if (auto value = op.annotations.Get("disable_tma")) {
+    const auto *flag = value->as<IntImmNode>();
+    ICHECK(flag) << "T.copy disable_tma annotation must be a boolean";
+    return flag->value != 0;
+  }
+  return false;
 }
 
 bool IsExplicitTmaCopy(const CopyNode &op) {
@@ -281,6 +302,29 @@ GetTmaGlobalStrideBytes(const Buffer &global_buffer,
   return result;
 }
 
+bool CanLowerTmeTensorCopy(const Buffer &global_buffer,
+                           const Array<Range> &global_range,
+                           const Array<Range> &shared_range,
+                           arith::Analyzer *analyzer) {
+  const size_t rank = global_range.size();
+  if (rank < 1 || rank > 5 || global_buffer->shape.size() != rank ||
+      !TmaDescriptorSupportsDataType(global_buffer->dtype) ||
+      !GetTmaGlobalStrideBytes(global_buffer, analyzer).has_value()) {
+    return false;
+  }
+
+  Array<Range> aligned_shared_range;
+  return AlignTmeSharedRangeToGlobal(global_range, shared_range, analyzer,
+                                     &aligned_shared_range);
+}
+
+bool CanAutoSelectTmeStore(const CopyNode &op, const CopyAnalysisContext &ctx) {
+  return TargetIsMP31(ctx.target) && IsSharedBuffer(op.src) &&
+         IsGlobalBuffer(op.dst) && op.src->dtype == op.dst->dtype &&
+         CanLowerTmeTensorCopy(op.dst, op.dst_range, op.src_range,
+                               ctx.analyzer);
+}
+
 PrimExpr MakeIm2ColTmaDescriptor(const Buffer &global_buffer,
                                  const Array<PrimExpr> &box_dims,
                                  const Array<PrimExpr> &global_stride_bytes) {
@@ -405,7 +449,6 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
                   arith::Analyzer *analyzer) {
   ICHECK(TargetIsMP31(args.target))
       << "MP31 TME load requires an MP31 MUSA target, got " << args.target;
-  ICHECK(IsExplicitTmaCopy(op)) << "MUSA MP31 TME lowering requires T.tma_copy";
   ICHECK(IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst))
       << "MP31 TME load only supports global-to-shared copies, got src="
       << op.src.scope() << ", dst=" << op.dst.scope();
@@ -421,9 +464,20 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
     args.require_smem_alignment(op.dst->data, 256);
   }
 
+  PrimExpr barrier;
+  if (IsExplicitTmaCopy(op)) {
+    barrier = GetTmaBarrier(op);
+  } else {
+    ICHECK(args.alloc_mbarrier)
+        << "T.copy TME load requires an mbarrier allocator";
+    int barrier_index = args.alloc_mbarrier(1, "tme_copy_mbarrier");
+    barrier =
+        BufferLoad((*args.mbarrier_buffer).value(), {Integer(barrier_index)});
+  }
+
   Array<PrimExpr> tma_args;
   tma_args.push_back(lowered.descriptor);
-  tma_args.push_back(GetTmaBarrier(op));
+  tma_args.push_back(barrier);
   tma_args.push_back(shared_ptr);
   tma_args.insert(tma_args.end(), lowered.global_coords.begin(),
                   lowered.global_coords.end());
@@ -439,17 +493,25 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
     bytes *= dim;
   }
   bytes = analyzer->Simplify(bytes * op.dst->dtype.bytes());
-  Stmt expect = Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
-                              {GetTmaBarrier(op), bytes}));
+  Stmt expect = Evaluate(
+      Call(DataType::Handle(), mbarrier_expect_tx(), {barrier, bytes}));
   load = SeqStmt({expect, load});
-  return IfThenElse(EQ(args.thread_index, args.thread_bounds->min), load);
+  PrimExpr leader = EQ(args.thread_index, args.thread_bounds->min);
+  if (IsExplicitTmaCopy(op)) {
+    return IfThenElse(leader, load);
+  }
+  Stmt arrive = Evaluate(
+      Call(DataType::Handle(), builtin::ptx_arrive_barrier(), {barrier}));
+  Stmt issue = IfThenElse(leader, SeqStmt({load, arrive}));
+  Stmt wait = Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
+                            {barrier, args.mbar_phase_expr}));
+  return SeqStmt({issue, wait});
 }
 
 Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
                    arith::Analyzer *analyzer) {
   ICHECK(TargetIsMP31(args.target))
       << "MP31 TME store requires an MP31 MUSA target, got " << args.target;
-  ICHECK(IsExplicitTmaCopy(op)) << "MUSA MP31 TME lowering requires T.tma_copy";
   ICHECK(IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst))
       << "MP31 TME store only supports shared-to-global copies, got src="
       << op.src.scope() << ", dst=" << op.dst.scope();
@@ -477,8 +539,14 @@ Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
   tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_line)));
   Stmt store = Evaluate(Call(DataType::Handle(), tma_store(), tma_args));
   Stmt commit = Evaluate(Call(DataType::Handle(), tma_store_arrive(), {}));
-  return IfThenElse(EQ(args.thread_index, args.thread_bounds->min),
-                    SeqStmt({store, commit}));
+  Stmt issue = IfThenElse(EQ(args.thread_index, args.thread_bounds->min),
+                          SeqStmt({store, commit}));
+  if (IsExplicitTmaCopy(op)) {
+    return issue;
+  }
+  Stmt wait = Evaluate(
+      Call(DataType::Handle(), tl::tma_store_wait(), {Integer(0), Integer(1)}));
+  return SeqStmt({issue, wait});
 }
 
 Stmt LowerAsyncCopy(const CopyNode &op, const LowerArgs &lower_args,
@@ -568,6 +636,12 @@ bool CopyInstIsAsync(CopyInst inst) { return inst == CopyInst::kAsync; }
 
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx) {
+  const std::string preference = GetCopyPreference(op);
+  if (!preference.empty() && preference != "tma" && preference != "cp_async" &&
+      preference != "sync") {
+    return {CopyInst::kInvalid, false,
+            "Unknown copy prefer_instruction=\"" + preference + "\""};
+  }
   if (IsExplicitTmaCopy(op)) {
     if (!TargetIsMP31(ctx.target)) {
       return {CopyInst::kInvalid, false,
@@ -584,9 +658,38 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
             "T.tma_copy() only supports global-to-shared loads or "
             "shared-to-global stores on MP31"};
   }
-  if (IsExplicitAsyncCopy(op) || IsPipelineManagedAsyncCopy(op) ||
-      PreferAsyncCopy(op)) {
+  if (PreferTmaCopy(op)) {
+    if (DisableTmaCopy(op)) {
+      return {CopyInst::kInvalid, false,
+              "T.copy prefer_instruction=\"tma\" conflicts with "
+              "disable_tma=True"};
+    }
+    if (!TargetIsMP31(ctx.target)) {
+      return {CopyInst::kInvalid, false,
+              "T.copy prefer_instruction=\"tma\" is supported only on MP31 "
+              "MUSA targets"};
+    }
+    if (IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst)) {
+      return {CopyInst::kTMELoad, true, {}};
+    }
+    if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst)) {
+      return {CopyInst::kTMEStore, true, {}};
+    }
+    return {CopyInst::kInvalid, false,
+            "T.copy prefer_instruction=\"tma\" only supports "
+            "global-to-shared loads or shared-to-global stores on MP31"};
+  }
+  if (IsExplicitAsyncCopy(op) || PreferAsyncCopy(op)) {
     return {CopyInst::kAsync, true, {}};
+  }
+  if (PreferSyncCopy(op)) {
+    return {CopyInst::kNormal, true, {}};
+  }
+  if (IsPipelineManagedAsyncCopy(op)) {
+    return {CopyInst::kAsync, true, {}};
+  }
+  if (!DisableTmaCopy(op) && CanAutoSelectTmeStore(op, ctx)) {
+    return {CopyInst::kTMEStore, true, {}};
   }
   return {CopyInst::kNormal, true, {}};
 }
