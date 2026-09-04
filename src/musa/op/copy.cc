@@ -6,10 +6,10 @@
 #include "musa/op/copy.h"
 
 #include "backend/common/target_utils.h"
-#include "musa/transform/async_copy_injector.h"
-#include "musa/op/builtin.h"
 #include "musa/layout/swizzle_layout.h"
+#include "musa/op/builtin.h"
 #include "musa/target_utils.h"
+#include "musa/transform/async_copy_injector.h"
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
@@ -36,6 +36,25 @@ bool IsExplicitAsyncCopy(const CopyNode &op) {
     }
   }
   return false;
+}
+
+bool IsPipelineManagedAsyncCopy(const CopyNode &op) {
+  if (auto value = op.annotations.Get(attr::kAsyncCopyNoImplicitCommitWait)) {
+    if (const auto *flag = value.value().as<IntImmNode>()) {
+      return flag->value != 0;
+    }
+  }
+  return false;
+}
+
+bool PreferAsyncCopy(const CopyNode &op) {
+  auto value = op.annotations.Get("prefer_instruction");
+  if (!value) {
+    return false;
+  }
+  const auto *prefer = value->as<StringImmNode>();
+  ICHECK(prefer) << "T.copy prefer_instruction annotation must be a string";
+  return prefer->value == "cp_async";
 }
 
 bool IsExplicitTmaCopy(const CopyNode &op) {
@@ -494,14 +513,31 @@ Stmt LowerAsyncCopy(const CopyNode &op, const LowerArgs &lower_args,
       lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
       /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
-  auto injected = InjectMUSAAsyncCopy(
-      lowered_loop, /*async_without_async_commit_wait=*/true);
-  ICHECK(injected.injected_ptx_async_copy)
-      << "T.async_copy requires an eligible global-to-shared vectorized copy.";
+  const bool explicit_async = IsExplicitAsyncCopy(op);
+  const bool pipeline_managed = IsPipelineManagedAsyncCopy(op);
+  auto injected =
+      InjectMUSAAsyncCopy(lowered_loop, /*async_without_async_commit_wait=*/
+                          explicit_async || pipeline_managed);
+  if (!injected.injected_ptx_async_copy) {
+    ICHECK(!explicit_async)
+        << "T.async_copy requires an eligible global-to-shared vectorized "
+           "copy; no SIMT fallback is allowed.";
+    ICHECK(!PreferAsyncCopy(op))
+        << "T.copy(prefer_instruction=\"cp_async\") requires an eligible "
+           "global-to-shared vectorized copy; no SIMT fallback is allowed.";
+    return lowered_loop;
+  }
 
-  Stmt commit_group =
-      Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
-  return SeqStmt({injected.stmt, commit_group});
+  if (explicit_async) {
+    Stmt commit_group =
+        Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
+    return SeqStmt({injected.stmt, commit_group});
+  }
+
+  // A pipeline-managed copy leaves commit/wait ownership to the enclosing
+  // software pipeline.  A regular T.copy preference keeps synchronous copy
+  // semantics; InjectMUSAAsyncCopy(false) has already appended commit+wait.
+  return injected.stmt;
 }
 
 } // namespace
@@ -548,7 +584,8 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
             "T.tma_copy() only supports global-to-shared loads or "
             "shared-to-global stores on MP31"};
   }
-  if (IsExplicitAsyncCopy(op)) {
+  if (IsExplicitAsyncCopy(op) || IsPipelineManagedAsyncCopy(op) ||
+      PreferAsyncCopy(op)) {
     return {CopyInst::kAsync, true, {}};
   }
   return {CopyInst::kNormal, true, {}};
