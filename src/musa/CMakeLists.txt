@@ -78,6 +78,7 @@ list(APPEND TILE_LANG_SRCS
   src/musa/op/gemm.cc
   src/musa/op/gemm/mp31_sqmma.cc
   src/musa/op/gemm/mp31_wmma.cc
+  src/musa/op/memory.cc
   src/musa/op/reduce.cc
   src/musa/op/scan.cc
   src/musa/op/transpose.cc
