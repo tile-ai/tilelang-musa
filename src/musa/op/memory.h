@@ -13,6 +13,7 @@ namespace musa {
 
 TVM_DLL const Op &lsu_ld_cache_hint();
 TVM_DLL const Op &lsu_ld_volatile_cache_hint();
+TVM_DLL const Op &fence_sys();
 
 } // namespace musa
 } // namespace tl
