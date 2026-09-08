@@ -6,5 +6,6 @@ from tilelang.musa import distributed as _impl
 from tilelang.musa.distributed import *  # noqa: F401,F403
 
 sys.modules[f"{__name__}.shared_memory"] = _impl.shared_memory
+sys.modules[f"{__name__}.musa_ipc"] = _impl.musa_ipc
 
 __all__ = _impl.__all__
