@@ -109,6 +109,14 @@ bool IsExplicitTmaCopy(const CopyNode &op) {
   return false;
 }
 
+bool GetBoolAnnotation(const CopyNode &op, const char *key) {
+  if (auto value = op.annotations.Get(key)) {
+    if (const auto *flag = value->as<IntImmNode>()) {
+      return flag->value != 0;
+    }
+  }
+  return false;
+}
 // Values are part of the stable MUSA descriptor ABI. Including musa.h in
 // this host compiler translation unit conflicts with TileLang's CUDA stubs;
 // the MP31 device template includes the authoritative toolkit header instead.
@@ -597,6 +605,56 @@ PrimExpr MakeTmaSharedPtr(const Buffer &shared_buffer,
                                   shared_elements);
 }
 
+struct ContiguousTmaRegion {
+  PrimExpr offset;
+  PrimExpr elements;
+};
+
+ContiguousTmaRegion AnalyzeContiguousTmaRegion(const Buffer &buffer,
+                                               const Array<Range> &ranges,
+                                               arith::Analyzer *analyzer,
+                                               const char *label) {
+  const size_t rank = buffer->shape.size();
+  ICHECK_EQ(ranges.size(), rank) << "Runtime-pointer TME " << label
+                                 << " region rank must match its buffer rank";
+
+  int first_non_unit = -1;
+  PrimExpr elements = 1;
+  Array<PrimExpr> indices;
+  for (size_t i = 0; i < rank; ++i) {
+    elements *= ranges[i]->extent;
+    indices.push_back(ranges[i]->min);
+    if (first_non_unit < 0 && !analyzer->CanProveEqual(ranges[i]->extent, 1)) {
+      first_non_unit = static_cast<int>(i);
+    }
+  }
+
+  if (first_non_unit >= 0) {
+    for (size_t i = static_cast<size_t>(first_non_unit + 1); i < rank; ++i) {
+      ICHECK(analyzer->CanProveEqual(ranges[i]->extent, buffer->shape[i]))
+          << "Runtime-pointer TME " << label
+          << " region must be contiguous; trailing dimension " << i
+          << " is not fully covered";
+    }
+
+    if (!buffer->strides.empty()) {
+      PrimExpr expected_stride = 1;
+      for (size_t i = rank; i-- > static_cast<size_t>(first_non_unit);) {
+        ICHECK(analyzer->CanProveEqual(buffer->strides[i], expected_stride))
+            << "Runtime-pointer TME " << label
+            << " region requires compact trailing strides";
+        expected_stride *= buffer->shape[i];
+      }
+    }
+  }
+
+  Array<PrimExpr> physical_indices = buffer.OffsetOf(indices);
+  ICHECK(!physical_indices.empty())
+      << "Runtime-pointer TME " << label << " region has no physical offset";
+  return {analyzer->Simplify(physical_indices.back()),
+          analyzer->Simplify(elements)};
+}
+
 Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
                   arith::Analyzer *analyzer) {
   ICHECK(TargetIsMP31(args.target))
@@ -606,6 +664,34 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
       << op.src.scope() << ", dst=" << op.dst.scope();
   ICHECK_EQ(op.src->dtype, op.dst->dtype)
       << "MP31 TME load requires matching source and destination dtypes";
+
+  if (GetBoolAnnotation(op, "musa_runtime_pointer_tme")) {
+    ICHECK(IsExplicitTmaCopy(op))
+        << "Runtime-pointer TME loads require explicit T.tma_copy";
+    ICHECK_EQ(GetSwizzleParams(op.dst, args).swizzle_granularity,
+              SwizzleGranularity::kNone)
+        << "Runtime-pointer TME loads do not support swizzled shared layouts";
+    ICHECK(!GetPanelizedCols(op.dst, args).has_value())
+        << "Runtime-pointer TME loads do not support panelized shared layouts";
+    ContiguousTmaRegion global_region =
+        AnalyzeContiguousTmaRegion(op.src, op.src_range, analyzer, "source");
+    ContiguousTmaRegion shared_region = AnalyzeContiguousTmaRegion(
+        op.dst, op.dst_range, analyzer, "destination");
+    ICHECK(
+        analyzer->CanProveEqual(global_region.elements, shared_region.elements))
+        << "Runtime-pointer TME requires matching source/shared extents";
+    PrimExpr bytes =
+        analyzer->Simplify(global_region.elements * op.src->dtype.bytes());
+    PrimExpr global_ptr = op.src.access_ptr(
+        /*access_mask=*/1, DataType::Handle(), /*content_lanes=*/1,
+        global_region.offset, global_region.elements);
+    PrimExpr shared_ptr = MakeTmaSharedPtr(op.dst, op.dst_range, args, analyzer,
+                                           /*rw_mask=*/2);
+    PrimExpr barrier = GetTmaBarrier(op);
+    Stmt load = Evaluate(Call(DataType::Handle(), tma_load(),
+                              {shared_ptr, global_ptr, barrier, bytes}));
+    return IfThenElse(EQ(args.thread_index, args.thread_bounds->min), load);
+  }
 
   SwizzleLayout swizzle = GetSwizzleParams(op.dst, args);
   if (swizzle.swizzle_granularity != SwizzleGranularity::kNone &&
@@ -685,6 +771,35 @@ Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
       << op.src.scope() << ", dst=" << op.dst.scope();
   ICHECK_EQ(op.src->dtype, op.dst->dtype)
       << "MP31 TME store requires matching source and destination dtypes";
+
+  if (GetBoolAnnotation(op, "musa_runtime_pointer_tme")) {
+    ICHECK(IsExplicitTmaCopy(op))
+        << "Runtime-pointer TME stores require explicit T.tma_copy";
+    ICHECK_EQ(GetSwizzleParams(op.src, args).swizzle_granularity,
+              SwizzleGranularity::kNone)
+        << "Runtime-pointer TME stores do not support swizzled shared layouts";
+    ICHECK(!GetPanelizedCols(op.src, args).has_value())
+        << "Runtime-pointer TME stores do not support panelized shared layouts";
+    ContiguousTmaRegion shared_region =
+        AnalyzeContiguousTmaRegion(op.src, op.src_range, analyzer, "source");
+    ContiguousTmaRegion global_region = AnalyzeContiguousTmaRegion(
+        op.dst, op.dst_range, analyzer, "destination");
+    ICHECK(
+        analyzer->CanProveEqual(shared_region.elements, global_region.elements))
+        << "Runtime-pointer TME requires matching shared/destination extents";
+    PrimExpr bytes =
+        analyzer->Simplify(global_region.elements * op.dst->dtype.bytes());
+    PrimExpr global_ptr = op.dst.access_ptr(
+        /*access_mask=*/2, DataType::Handle(), /*content_lanes=*/1,
+        global_region.offset, global_region.elements);
+    PrimExpr shared_ptr = MakeTmaSharedPtr(op.src, op.src_range, args, analyzer,
+                                           /*rw_mask=*/1);
+    Stmt store = Evaluate(
+        Call(DataType::Handle(), tma_store(), {global_ptr, shared_ptr, bytes}));
+    Stmt commit = Evaluate(Call(DataType::Handle(), tma_store_arrive(), {}));
+    return IfThenElse(EQ(args.thread_index, args.thread_bounds->min),
+                      SeqStmt({store, commit}));
+  }
 
   SwizzleLayout swizzle = GetSwizzleParams(op.src, args);
   if (swizzle.swizzle_granularity != SwizzleGranularity::kNone &&

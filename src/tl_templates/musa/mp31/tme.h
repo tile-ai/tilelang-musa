@@ -86,6 +86,17 @@ TL_DEVICE void prefetch_tma_descriptor(const MUtensorDescriptor &descriptor) {
   ::prefetch(&descriptor);
 }
 
+TL_DEVICE void tme_load_runtime_pointer(void *smem_ptr, const void *gmem_ptr,
+                                        int32_t barrier_id, uint32_t bytes) {
+  __musa::async_barrier barrier(barrier_id);
+  __musa::memcpy_async_blk(smem_ptr, gmem_ptr, bytes, barrier);
+}
+
+TL_DEVICE void tme_store_runtime_pointer(void *gmem_ptr, const void *smem_ptr,
+                                         uint32_t bytes) {
+  __musa::memcpy_blk(smem_ptr, gmem_ptr, bytes);
+}
+
 TL_DEVICE void tme_load_im2col(const MUtensorDescriptor &descriptor,
                                int32_t barrier_id, void *smem_ptr,
                                int32_t range_c, int32_t range_npq, int32_t c,
