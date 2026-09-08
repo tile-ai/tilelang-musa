@@ -4,9 +4,96 @@ from __future__ import annotations
 
 from tilelang import tvm as tvm
 from tilelang._typing import BufferLikeType
+from tilelang.language.copy_op import copy as _common_copy
 from tilelang.language.copy_op import tma_copy as _common_tma_copy
 from tilelang.language.frame import has_let_value
 from tilelang.language.utils import get_extent
+
+from .memory import (
+    _COHERENCE,
+    _INNER_PERSISTENCE,
+    _L2_POLICY,
+    _OUTER_PERSISTENCE,
+    normalize_lsu_hint,
+)
+
+
+def copy(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+    *,
+    coalesced_width: int | None = None,
+    disable_tma: bool = False,
+    eviction_policy: str | None = None,
+    prefer_instruction: str | None = None,
+    annotations: dict | None = None,
+    loop_layout=None,
+    inner_cache_policy: str | int | None = None,
+    outer_cache_policy: str | int | None = None,
+    chrnt: str | int | None = None,
+    l2: str | int | None = None,
+    is_volatile: bool | None = None,
+):
+    """Copy data with optional MUSA LSU load-cache policies."""
+
+    lsu_mode = any(
+        value is not None
+        for value in (
+            inner_cache_policy,
+            outer_cache_policy,
+            chrnt,
+            l2,
+            is_volatile,
+        )
+    )
+    ann = dict(annotations or {})
+    if lsu_mode:
+        if eviction_policy is not None or prefer_instruction in ("tma", "cp_async"):
+            raise ValueError("MUSA LSU cache hints require normal synchronous copy")
+        if is_volatile is not None and not isinstance(is_volatile, bool):
+            raise TypeError(f"is_volatile must be bool, got {type(is_volatile)}")
+        ann.update(
+            {
+                "musa_lsu_cache_hint": 1,
+                "musa_lsu_inner": normalize_lsu_hint(
+                    4 if inner_cache_policy is None else inner_cache_policy,
+                    "inner_cache_policy",
+                    _INNER_PERSISTENCE,
+                    5,
+                ),
+                "musa_lsu_outer": normalize_lsu_hint(
+                    2 if outer_cache_policy is None else outer_cache_policy,
+                    "outer_cache_policy",
+                    _OUTER_PERSISTENCE,
+                    3,
+                ),
+                "musa_lsu_chrnt": normalize_lsu_hint(
+                    0 if chrnt is None else chrnt,
+                    "chrnt",
+                    _COHERENCE,
+                    1,
+                ),
+                "musa_lsu_l2": normalize_lsu_hint(
+                    0 if l2 is None else l2,
+                    "l2",
+                    _L2_POLICY,
+                    1,
+                ),
+                "musa_lsu_volatile": int(bool(is_volatile)),
+            }
+        )
+        prefer_instruction = "sync"
+
+    return _common_copy(
+        src,
+        dst,
+        coalesced_width=coalesced_width,
+        disable_tma=disable_tma,
+        eviction_policy=eviction_policy,
+        prefer_instruction=prefer_instruction,
+        annotations=ann,
+        loop_layout=loop_layout,
+    )
 
 
 def _runtime_pointer_buffer(value: BufferLikeType) -> tvm.tirx.Buffer | None:
@@ -88,4 +175,4 @@ def tma_copy(
     )
 
 
-__all__ = ["tma_copy"]
+__all__ = ["copy", "tma_copy"]
