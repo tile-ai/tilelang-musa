@@ -4,6 +4,20 @@
 
 namespace tl {
 
+template <int InnerPersistence = 4, int OuterPersistence = 2, int Chrnt = 0,
+          int L2CachePolicy = 0, bool IsVolatile = false, typename T>
+TL_DEVICE T lsu_ld_cache_hint(const T *ptr) {
+  static_assert(InnerPersistence >= 0 && InnerPersistence <= 5,
+                "invalid LSU inner persistence hint");
+  static_assert(OuterPersistence >= 0 && OuterPersistence <= 3,
+                "invalid LSU outer persistence hint");
+  static_assert(Chrnt >= 0 && Chrnt <= 1, "invalid LSU chrnt hint");
+  static_assert(L2CachePolicy >= 0 && L2CachePolicy <= 1,
+                "invalid LSU L2 cache policy");
+  return __lsu_ld_cache_hint(ptr, InnerPersistence, OuterPersistence, Chrnt,
+                             L2CachePolicy, IsVolatile);
+}
+
 TL_DEVICE uint4 load_global_128_peer_robust(const void *ptr) {
   // MTCC has no public vector peer-load wrapper with these cache controls.
   // The PH1/MP31 instruction form is therefore kept in the MP31 template.

@@ -47,6 +47,7 @@
 #include "literal/musa_int8_t.h"
 #include "musa/op/builtin.h"
 #include "musa/op/distributed.h"
+#include "musa/op/memory.h"
 #include "musa/target_utils.h"
 #include "op/builtin.h"
 #include "support/process_id.h"
@@ -1749,6 +1750,29 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
+  } else if (op->op.same_as(tl::musa::lsu_ld_cache_hint()) ||
+             op->op.same_as(tl::musa::lsu_ld_volatile_cache_hint())) {
+    ICHECK(tl::TargetIsMP31(target_))
+        << "T.lsu_ld_cache_hint is supported on MP31 only.";
+    need_mp31_lsu_h_ = true;
+    ICHECK_EQ(op->args.size(), 5U)
+        << "T.lsu_ld_cache_hint expects a load and four immediate hints.";
+    const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
+    ICHECK(load)
+        << "T.lsu_ld_cache_hint expects a BufferLoad as its first argument.";
+    ICHECK_EQ(load->indices.size(), 1U)
+        << "T.lsu_ld_cache_hint supports flattened 1D accesses only.";
+    const int inner = Downcast<IntImm>(op->args[1])->value;
+    const int outer = Downcast<IntImm>(op->args[2])->value;
+    const int coherence = Downcast<IntImm>(op->args[3])->value;
+    const int l2 = Downcast<IntImm>(op->args[4])->value;
+    const bool is_volatile =
+        op->op.same_as(tl::musa::lsu_ld_volatile_cache_hint());
+    auto buffer_ref =
+        this->GetBufferRef(op->dtype, load->buffer.get(), load->indices[0]);
+    os << "tl::lsu_ld_cache_hint<" << inner << ", " << outer << ", "
+       << coherence << ", " << l2 << ", " << (is_volatile ? "true" : "false")
+       << ">(&(" << buffer_ref << "))";
   } else if (op->op.same_as(tl::musa::ldg128_peer())) {
     ICHECK(tl::TargetIsMP31(target_))
         << "T.ldg128_peer is supported on MP31 only.";
