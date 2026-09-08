@@ -8,6 +8,7 @@
 #include "musa/target_utils.h"
 #include "op/utils.h"
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 
@@ -49,6 +50,44 @@ struct SQMMASquadTile {
   int64_t m;
   int64_t n;
 };
+
+void ValidateMatrixRegion(const BufferRegion &region, const char *name,
+                          int64_t rows, int64_t cols) {
+  ICHECK(region.defined()) << "MP31 SQMMA requires a defined " << name
+                           << " region";
+  const auto &ranges = region->region;
+  ICHECK_EQ(ranges.size(), region->buffer->shape.size())
+      << "MP31 SQMMA " << name << " region rank must match its buffer rank";
+  ICHECK_GE(ranges.size(), 2U)
+      << "MP31 SQMMA " << name << " region must be at least 2D";
+
+  arith::Analyzer analyzer;
+  for (size_t i = 0; i + 2 < ranges.size(); ++i) {
+    ICHECK(analyzer.CanProveEqual(ranges[i]->extent, 1))
+        << "MP31 SQMMA " << name
+        << " leading region dimensions must have extent one, but axis " << i
+        << " has extent " << ranges[i]->extent;
+  }
+  const size_t matrix_axis = ranges.size() - 2;
+  const PrimExpr expected_rows =
+      IntImm(ranges[matrix_axis]->extent.dtype(), rows);
+  const PrimExpr expected_cols =
+      IntImm(ranges[matrix_axis + 1]->extent.dtype(), cols);
+  ICHECK(analyzer.CanProveEqual(ranges[matrix_axis]->extent, expected_rows))
+      << "MP31 SQMMA " << name << " row extent must be " << rows << ", but got "
+      << ranges[matrix_axis]->extent;
+  ICHECK(analyzer.CanProveEqual(ranges[matrix_axis + 1]->extent, expected_cols))
+      << "MP31 SQMMA " << name << " column extent must be " << cols
+      << ", but got " << ranges[matrix_axis + 1]->extent;
+}
+
+void ValidateSQMMARegions(const GemmNode &op) {
+  ValidateMatrixRegion(op.aRegion_, "A", op.transA_ ? op.k_ : op.m_,
+                       op.transA_ ? op.m_ : op.k_);
+  ValidateMatrixRegion(op.bRegion_, "B", op.transB_ ? op.n_ : op.k_,
+                       op.transB_ ? op.k_ : op.n_);
+  ValidateMatrixRegion(op.cRegion_, "C", op.m_, op.n_);
+}
 
 bool IsMP31FP8(DataType dtype) {
   return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
@@ -159,6 +198,7 @@ SQMMASquadTile GetSquadTile(const GemmNode &op, int block_size, int m_warp,
       << "MP31 SQMMA requires B in shared scope, got " << op.b_.scope();
   ICHECK(IsFragmentBuffer(op.c_))
       << "MP31 SQMMA requires C in local.fragment scope, got " << op.c_.scope();
+  ValidateSQMMARegions(op);
 
   const int warp_size = TargetMUSAGetWarpSize(target);
   ICHECK_EQ(block_size % warp_size, 0);

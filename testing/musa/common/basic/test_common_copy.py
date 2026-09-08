@@ -149,7 +149,8 @@ def test_musa_copy_prefer_async_codegen_and_runtime():
 @tilelang.testing.requires_musa
 def test_musa_pipeline_copy_selects_async_codegen():
     target = tvm.target.Target({"kind": "musa"})
-    with target:
+    pass_configs = {"tl.disable_warp_specialized": True}
+    with target, tvm.transform.PassContext(config=pass_configs):
         artifact = tilelang.lower(
             _pipeline_copy_kernel,
             target=target,
@@ -166,6 +167,7 @@ def test_musa_pipeline_copy_selects_async_codegen():
         out_idx=[1],
         target={"kind": "musa"},
         execution_backend="tvm_ffi",
+        pass_configs=pass_configs,
     )
     src = torch.arange(4 * _M, dtype=torch.float32).reshape(4, _M)
     dst = kernel(src.to("musa"))

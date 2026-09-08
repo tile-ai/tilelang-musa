@@ -18,4 +18,20 @@ def LowerTMEIntrin():
     return _ffi_api.LowerTMEIntrin()  # type: ignore
 
 
-__all__ = ["LowerLDGSTG", "LowerFastDivmod", "LowerTMEIntrin"]
+def ProducerConsumerWarpSpecialized():
+    """Split eligible MP31 TME pipelines into producer and consumer warps."""
+    return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
+
+
+def LowerPartialThreadSync():
+    """Lower partial shared-memory sync to MP31 TME barriers."""
+    return _ffi_api.LowerPartialThreadSync()  # type: ignore
+
+
+__all__ = [
+    "LowerLDGSTG",
+    "LowerFastDivmod",
+    "LowerTMEIntrin",
+    "LowerPartialThreadSync",
+    "ProducerConsumerWarpSpecialized",
+]

@@ -88,6 +88,14 @@ struct CopyInstSelection {
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx);
 
+// Pre-layout producer classification used only by MP31 warp specialization.
+CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
+                                                      Target target);
+
+// Whether an ordinary copy can be managed as an async-copy producer by the
+// software pipeline when warp specialization is not applied.
+bool IsPipelineManagedAsyncCopy(const CopyNode &op, Target target);
+
 } // namespace musa
 } // namespace tl
 } // namespace tvm

@@ -82,7 +82,10 @@ list(APPEND TILE_LANG_SRCS
   src/musa/op/transpose.cc
   src/musa/transform/async_copy_injector.cc
   src/musa/transform/lower_ldg_stg.cc
+  src/musa/transform/lower_partial_thread_sync.cc
   src/musa/transform/lower_fast_divmod.cc
   src/musa/transform/lower_tme.cc
+  src/musa/transform/multi_version_buffer_rewriter.cc
+  src/musa/transform/producer_consumer_ws.cc
   src/musa/runtime.cc
 )
