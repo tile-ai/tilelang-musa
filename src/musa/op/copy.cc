@@ -38,7 +38,7 @@ bool IsExplicitAsyncCopy(const CopyNode &op) {
   return false;
 }
 
-bool IsPipelineManagedAsyncCopy(const CopyNode &op) {
+bool HasPipelineManagedAsyncAnnotation(const CopyNode &op) {
   if (auto value = op.annotations.Get(attr::kAsyncCopyNoImplicitCommitWait)) {
     if (const auto *flag = value.value().as<IntImmNode>()) {
       return flag->value != 0;
@@ -78,6 +78,27 @@ bool DisableTmaCopy(const CopyNode &op) {
   return false;
 }
 
+bool CanLowerTmeTensorCopy(const Buffer &global_buffer,
+                           const Array<Range> &global_range,
+                           const Array<Range> &shared_range,
+                           arith::Analyzer *analyzer);
+
+bool CanWarpSpecializeTmeLoad(const CopyNode &op, Target target) {
+  if (!TargetIsMP31(target) || !IsGlobalBuffer(op.src) ||
+      !IsSharedBuffer(op.dst) || op.src->dtype != op.dst->dtype ||
+      DisableTmaCopy(op) || PreferSyncCopy(op)) {
+    return false;
+  }
+  Array<Range> versioned_shared_range;
+  versioned_shared_range.push_back(Range::FromMinExtent(0, 1));
+  for (const Range &range : op.dst_range) {
+    versioned_shared_range.push_back(range);
+  }
+  arith::Analyzer analyzer;
+  return CanLowerTmeTensorCopy(op.src, op.src_range, versioned_shared_range,
+                               &analyzer);
+}
+
 bool IsExplicitTmaCopy(const CopyNode &op) {
   if (auto value = op.annotations.Get("is_tma_copy")) {
     if (const auto *flag = value->as<IntImmNode>()) {
@@ -101,7 +122,7 @@ SwizzleLayout GetSwizzleParams(const Buffer &shared_buffer,
                                const LowerArgs &args) {
   const SwizzleLayout no_swizzle{SwizzleGranularity::kNone,
                                  SwizzleStride::k256B, SwizzleLine::k256B};
-  if (shared_buffer->shape.size() != 2) {
+  if (shared_buffer->shape.size() < 2) {
     return no_swizzle;
   }
   auto layout_it = args.layout_map.find(shared_buffer);
@@ -582,7 +603,7 @@ Stmt LowerAsyncCopy(const CopyNode &op, const LowerArgs &lower_args,
       /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
   const bool explicit_async = IsExplicitAsyncCopy(op);
-  const bool pipeline_managed = IsPipelineManagedAsyncCopy(op);
+  const bool pipeline_managed = HasPipelineManagedAsyncAnnotation(op);
   auto injected =
       InjectMUSAAsyncCopy(lowered_loop, /*async_without_async_commit_wait=*/
                           explicit_async || pipeline_managed);
@@ -685,13 +706,63 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   if (PreferSyncCopy(op)) {
     return {CopyInst::kNormal, true, {}};
   }
-  if (IsPipelineManagedAsyncCopy(op)) {
+  if (HasPipelineManagedAsyncAnnotation(op)) {
     return {CopyInst::kAsync, true, {}};
   }
   if (!DisableTmaCopy(op) && CanAutoSelectTmeStore(op, ctx)) {
     return {CopyInst::kTMEStore, true, {}};
   }
   return {CopyInst::kNormal, true, {}};
+}
+
+CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
+                                                      Target target) {
+  const std::string preference = GetCopyPreference(op);
+  if (!preference.empty() && preference != "tma" && preference != "cp_async" &&
+      preference != "sync") {
+    return {CopyInst::kInvalid, false,
+            "Unknown copy prefer_instruction=\"" + preference + "\""};
+  }
+  if (IsExplicitTmaCopy(op) || PreferTmaCopy(op)) {
+    if (!IsExplicitTmaCopy(op) && DisableTmaCopy(op)) {
+      return {CopyInst::kInvalid, false,
+              "T.copy prefer_instruction=\"tma\" conflicts with "
+              "disable_tma=True"};
+    }
+    if (TargetIsMP31(target) && IsGlobalBuffer(op.src) &&
+        IsSharedBuffer(op.dst)) {
+      return {CopyInst::kTMELoad, true, {}};
+    }
+    return {CopyInst::kInvalid, false,
+            "MP31 warp-specialized TME producer must copy global-to-shared"};
+  }
+  if (IsExplicitAsyncCopy(op) || PreferAsyncCopy(op)) {
+    if (TargetMUSAHasAsyncCopy(target) && IsGlobalBuffer(op.src) &&
+        IsSharedBuffer(op.dst) && op.src->dtype == op.dst->dtype) {
+      return {CopyInst::kAsync, true, {}};
+    }
+    return {CopyInst::kInvalid, false,
+            "MP31 warp-specialized async producer must be an eligible "
+            "global-to-shared copy"};
+  }
+  if (PreferSyncCopy(op)) {
+    return {CopyInst::kNormal, true, {}};
+  }
+  if (CanWarpSpecializeTmeLoad(op, target)) {
+    return {CopyInst::kTMELoad, true, {}};
+  }
+  if (HasPipelineManagedAsyncAnnotation(op)) {
+    return {CopyInst::kAsync, true, {}};
+  }
+  return {CopyInst::kNormal, true, {}};
+}
+
+bool IsPipelineManagedAsyncCopy(const CopyNode &op, Target target) {
+  const std::string preference = GetCopyPreference(op);
+  return !IsExplicitTmaCopy(op) && !IsExplicitAsyncCopy(op) &&
+         preference.empty() && IsGlobalBuffer(op.src) &&
+         IsSharedBuffer(op.dst) && op.src->dtype == op.dst->dtype &&
+         TargetMUSAHasAsyncCopy(target);
 }
 
 struct Copy {

@@ -26,8 +26,8 @@ int GetConstInt(const PrimExpr &value, const char *name) {
 
 Layout MakeMP31SQMMASharedAB(const tirx::Buffer &buffer, bool k_major) {
   ICHECK(buffer.defined()) << "MP31 SQMMA shared layout expects a buffer";
-  ICHECK_EQ(buffer->shape.size(), 2)
-      << "MP31 SQMMA shared layout expects a 2D buffer, got rank="
+  ICHECK_GE(buffer->shape.size(), 2)
+      << "MP31 SQMMA shared layout expects at least a 2D buffer, got rank="
       << buffer->shape.size();
 
   const int element_size = buffer->dtype.bits();

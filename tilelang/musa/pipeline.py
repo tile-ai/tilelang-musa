@@ -13,6 +13,14 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     should_enable_race_check,
     should_force_let_inline,
 )
+from tilelang.musa.target import target_get_arch
+
+
+def _allow_warp_specialized(target: Target) -> bool:
+    if target_get_arch(target) != "mp_31":
+        return False
+    pass_ctx = tilelang.transform.get_pass_context()
+    return not pass_ctx.config.get("tl.disable_warp_specialized", False)
 
 
 def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
@@ -28,6 +36,9 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.VerifyParallelLoop()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
+    mod = tilelang.transform.VerifyBufferInit()(mod)
+    if _allow_warp_specialized(target):
+        mod = tilelang.musa.transform.ProducerConsumerWarpSpecialized()(mod)
     mod = tilelang.transform.IfStmtBinding()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
@@ -85,6 +96,8 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    if _allow_warp_specialized(target):
+        mod = tilelang.musa.transform.LowerPartialThreadSync()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)

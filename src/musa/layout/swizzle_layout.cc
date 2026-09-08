@@ -13,12 +13,13 @@ using namespace tirx;
 Layout MakeSwizzleLayout(const tirx::Buffer &buffer,
                          const SwizzleLayout &swizzle) {
   ICHECK(buffer.defined()) << "Swizzle layout expects a defined buffer";
-  ICHECK_EQ(buffer->shape.size(), 2)
-      << "Swizzle layout expects a 2D buffer, got rank="
+  ICHECK_GE(buffer->shape.size(), 2)
+      << "Swizzle layout expects at least a 2D buffer, got rank="
       << buffer->shape.size();
 
-  const int64_t *rows_ptr = as_const_int(buffer->shape[0]);
-  const int64_t *cols_ptr = as_const_int(buffer->shape[1]);
+  const size_t rank = buffer->shape.size();
+  const int64_t *rows_ptr = as_const_int(buffer->shape[rank - 2]);
+  const int64_t *cols_ptr = as_const_int(buffer->shape[rank - 1]);
   ICHECK(rows_ptr && cols_ptr)
       << "Swizzle layout requires constant buffer shape";
   const int rows = static_cast<int>(*rows_ptr);
@@ -37,7 +38,12 @@ Layout MakeSwizzleLayout(const tirx::Buffer &buffer,
   ICHECK_GT(sl, 0);
   ICHECK_EQ(ss % sg, 0) << "Swizzle stride must be divisible by granularity";
 
-  Var row = InputPlaceholder(0), col = InputPlaceholder(1);
+  Array<PrimExpr> output;
+  output.reserve(rank);
+  for (size_t i = 0; i + 2 < rank; ++i) {
+    output.push_back(InputPlaceholder(i));
+  }
+  Var row = InputPlaceholder(rank - 2), col = InputPlaceholder(rank - 1);
   PrimExpr addr = (row * cols + col) * (element_size / 8);
   PrimExpr line_id = FloorDiv(addr, sl);
   PrimExpr line_offset = FloorMod(addr, sl);
@@ -47,18 +53,20 @@ Layout MakeSwizzleLayout(const tirx::Buffer &buffer,
   PrimExpr target_granule_id = granule_id ^ cycle_line_id;
   PrimExpr target_addr = line_id * sl + target_granule_id * sg + granule_offset;
   PrimExpr target_linear = FloorDiv(target_addr, element_size / 8);
-  return Layout(Array<PrimExpr>{rows, cols},
-                {FloorDiv(target_linear, cols), FloorMod(target_linear, cols)});
+  output.push_back(FloorDiv(target_linear, cols));
+  output.push_back(FloorMod(target_linear, cols));
+  return Layout(buffer->shape, output);
 }
 
 SwizzleLayout AnalyzeSwizzleLayout(const tirx::Buffer &buffer,
                                    const Layout &layout) {
-  if (!buffer.defined() || !layout.defined() || buffer->shape.size() != 2) {
+  if (!buffer.defined() || !layout.defined() || buffer->shape.size() < 2) {
     return {SwizzleGranularity::kNone, SwizzleStride::k256B,
             SwizzleLine::k256B};
   }
-  const int64_t *rows_ptr = as_const_int(buffer->shape[0]);
-  const int64_t *cols_ptr = as_const_int(buffer->shape[1]);
+  const size_t rank = buffer->shape.size();
+  const int64_t *rows_ptr = as_const_int(buffer->shape[rank - 2]);
+  const int64_t *cols_ptr = as_const_int(buffer->shape[rank - 1]);
   if (rows_ptr == nullptr || cols_ptr == nullptr) {
     return {SwizzleGranularity::kNone, SwizzleStride::k256B,
             SwizzleLine::k256B};
