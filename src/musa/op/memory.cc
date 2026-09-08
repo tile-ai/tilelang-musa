@@ -35,6 +35,16 @@ TVM_REGISTER_OP("tl.musa.lsu_ld_volatile_cache_hint")
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+const Op &fence_sys() {
+  static const Op &op = Op::Get("tl.musa.fence_sys");
+  return op;
+}
+TVM_REGISTER_OP("tl.musa.fence_sys")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "fence_sys")
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 } // namespace musa
 } // namespace tl
 } // namespace tvm

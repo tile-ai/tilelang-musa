@@ -81,4 +81,10 @@ def lsu_ld_cache_hint(
     )
 
 
-__all__ = ["lsu_ld_cache_hint"]
+def fence_sys() -> None:
+    """Order prior device writes at system scope."""
+
+    return tvm.tirx.call_intrin("handle", tvm.ir.Op.get("tl.musa.fence_sys"))
+
+
+__all__ = ["fence_sys", "lsu_ld_cache_hint"]

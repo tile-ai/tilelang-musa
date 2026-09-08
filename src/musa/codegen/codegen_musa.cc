@@ -1750,6 +1750,9 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
+  } else if (op->op.same_as(tl::musa::fence_sys())) {
+    ICHECK_EQ(op->args.size(), 0U) << "T.fence_sys expects no arguments.";
+    os << "__threadfence_system()";
   } else if (op->op.same_as(tl::musa::lsu_ld_cache_hint()) ||
              op->op.same_as(tl::musa::lsu_ld_volatile_cache_hint())) {
     ICHECK(tl::TargetIsMP31(target_))
