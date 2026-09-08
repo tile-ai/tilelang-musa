@@ -72,6 +72,7 @@ list(APPEND TILE_LANG_SRCS
   src/musa/op/atomic_add.cc
   src/musa/op/atomic_reduce.cc
   src/musa/op/copy.cc
+  src/musa/op/distributed.cc
   src/musa/op/fill.cc
   src/musa/op/finalize_reducer.cc
   src/musa/op/gemm.cc

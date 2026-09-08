@@ -46,6 +46,8 @@
 #include "literal/musa_half_t.h"
 #include "literal/musa_int8_t.h"
 #include "musa/op/builtin.h"
+#include "musa/op/distributed.h"
+#include "musa/target_utils.h"
 #include "op/builtin.h"
 #include "support/process_id.h"
 #include "support/utils.h"
@@ -220,7 +222,10 @@ std::string MUSAGetFP4Type(DataType type) {
 
 CodeGenMUSA::CodeGenMUSA() { restrict_keyword_ = "__restrict__"; }
 
-void CodeGenMUSA::Init(bool output_ssa) { CodeGenC::Init(output_ssa); }
+void CodeGenMUSA::Init(bool output_ssa, Target target) {
+  CodeGenC::Init(output_ssa);
+  target_ = std::move(target);
+}
 
 void CodeGenMUSA::PrintFunctionSignature(const ffi::String &function_name,
                                          const PrimFunc &func,
@@ -480,6 +485,12 @@ std::string CodeGenMUSA::Finish() {
   }
   if (need_ldg_stg_h_) {
     decl_stream << "#include <tl_templates/musa/common/ldg_stg.h>\n";
+  }
+  if (need_mp31_lsu_h_) {
+    decl_stream << "#include <tl_templates/musa/mp31/lsu.h>\n";
+  }
+  if (need_mp31_peer_reduce_h_) {
+    decl_stream << "#include <tl_templates/musa/mp31/peer_reduce.h>\n";
   }
   if (need_mp31_tme_h_) {
     decl_stream << "#include <tl_templates/musa/mp31/tme.h>\n";
@@ -1139,6 +1150,11 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
                                   const ffi::Array<PrimExpr> &args,
                                   bool skip_first_arg,
                                   std::ostream &os) { // NOLINT(*)
+  if (global_symbol == "tl::peer_signal_store") {
+    ICHECK(tl::TargetIsMP31(target_))
+        << "tl::peer_signal_store is supported on MP31 only.";
+    need_mp31_lsu_h_ = true;
+  }
   if (global_symbol == "tl::fast_div" || global_symbol == "tl::fast_mod") {
     need_fast_divmod_h_ = true;
   }
@@ -1733,6 +1749,61 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
+  } else if (op->op.same_as(tl::musa::ldg128_peer())) {
+    ICHECK(tl::TargetIsMP31(target_))
+        << "T.ldg128_peer is supported on MP31 only.";
+    need_mp31_lsu_h_ = true;
+    ICHECK_EQ(op->args.size(), 1U)
+        << "T.ldg128_peer expects one pointer argument.";
+    os << "tl::load_global_128_peer_robust(";
+    this->PrintExpr(op->args[0], os);
+    os << ")";
+  } else if (op->op.same_as(tl::musa::stg128_peer())) {
+    ICHECK(tl::TargetIsMP31(target_))
+        << "T.stg128_peer is supported on MP31 only.";
+    need_mp31_lsu_h_ = true;
+    ICHECK_EQ(op->args.size(), 2U)
+        << "T.stg128_peer expects pointer and value arguments.";
+    os << "tl::store_global_128_peer_streaming(";
+    this->PrintExpr(op->args[0], os);
+    os << ", ";
+    this->PrintExpr(op->args[1], os);
+    os << ")";
+  } else if (op->op.same_as(tl::musa::peer_warp_reduce128())) {
+    ICHECK(tl::TargetIsMP31(target_))
+        << "T.peer_warp_reduce128 is supported on MP31 only.";
+    ICHECK_EQ(op->args.size(), 3U)
+        << "T.peer_warp_reduce128 expects value, scratch, and dtype code.";
+    need_mp31_peer_reduce_h_ = true;
+    const auto *dtype_code = op->args[2].as<IntImmNode>();
+    ICHECK(dtype_code && dtype_code->value >= 0 && dtype_code->value <= 2)
+        << "T.peer_warp_reduce128 dtype code must be 0, 1, or 2.";
+    static const char *const helpers[] = {
+        "tl::peer_warp_reduce_fp16x8", "tl::peer_warp_reduce_bfloat16x8",
+        "tl::peer_warp_reduce_float32x4"};
+    os << helpers[dtype_code->value] << "(";
+    this->PrintExpr(op->args[0], os);
+    os << ", reinterpret_cast<float *>(";
+    this->PrintExpr(op->args[1], os);
+    os << "))";
+  } else if (op->op.same_as(tl::musa::peer_release_fence())) {
+    ICHECK(tl::TargetIsMP31(target_))
+        << "T.peer_release_fence is supported on MP31 only.";
+    ICHECK_EQ(op->args.size(), 0U)
+        << "T.peer_release_fence expects no arguments.";
+    need_mp31_lsu_h_ = true;
+    os << "tl::peer_release_fence()";
+  } else if (op->op.same_as(tl::musa::peer_signal_store())) {
+    ICHECK(tl::TargetIsMP31(target_))
+        << "T.peer_signal_store is supported on MP31 only.";
+    ICHECK_EQ(op->args.size(), 2U)
+        << "T.peer_signal_store expects pointer and value arguments.";
+    need_mp31_lsu_h_ = true;
+    os << "tl::peer_signal_store(";
+    this->PrintExpr(op->args[0], os);
+    os << ", ";
+    this->PrintExpr(op->args[1], os);
+    os << ")";
   } else if (op->op.same_as(tl::ldg32()) || op->op.same_as(tl::ldg64()) ||
              op->op.same_as(tl::ldg128()) || op->op.same_as(tl::ldg256())) {
     need_ldg_stg_h_ = true;
@@ -2653,7 +2724,7 @@ std::string MTCompile(const std::string &code, const Target &target) {
 ffi::Module BuildMUSA(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenMUSA cg;
-  cg.Init(output_ssa);
+  cg.Init(output_ssa, target);
 
   ffi::Map<GlobalVar, PrimFunc> functions;
   for (auto [gvar, base_func] : mod->functions) {
