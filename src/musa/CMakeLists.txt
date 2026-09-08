@@ -90,4 +90,5 @@ list(APPEND TILE_LANG_SRCS
   src/musa/transform/multi_version_buffer_rewriter.cc
   src/musa/transform/producer_consumer_ws.cc
   src/musa/runtime.cc
+  src/musa/shared_memory.cc
 )
