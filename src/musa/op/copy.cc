@@ -8,6 +8,7 @@
 #include "backend/common/target_utils.h"
 #include "musa/layout/swizzle_layout.h"
 #include "musa/op/builtin.h"
+#include "musa/op/memory.h"
 #include "musa/target_utils.h"
 #include "musa/transform/async_copy_injector.h"
 #include "op/builtin.h"
@@ -19,6 +20,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <tvm/tirx/stmt_functor.h>
 #include <vector>
 
 namespace tvm {
@@ -116,6 +118,58 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
     }
   }
   return false;
+}
+int GetIntAnnotation(const CopyNode &op, const char *key, int default_value) {
+  if (auto value = op.annotations.Get(key)) {
+    if (const auto *immediate = value->as<IntImmNode>()) {
+      return static_cast<int>(immediate->value);
+    }
+  }
+  return default_value;
+}
+
+class LsuCacheHintInjector : public StmtExprMutator {
+public:
+  LsuCacheHintInjector(Buffer source, int inner, int outer, int coherence,
+                       int l2, bool is_volatile)
+      : source_(std::move(source)), inner_(inner), outer_(outer),
+        coherence_(coherence), l2_(l2), is_volatile_(is_volatile) {}
+
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    if (!op->buffer->data.same_as(source_->data)) {
+      return StmtExprMutator::VisitExpr_(op);
+    }
+    const Op &intrinsic =
+        is_volatile_ ? lsu_ld_volatile_cache_hint() : lsu_ld_cache_hint();
+    return Call(op->dtype, intrinsic,
+                {GetRef<PrimExpr>(op), IntImm(DataType::Int(32), inner_),
+                 IntImm(DataType::Int(32), outer_),
+                 IntImm(DataType::Int(32), coherence_),
+                 IntImm(DataType::Int(32), l2_)});
+  }
+
+private:
+  Buffer source_;
+  int inner_;
+  int outer_;
+  int coherence_;
+  int l2_;
+  bool is_volatile_;
+};
+
+Stmt ApplyLsuCacheHint(const CopyNode &op, Stmt lowered) {
+  if (!GetBoolAnnotation(op, "musa_lsu_cache_hint")) {
+    return lowered;
+  }
+  ICHECK(IsGlobalBuffer(op.src))
+      << "MUSA LSU cache hints require a global-memory source";
+  LsuCacheHintInjector injector(op.src,
+                                GetIntAnnotation(op, "musa_lsu_inner", 4),
+                                GetIntAnnotation(op, "musa_lsu_outer", 2),
+                                GetIntAnnotation(op, "musa_lsu_chrnt", 0),
+                                GetIntAnnotation(op, "musa_lsu_l2", 0),
+                                GetBoolAnnotation(op, "musa_lsu_volatile"));
+  return injector(lowered);
 }
 // Values are part of the stable MUSA descriptor ABI. Including musa.h in
 // this host compiler translation unit conflicts with TileLang's CUDA stubs;
@@ -1072,13 +1126,16 @@ struct Copy {
       if (CopyInstIsAsync(selection.inst)) {
         return LowerAsyncCopy(op, lower_args, analyzer);
       }
-      return LowerNormalCopy(op, lower_args, analyzer);
+      return ApplyLsuCacheHint(op, LowerNormalCopy(op, lower_args, analyzer));
     }
     Array<Stmt> lowered;
     for (const ObjectPtr<CopyNode> &part : splits) {
-      lowered.push_back(CopyInstIsAsync(selection.inst)
-                            ? LowerAsyncCopy(*part, lower_args, analyzer)
-                            : LowerNormalCopy(*part, lower_args, analyzer));
+      Stmt body =
+          CopyInstIsAsync(selection.inst)
+              ? LowerAsyncCopy(*part, lower_args, analyzer)
+              : ApplyLsuCacheHint(*part,
+                                  LowerNormalCopy(*part, lower_args, analyzer));
+      lowered.push_back(body);
     }
     return lowered.size() == 1 ? lowered[0] : SeqStmt(lowered);
   }
