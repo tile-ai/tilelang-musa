@@ -43,9 +43,9 @@
 #include <utility>
 #include <vector>
 
-#include "musa/op/builtin.h"
 #include "literal/musa_half_t.h"
 #include "literal/musa_int8_t.h"
+#include "musa/op/builtin.h"
 #include "op/builtin.h"
 #include "support/process_id.h"
 #include "support/utils.h"
@@ -1276,6 +1276,18 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // rank coordinates, rank box dimensions, and swizzle parameters.  The
     // MP31 template exposes rank-specific overloads, so keep this emission
     // independent of T.copy.
+    if (op->args.size() == 4U) {
+      need_mp31_tme_h_ = true;
+      os << "tl::tme_load_runtime_pointer(";
+      for (size_t i = 0; i < op->args.size(); ++i) {
+        if (i != 0) {
+          os << ", ";
+        }
+        this->PrintExpr(op->args[i], os);
+      }
+      os << ")";
+      return;
+    }
     ICHECK_GE(op->args.size(), 8U);
     ICHECK_EQ((op->args.size() - 6) % 2, 0U);
     size_t rank = (op->args.size() - 6) / 2;
@@ -1312,6 +1324,18 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tma_store())) {
     // MP31 TME store arguments are descriptor, shared pointer, rank
     // coordinates, rank box dimensions, and swizzle parameters.
+    if (op->args.size() == 3U) {
+      need_mp31_tme_h_ = true;
+      os << "tl::tme_store_runtime_pointer(";
+      for (size_t i = 0; i < op->args.size(); ++i) {
+        if (i != 0) {
+          os << ", ";
+        }
+        this->PrintExpr(op->args[i], os);
+      }
+      os << ")";
+      return;
+    }
     ICHECK_GE(op->args.size(), 7U);
     ICHECK_EQ((op->args.size() - 5) % 2, 0U);
     size_t rank = (op->args.size() - 5) / 2;

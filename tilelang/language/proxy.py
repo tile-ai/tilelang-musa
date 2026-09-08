@@ -293,6 +293,7 @@ def _get_pointer_type_annotation(value: object) -> tvm_ir.PointerType | None:
 
 def _materialize_pointer_from_addr(addr: PrimExpr, dtype: DType, storage_scope: str = "global") -> Var:
     from tilelang.language.eager.builder import Builder
+    from tilelang.language.frame import register_let_value
 
     builder = Builder.current()
     if builder is None:
@@ -300,7 +301,9 @@ def _materialize_pointer_from_addr(addr: PrimExpr, dtype: DType, storage_scope: 
 
     value = addr if str(addr.dtype) == "handle" else tirx.reinterpret("handle", addr)
     ptr_type = tvm_ir.PointerType(tvm_ir.PrimType(DataType(dtype)), storage_scope)
-    return bind(value, type_annotation=ptr_type)
+    pointer_var = bind(value, type_annotation=ptr_type)
+    register_let_value(pointer_var, value)
+    return pointer_var
 
 
 def make_tensor_from_addr(

@@ -25,6 +25,8 @@ from .sqmma import *  # noqa: F401,F403
 from .sqmma import __all__ as _SQMMA_ALL
 from .wmma import *  # noqa: F401,F403
 from .wmma import __all__ as _WMMA_ALL
+from .copy_ext import *  # noqa: F401,F403
+from .copy_ext import __all__ as _COPY_ALL
 
 _MUSA_API_ALL = (
     "get_warp_group_idx",
@@ -40,6 +42,18 @@ _MUSA_API_ALL = (
 )
 
 __tilelang_dialect__ = "musa"
-__all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_MUSA_API_ALL, *_PRINT_ALL, *_FAST_DIVMOD_ALL, *_SQMMA_ALL, *_WMMA_ALL)))
+__all__ = tuple(
+    dict.fromkeys(
+        (
+            *_COMMON_ALL,
+            *_MUSA_API_ALL,
+            *_PRINT_ALL,
+            *_FAST_DIVMOD_ALL,
+            *_SQMMA_ALL,
+            *_WMMA_ALL,
+            *_COPY_ALL,
+        )
+    )
+)
 
-del _COMMON_ALL, _MUSA_API_ALL, _PRINT_ALL, _FAST_DIVMOD_ALL, _SQMMA_ALL, _WMMA_ALL
+del _COMMON_ALL, _MUSA_API_ALL, _PRINT_ALL, _FAST_DIVMOD_ALL, _SQMMA_ALL, _WMMA_ALL, _COPY_ALL
