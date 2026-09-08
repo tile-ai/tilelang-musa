@@ -79,7 +79,19 @@
 
 // Optional APIs (may not exist in older drivers or specific configurations)
 // These are loaded but may be nullptr if not available
-#define TILELANG_LIBMUSA_API_OPTIONAL(_)
+#define TILELANG_LIBMUSA_API_OPTIONAL(_)                                       \
+  _(muMemAddressReserve)                                                       \
+  _(muMemAddressFree)                                                          \
+  _(muMemCreate)                                                               \
+  _(muMemRelease)                                                              \
+  _(muMemMap)                                                                  \
+  _(muMemUnmap)                                                                \
+  _(muMemSetAccess)                                                            \
+  _(muMemGetAllocationGranularity)                                             \
+  _(muMemExportToShareableHandle)                                              \
+  _(muMemImportFromShareableHandle)                                            \
+  _(muMemGetAddressRange)                                                      \
+  _(muPointerGetAttribute)
 
 namespace tvm::tl::musa {
 
@@ -194,6 +206,39 @@ TILELANG_MUSA_STUB_API MUresult muLaunchKernelEx(const MUlaunchConfig *config,
                                                  void **extra);
 TILELANG_MUSA_STUB_API MUresult muMemsetD32_v2(MUdeviceptr dstDevice,
                                                unsigned int ui, size_t N);
+TILELANG_MUSA_STUB_API MUresult muMemAddressReserve(MUdeviceptr *ptr,
+                                                    size_t size,
+                                                    size_t alignment,
+                                                    MUdeviceptr addr,
+                                                    unsigned long long flags);
+TILELANG_MUSA_STUB_API MUresult muMemAddressFree(MUdeviceptr ptr, size_t size);
+TILELANG_MUSA_STUB_API MUresult
+muMemCreate(MUmemGenericAllocationHandle *handle, size_t size,
+            const MUmemAllocationProp *prop, unsigned long long flags);
+TILELANG_MUSA_STUB_API MUresult
+muMemRelease(MUmemGenericAllocationHandle handle);
+TILELANG_MUSA_STUB_API MUresult muMemMap(MUdeviceptr ptr, size_t size,
+                                         size_t offset,
+                                         MUmemGenericAllocationHandle handle,
+                                         unsigned long long flags);
+TILELANG_MUSA_STUB_API MUresult muMemUnmap(MUdeviceptr ptr, size_t size);
+TILELANG_MUSA_STUB_API MUresult muMemSetAccess(MUdeviceptr ptr, size_t size,
+                                               const MUmemAccessDesc *desc,
+                                               size_t count);
+TILELANG_MUSA_STUB_API MUresult muMemGetAllocationGranularity(
+    size_t *granularity, const MUmemAllocationProp *prop,
+    MUmemAllocationGranularity_flags option);
+TILELANG_MUSA_STUB_API MUresult muMemExportToShareableHandle(
+    void *shareableHandle, MUmemGenericAllocationHandle handle,
+    MUmemAllocationHandleType handleType, unsigned long long flags);
+TILELANG_MUSA_STUB_API MUresult muMemImportFromShareableHandle(
+    MUmemGenericAllocationHandle *handle, void *osHandle,
+    MUmemAllocationHandleType handleType);
+TILELANG_MUSA_STUB_API MUresult muMemGetAddressRange(MUdeviceptr *pbase,
+                                                     size_t *psize,
+                                                     MUdeviceptr dptr);
+TILELANG_MUSA_STUB_API MUresult muPointerGetAttribute(
+    void *data, MUpointer_attribute attribute, MUdeviceptr ptr);
 TILELANG_MUSA_STUB_API MUresult muStreamSetAttribute(
     MUstream hStream, MUstreamAttrID attr, const MUstreamAttrValue *value);
 

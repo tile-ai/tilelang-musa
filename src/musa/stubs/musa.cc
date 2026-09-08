@@ -206,11 +206,13 @@ MUresult muFuncSetAttribute(MUfunction hfunc, MUfunction_attribute attrib,
   return MUSADriverAPI::get()->muFuncSetAttribute_(hfunc, attrib, value);
 }
 
-MUresult muTensorDescriptorEncode(
-    MUtensorDescriptor *tensorDesc, MUtensorDescriptorDataType tensorDataType,
-    muuint32_t tensorRank, void *globalAddress, const muuint64_t *globalDim,
-    const muuint64_t *globalStrides, MUtensorDescriptorInterleave interleave,
-    muuint64_t oobConstantFill) {
+MUresult muTensorDescriptorEncode(MUtensorDescriptor *tensorDesc,
+                                  MUtensorDescriptorDataType tensorDataType,
+                                  muuint32_t tensorRank, void *globalAddress,
+                                  const muuint64_t *globalDim,
+                                  const muuint64_t *globalStrides,
+                                  MUtensorDescriptorInterleave interleave,
+                                  muuint64_t oobConstantFill) {
   return MUSADriverAPI::get()->muTensorDescriptorEncode_(
       tensorDesc, tensorDataType, tensorRank, globalAddress, globalDim,
       globalStrides, interleave, oobConstantFill);
@@ -240,5 +242,59 @@ MUresult muStreamSetAttribute(MUstream hStream, MUstreamAttrID attr,
                               const MUstreamAttrValue *value) {
   return MUSADriverAPI::get()->muStreamSetAttribute_(hStream, attr, value);
 }
+
+// VMM entry points are optional on older drivers. Keep the stub loadable and
+// report a call-time error only when a missing entry point is used.
+#define OPTIONAL_FORWARD(name, signature, call)                                \
+  MUresult name signature {                                                    \
+    auto fn = MUSADriverAPI::get()->name##_;                                   \
+    if (fn == nullptr) {                                                       \
+      throw std::runtime_error(                                                \
+          "optional MUSA driver API unavailable: " #name);                     \
+    }                                                                          \
+    return fn call;                                                            \
+  }
+
+OPTIONAL_FORWARD(muMemAddressReserve,
+                 (MUdeviceptr * ptr, size_t size, size_t alignment,
+                  MUdeviceptr addr, unsigned long long flags),
+                 (ptr, size, alignment, addr, flags))
+OPTIONAL_FORWARD(muMemAddressFree, (MUdeviceptr ptr, size_t size), (ptr, size))
+OPTIONAL_FORWARD(muMemCreate,
+                 (MUmemGenericAllocationHandle * handle, size_t size,
+                  const MUmemAllocationProp *prop, unsigned long long flags),
+                 (handle, size, prop, flags))
+OPTIONAL_FORWARD(muMemRelease, (MUmemGenericAllocationHandle handle), (handle))
+OPTIONAL_FORWARD(muMemMap,
+                 (MUdeviceptr ptr, size_t size, size_t offset,
+                  MUmemGenericAllocationHandle handle,
+                  unsigned long long flags),
+                 (ptr, size, offset, handle, flags))
+OPTIONAL_FORWARD(muMemUnmap, (MUdeviceptr ptr, size_t size), (ptr, size))
+OPTIONAL_FORWARD(muMemSetAccess,
+                 (MUdeviceptr ptr, size_t size, const MUmemAccessDesc *desc,
+                  size_t count),
+                 (ptr, size, desc, count))
+OPTIONAL_FORWARD(muMemGetAllocationGranularity,
+                 (size_t * granularity, const MUmemAllocationProp *prop,
+                  MUmemAllocationGranularity_flags option),
+                 (granularity, prop, option))
+OPTIONAL_FORWARD(muMemExportToShareableHandle,
+                 (void *shareable_handle, MUmemGenericAllocationHandle handle,
+                  MUmemAllocationHandleType handle_type,
+                  unsigned long long flags),
+                 (shareable_handle, handle, handle_type, flags))
+OPTIONAL_FORWARD(muMemImportFromShareableHandle,
+                 (MUmemGenericAllocationHandle * handle, void *os_handle,
+                  MUmemAllocationHandleType handle_type),
+                 (handle, os_handle, handle_type))
+OPTIONAL_FORWARD(muMemGetAddressRange,
+                 (MUdeviceptr * base, size_t *size, MUdeviceptr ptr),
+                 (base, size, ptr))
+OPTIONAL_FORWARD(muPointerGetAttribute,
+                 (void *data, MUpointer_attribute attribute, MUdeviceptr ptr),
+                 (data, attribute, ptr))
+
+#undef OPTIONAL_FORWARD
 
 } // extern "C"
