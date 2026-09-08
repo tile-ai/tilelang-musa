@@ -39,16 +39,16 @@ namespace codegen {
 class CodeGenMUSA final : public CodeGenC {
 public:
   CodeGenMUSA();
-  void Init(bool output_ssa);
+  void Init(bool output_ssa, Target target);
   std::string Finish();
   bool need_include_path() {
     return (enable_fp16_ || enable_bf16_ || enable_int8_ || enable_fp8_ ||
             enable_fp6_ || enable_fp4_ || need_math_constants_h_ ||
             need_math_h_ || need_mma_h_ || need_atomic_h_ || need_debug_h_ ||
             need_reduce_h_ || need_scan_h_ || need_async_copy_h_ ||
-            need_ldg_stg_h_ || need_cvt_h_ || need_threadblock_swizzle_h_ ||
-            need_dp4a_h_ || need_mp31_tme_h_ || need_mp31_sqmma_h_ ||
-            need_mp31_wmma_h_);
+            need_ldg_stg_h_ || need_mp31_lsu_h_ || need_mp31_peer_reduce_h_ ||
+            need_cvt_h_ || need_threadblock_swizzle_h_ || need_dp4a_h_ ||
+            need_mp31_tme_h_ || need_mp31_sqmma_h_ || need_mp31_wmma_h_);
   }
   // override behavior
   void PrintFunctionSignature(const ffi::String &function_name,
@@ -89,6 +89,7 @@ protected:
                        std::ostream &os) final; // NOLINT(*)
 
 private:
+  Target target_;
   // Handle volatile loads
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
@@ -131,6 +132,10 @@ private:
   bool need_async_copy_h_{false};
   // whether need vectorized global load/store helpers
   bool need_ldg_stg_h_{false};
+  // Whether an MP31 LSU helper is referenced by the generated kernel.
+  bool need_mp31_lsu_h_{false};
+  // Whether the fixed MP31 peer-group reduction helper is referenced.
+  bool need_mp31_peer_reduce_h_{false};
   // Whether an MP31 TME load helper is referenced by the generated kernel.
   bool need_mp31_tme_h_{false};
   // Whether an MP31 SQMMA helper is referenced by the generated kernel.
