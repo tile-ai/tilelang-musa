@@ -216,8 +216,57 @@ SQMMASquadTile GetSquadTile(const GemmNode &op, int block_size, int m_warp,
 
 std::optional<std::array<int, 3>> SelectNativeShape(SQMMATypeClass type_class,
                                                     const SQMMASquadTile &tile,
-                                                    int64_t k, bool a_k_major,
-                                                    bool b_k_major) {
+                                                    const GemmNode &op) {
+  constexpr int64_t kMaxLeadingStrideBytes = 256;
+  const bool a_k_major = !op.transA_;
+  const bool b_k_major = op.transB_;
+  const int64_t a_contiguous = op.strideA_;
+  const int64_t b_contiguous = op.strideB_;
+  const int64_t a_panel = kMaxLeadingStrideBytes / op.a_->dtype.bytes();
+  const int64_t b_panel = kMaxLeadingStrideBytes / op.b_->dtype.bytes();
+  ICHECK_GT(a_panel, 0);
+  ICHECK_GT(b_panel, 0);
+  auto validate_panelized_buffer =
+      [](const Buffer &buffer, const char *name, int64_t expected_rows,
+         int64_t expected_cols, int64_t stride, int64_t panel_cols) {
+        if (stride <= panel_cols) {
+          return;
+        }
+        ICHECK_GE(buffer->shape.size(), 2U);
+        const size_t rank = buffer->shape.size();
+        const int64_t *rows = as_const_int(buffer->shape[rank - 2]);
+        const int64_t *cols = as_const_int(buffer->shape[rank - 1]);
+        ICHECK(rows != nullptr && cols != nullptr)
+            << "MP31 SQMMA panelized " << name
+            << " buffer requires constant matrix dimensions";
+        ICHECK_EQ(*rows, expected_rows)
+            << "MP31 SQMMA panelized " << name
+            << " buffer must contain exactly one matrix tile in its final two "
+               "dimensions";
+        ICHECK_EQ(stride, expected_cols)
+            << "MP31 SQMMA panelized " << name
+            << " region must cover the complete continuous buffer dimension";
+        ICHECK_EQ(*cols, stride)
+            << "MP31 SQMMA panelized " << name
+            << " buffer stride must match its continuous extent";
+      };
+  validate_panelized_buffer(op.a_, "A", op.transA_ ? op.k_ : op.m_,
+                            op.transA_ ? op.m_ : op.k_, a_contiguous, a_panel);
+  validate_panelized_buffer(op.b_, "B", op.transB_ ? op.n_ : op.k_,
+                            op.transB_ ? op.k_ : op.n_, b_contiguous, b_panel);
+  if (a_contiguous > a_panel) {
+    ICHECK_EQ(a_contiguous % a_panel, 0)
+        << "MP31 SQMMA A continuous extent must be divisible by its 256-byte "
+           "panel width, got extent="
+        << a_contiguous << ", panel=" << a_panel;
+  }
+  if (b_contiguous > b_panel) {
+    ICHECK_EQ(b_contiguous % b_panel, 0)
+        << "MP31 SQMMA B continuous extent must be divisible by its 256-byte "
+           "panel width, got extent="
+        << b_contiguous << ", panel=" << b_panel;
+  }
+
   for (const SQMMAShapeMN &shape : GetMNCandidates(type_class)) {
     if (tile.m % shape.m != 0 || tile.n % shape.n != 0)
       continue;
@@ -226,7 +275,13 @@ std::optional<std::array<int, 3>> SelectNativeShape(SQMMATypeClass type_class,
       continue;
     }
     for (int inst_k : GetKCandidates(type_class)) {
-      if (k % inst_k == 0) {
+      const int a_instruction_contiguous = a_k_major ? inst_k : shape.m;
+      const int b_instruction_contiguous = b_k_major ? inst_k : shape.n;
+      if ((a_contiguous > a_panel && a_panel % a_instruction_contiguous != 0) ||
+          (b_contiguous > b_panel && b_panel % b_instruction_contiguous != 0)) {
+        continue;
+      }
+      if (op.k_ % inst_k == 0) {
         return std::array<int, 3>{shape.m, shape.n, inst_k};
       }
     }
@@ -335,8 +390,7 @@ Array<Integer> SQMMA::GetInstShape(const GemmNode &op, int block_size,
       << "Unsupported MP31 SQMMA dtype combination: A=" << op.a_->dtype
       << ", B=" << op.b_->dtype << ", C=" << op.c_->dtype;
 
-  const auto shape =
-      SelectNativeShape(*type_class, tile, op.k_, !op.transA_, op.transB_);
+  const auto shape = SelectNativeShape(*type_class, tile, op);
   ICHECK(shape.has_value())
       << "No native MP31 SQMMA instruction can cover M=" << op.m_
       << ", N=" << op.n_ << ", K=" << op.k_ << " with m_warp=" << m_warp

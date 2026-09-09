@@ -10,6 +10,50 @@ namespace musa {
 using namespace ffi;
 using namespace tirx;
 
+namespace {
+
+constexpr int kSQMMAMaxLeadingStrideBytes = 256;
+
+PrimExpr MakeSwizzledLinearIndex(PrimExpr row, PrimExpr col, int rows, int cols,
+                                 int element_size,
+                                 const SwizzleLayout &swizzle) {
+  const int element_bytes = element_size / 8;
+  const int sg = static_cast<int>(swizzle.swizzle_granularity);
+  const int ss = static_cast<int>(swizzle.swizzle_stride);
+  const int sl = static_cast<int>(swizzle.swizzle_line);
+  const int panel_cols = cols * element_bytes <= kSQMMAMaxLeadingStrideBytes
+                             ? cols
+                             : kSQMMAMaxLeadingStrideBytes / element_bytes;
+  ICHECK_GT(panel_cols, 0);
+  ICHECK_EQ(cols % panel_cols, 0)
+      << "MP31 SQMMA swizzled continuous extent must be divisible by its "
+         "256-byte panel width, got cols="
+      << cols << ", panel_cols=" << panel_cols
+      << ", element_size=" << element_size;
+
+  PrimExpr panel = 0;
+  PrimExpr col_in_panel = col;
+  if (panel_cols != cols) {
+    panel = FloorDiv(col, panel_cols);
+    col_in_panel = FloorMod(col, panel_cols);
+  }
+  PrimExpr addr = (row * panel_cols + col_in_panel) * element_bytes;
+  PrimExpr line_id = FloorDiv(addr, sl);
+  PrimExpr line_offset = FloorMod(addr, sl);
+  PrimExpr cycle_line_id = FloorMod(line_id, ss / sg);
+  PrimExpr granule_id = FloorDiv(line_offset, sg);
+  PrimExpr granule_offset = FloorMod(line_offset, sg);
+  PrimExpr target_granule_id = granule_id ^ cycle_line_id;
+  PrimExpr target_addr = line_id * sl + target_granule_id * sg + granule_offset;
+  PrimExpr target_linear = FloorDiv(target_addr, element_bytes);
+  if (panel_cols != cols) {
+    target_linear = target_linear + panel * rows * panel_cols;
+  }
+  return target_linear;
+}
+
+} // namespace
+
 Layout MakeSwizzleLayout(const tirx::Buffer &buffer,
                          const SwizzleLayout &swizzle) {
   ICHECK(buffer.defined()) << "Swizzle layout expects a defined buffer";
@@ -44,15 +88,8 @@ Layout MakeSwizzleLayout(const tirx::Buffer &buffer,
     output.push_back(InputPlaceholder(i));
   }
   Var row = InputPlaceholder(rank - 2), col = InputPlaceholder(rank - 1);
-  PrimExpr addr = (row * cols + col) * (element_size / 8);
-  PrimExpr line_id = FloorDiv(addr, sl);
-  PrimExpr line_offset = FloorMod(addr, sl);
-  PrimExpr cycle_line_id = FloorMod(line_id, ss / sg);
-  PrimExpr granule_id = FloorDiv(line_offset, sg);
-  PrimExpr granule_offset = FloorMod(line_offset, sg);
-  PrimExpr target_granule_id = granule_id ^ cycle_line_id;
-  PrimExpr target_addr = line_id * sl + target_granule_id * sg + granule_offset;
-  PrimExpr target_linear = FloorDiv(target_addr, element_size / 8);
+  PrimExpr target_linear =
+      MakeSwizzledLinearIndex(row, col, rows, cols, element_size, swizzle);
   output.push_back(FloorDiv(target_linear, cols));
   output.push_back(FloorMod(target_linear, cols));
   return Layout(buffer->shape, output);

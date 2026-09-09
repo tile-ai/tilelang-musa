@@ -90,6 +90,21 @@ offset_pointer(const void *base, int element_offset) {
   return reinterpret_cast<const DescriptorPointer *>(storage + element_offset);
 }
 
+constexpr int kMaxLeadingStrideBytes = 256;
+
+constexpr int panel_extent(int contiguous_extent, int element_bytes) {
+  return contiguous_extent * element_bytes <= kMaxLeadingStrideBytes
+             ? contiguous_extent
+             : kMaxLeadingStrideBytes / element_bytes;
+}
+
+TL_DEVICE int panelized_offset(int outer, int contiguous, int outer_extent,
+                               int contiguous_extent, int panel_size) {
+  const int panel = contiguous / panel_size;
+  const int in_panel = contiguous % panel_size;
+  return panel * outer_extent * panel_size + outer * panel_size + in_panel;
+}
+
 template <typename Tag>
 TL_DEVICE mtmusa::sqmma::swizzle_granularity
 get_swizzle_granularity(bool k_major) {
@@ -142,6 +157,11 @@ TL_DEVICE void sqmma_ss(const void *a, const void *b, void *c,
   static_assert(InstM * InstN % kSquadThreads == 0,
                 "SQMMA accumulator must distribute evenly over a squad");
 
+  const int a_cols = stride_a;
+  const int b_cols = stride_b;
+  const int a_panel_cols = sqmma::panel_extent(a_cols, sizeof(AStorage));
+  const int b_panel_cols = sqmma::panel_extent(b_cols, sizeof(BStorage));
+
   const int squad_id = static_cast<int>(threadIdx.x) / kSquadThreads;
   const int squad_m = squad_id % kSquadM;
   const int squad_n = squad_id / kSquadM;
@@ -152,8 +172,12 @@ TL_DEVICE void sqmma_ss(const void *a, const void *b, void *c,
   const auto b_layout = b_col_major ? mt::mem_col_major : mt::mem_row_major;
   const auto a_swizzle = sqmma::get_swizzle_granularity<ATag>(!a_col_major);
   const auto b_swizzle = sqmma::get_swizzle_granularity<BTag>(b_col_major);
-  const unsigned stride_a_bytes = stride_a * sizeof(AStorage);
-  const unsigned stride_b_bytes = stride_b * sizeof(BStorage);
+  const bool a_panelized = a_cols > a_panel_cols;
+  const bool b_panelized = b_cols > b_panel_cols;
+  const unsigned stride_a_bytes =
+      (a_panelized ? a_panel_cols : stride_a) * sizeof(AStorage);
+  const unsigned stride_b_bytes =
+      (b_panelized ? b_panel_cols : stride_b) * sizeof(BStorage);
   const auto *a_base = reinterpret_cast<const AStorage *>(a);
   const auto *b_base = reinterpret_cast<const BStorage *>(b);
   auto *c_base = reinterpret_cast<CElement *>(c);
@@ -176,9 +200,17 @@ TL_DEVICE void sqmma_ss(const void *a, const void *b, void *c,
         const int col = squad_col + inst_n * InstN;
         const int k = inst_k * InstK;
         const int a_offset =
-            a_col_major ? k * stride_a + row : row * stride_a + k;
+            a_panelized
+                ? sqmma::panelized_offset(
+                      a_col_major ? k : row, a_col_major ? row : k,
+                      a_col_major ? K : M, a_cols, a_panel_cols)
+                : (a_col_major ? k * stride_a + row : row * stride_a + k);
         const int b_offset =
-            b_col_major ? col * stride_b + k : k * stride_b + col;
+            b_panelized
+                ? sqmma::panelized_offset(
+                      b_col_major ? col : k, b_col_major ? k : col,
+                      b_col_major ? N : K, b_cols, b_panel_cols)
+                : (b_col_major ? col * stride_b + k : k * stride_b + col);
 
         mt::sqmmadesc<mt::desc_a, AElement> a_desc;
         mt::sqmmadesc<mt::desc_b, BElement> b_desc;

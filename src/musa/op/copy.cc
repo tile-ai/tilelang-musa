@@ -17,6 +17,7 @@
 
 #include "support/check.h"
 
+#include <algorithm>
 #include <optional>
 #include <vector>
 
@@ -132,6 +133,87 @@ SwizzleLayout GetSwizzleParams(const Buffer &shared_buffer,
 
   return AnalyzeSwizzleLayout(shared_buffer, (*layout_it).second);
 }
+
+constexpr int kSQMMAMaxLeadingStrideBytes = 256;
+
+std::optional<int> GetPanelizedCols(const Buffer &shared_buffer,
+                                    const LowerArgs &args) {
+  if (!IsSharedBuffer(shared_buffer) || shared_buffer->shape.size() < 2) {
+    return std::nullopt;
+  }
+  const SwizzleLayout swizzle = GetSwizzleParams(shared_buffer, args);
+  if (swizzle.swizzle_granularity == SwizzleGranularity::kNone) {
+    return std::nullopt;
+  }
+  const int64_t *cols = as_const_int(shared_buffer->shape.back());
+  ICHECK(cols != nullptr)
+      << "MP31 SQMMA panelized layout requires a constant continuous extent";
+  const int element_bytes = shared_buffer->dtype.bytes();
+  ICHECK_GT(element_bytes, 0);
+  if (*cols * element_bytes <= kSQMMAMaxLeadingStrideBytes) {
+    return std::nullopt;
+  }
+  const int panel_cols = kSQMMAMaxLeadingStrideBytes / element_bytes;
+  ICHECK_GT(panel_cols, 0);
+  ICHECK_EQ(*cols % panel_cols, 0)
+      << "MP31 SQMMA continuous extent must be divisible by its 256-byte "
+         "panel width, got cols="
+      << *cols << ", panel_cols=" << panel_cols;
+  return panel_cols;
+}
+
+std::vector<ObjectPtr<CopyNode>> SplitPanelizedCopy(const CopyNode &op,
+                                                    const LowerArgs &args,
+                                                    arith::Analyzer *analyzer) {
+  const bool shared_is_dst = IsSharedBuffer(op.dst);
+  const bool shared_is_src = IsSharedBuffer(op.src);
+  if (shared_is_dst == shared_is_src) {
+    return {};
+  }
+  const Buffer &shared_buffer = shared_is_dst ? op.dst : op.src;
+  const auto panel_cols = GetPanelizedCols(shared_buffer, args);
+  if (!panel_cols.has_value()) {
+    return {};
+  }
+
+  const Array<Range> &shared_range =
+      shared_is_dst ? op.dst_range : op.src_range;
+  const Array<Range> &other_range = shared_is_dst ? op.src_range : op.dst_range;
+  ICHECK(!shared_range.empty() && !other_range.empty());
+  const int64_t *start = as_const_int(shared_range.back()->min);
+  const int64_t *extent = as_const_int(shared_range.back()->extent);
+  ICHECK(start != nullptr && extent != nullptr)
+      << "MP31 SQMMA panel split requires a constant shared-memory "
+         "continuous range";
+  ICHECK(analyzer->CanProveEqual(shared_range.back()->extent,
+                                 other_range.back()->extent))
+      << "MP31 SQMMA panel split requires matching source and destination "
+         "continuous extents";
+
+  std::vector<ObjectPtr<CopyNode>> splits;
+  int64_t consumed = 0;
+  while (consumed < *extent) {
+    const int64_t col = *start + consumed;
+    const int64_t chunk =
+        std::min<int64_t>(*panel_cols - col % *panel_cols, *extent - consumed);
+    ObjectPtr<CopyNode> split = make_object<CopyNode>(op);
+    Array<Range> src_range = split->src_range;
+    Array<Range> dst_range = split->dst_range;
+    const PrimExpr delta = Integer(consumed);
+    src_range.Set(
+        src_range.size() - 1,
+        Range::FromMinExtent(src_range.back()->min + delta, Integer(chunk)));
+    dst_range.Set(
+        dst_range.size() - 1,
+        Range::FromMinExtent(dst_range.back()->min + delta, Integer(chunk)));
+    split->src_range = src_range;
+    split->dst_range = dst_range;
+    splits.push_back(std::move(split));
+    consumed += chunk;
+  }
+  return splits;
+}
+
 constexpr int kDescInt32 = 6;
 constexpr int kDescUInt32 = 7;
 constexpr int kDescFloat32 = 8;
@@ -442,7 +524,56 @@ LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
 }
 
 PrimExpr MakeTmaSharedPtr(const Buffer &shared_buffer,
-                          const Array<Range> &shared_range, int rw_mask) {
+                          const Array<Range> &shared_range,
+                          const LowerArgs &args, arith::Analyzer *analyzer,
+                          int rw_mask) {
+  if (const auto panel_cols = GetPanelizedCols(shared_buffer, args)) {
+    ICHECK(shared_buffer->strides.empty())
+        << "MP31 SQMMA panelized TME copy does not support explicit shared "
+           "strides";
+    const size_t rank = shared_buffer->shape.size();
+    ICHECK_EQ(rank, shared_range.size());
+    ICHECK_GE(rank, 2U);
+    const int64_t *rows = as_const_int(shared_buffer->shape[rank - 2]);
+    const int64_t *cols = as_const_int(shared_buffer->shape[rank - 1]);
+    ICHECK(rows != nullptr && cols != nullptr);
+    const PrimExpr rows_expr = Integer(*rows);
+    const PrimExpr cols_expr = Integer(*cols);
+    const PrimExpr panel_cols_expr = Integer(*panel_cols);
+    ICHECK(analyzer->CanProveEqual(shared_range[rank - 2]->min, 0))
+        << "MP31 SQMMA panelized TME copy must start at matrix row zero";
+    ICHECK(analyzer->CanProveEqual(shared_range[rank - 2]->extent, rows_expr))
+        << "MP31 SQMMA panelized TME copy must cover the complete matrix row "
+           "dimension";
+    ICHECK(analyzer->CanProveEqual(
+        FloorMod(shared_range[rank - 1]->min, panel_cols_expr), 0))
+        << "MP31 SQMMA panelized TME copy must start at a 256-byte panel "
+           "boundary";
+    ICHECK(analyzer->CanProveEqual(
+        FloorMod(shared_range[rank - 1]->extent, panel_cols_expr), 0))
+        << "MP31 SQMMA panelized TME copy must cover complete 256-byte panels";
+
+    PrimExpr leading_index = 0;
+    for (size_t i = 0; i + 2 < rank; ++i) {
+      leading_index =
+          leading_index * shared_buffer->shape[i] + shared_range[i]->min;
+    }
+    const PrimExpr row = shared_range[rank - 2]->min;
+    const PrimExpr col = shared_range[rank - 1]->min;
+    const PrimExpr panel = FloorDiv(col, panel_cols_expr);
+    const PrimExpr in_panel = FloorMod(col, panel_cols_expr);
+    PrimExpr shared_offset = leading_index * rows_expr * cols_expr +
+                             panel * rows_expr * panel_cols_expr +
+                             row * panel_cols_expr + in_panel;
+    PrimExpr shared_elements = 1;
+    for (const Range &range : shared_range) {
+      shared_elements *= range->extent;
+    }
+    return shared_buffer.access_ptr(rw_mask, DataType::Handle(), 1,
+                                    analyzer->Simplify(shared_offset),
+                                    shared_elements);
+  }
+
   std::vector<PrimExpr> shared_strides;
   if (!shared_buffer->strides.empty()) {
     shared_strides.assign(shared_buffer->strides.begin(),
@@ -476,9 +607,6 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
   ICHECK_EQ(op.src->dtype, op.dst->dtype)
       << "MP31 TME load requires matching source and destination dtypes";
 
-  LoweredTMEDesc lowered =
-      MakeTmaDescriptor(op.src, op.src_range, op.dst_range, analyzer);
-  PrimExpr shared_ptr = MakeTmaSharedPtr(op.dst, op.dst_range, /*rw_mask=*/2);
   SwizzleLayout swizzle = GetSwizzleParams(op.dst, args);
   if (swizzle.swizzle_granularity != SwizzleGranularity::kNone &&
       args.require_smem_alignment) {
@@ -496,22 +624,41 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
         BufferLoad((*args.mbarrier_buffer).value(), {Integer(barrier_index)});
   }
 
-  Array<PrimExpr> tma_args;
-  tma_args.push_back(lowered.descriptor);
-  tma_args.push_back(barrier);
-  tma_args.push_back(shared_ptr);
-  tma_args.insert(tma_args.end(), lowered.global_coords.begin(),
-                  lowered.global_coords.end());
-  tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
-                  lowered.box_dims.end());
-  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_granularity)));
-  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_stride)));
-  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_line)));
-  Stmt load = Evaluate(Call(DataType::Handle(), tma_load(), tma_args));
+  auto emit_load = [&](const CopyNode &part) -> Stmt {
+    LoweredTMEDesc lowered =
+        MakeTmaDescriptor(part.src, part.src_range, part.dst_range, analyzer);
+    PrimExpr shared_ptr =
+        MakeTmaSharedPtr(part.dst, part.dst_range, args, analyzer,
+                         /*rw_mask=*/2);
+    Array<PrimExpr> tma_args;
+    tma_args.push_back(lowered.descriptor);
+    tma_args.push_back(barrier);
+    tma_args.push_back(shared_ptr);
+    tma_args.insert(tma_args.end(), lowered.global_coords.begin(),
+                    lowered.global_coords.end());
+    tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
+                    lowered.box_dims.end());
+    tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_granularity)));
+    tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_stride)));
+    tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_line)));
+    return Evaluate(Call(DataType::Handle(), tma_load(), tma_args));
+  };
+
+  const std::vector<ObjectPtr<CopyNode>> splits =
+      SplitPanelizedCopy(op, args, analyzer);
+  Array<Stmt> load_parts;
+  if (splits.empty()) {
+    load_parts.push_back(emit_load(op));
+  } else {
+    for (const ObjectPtr<CopyNode> &part : splits) {
+      load_parts.push_back(emit_load(*part));
+    }
+  }
+  Stmt load = load_parts.size() == 1 ? load_parts[0] : SeqStmt(load_parts);
 
   PrimExpr bytes = 1;
-  for (auto dim : lowered.box_dims) {
-    bytes *= dim;
+  for (const Range &range : op.dst_range) {
+    bytes *= range->extent;
   }
   bytes = analyzer->Simplify(bytes * op.dst->dtype.bytes());
   Stmt expect = Evaluate(
@@ -539,26 +686,42 @@ Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
   ICHECK_EQ(op.src->dtype, op.dst->dtype)
       << "MP31 TME store requires matching source and destination dtypes";
 
-  LoweredTMEDesc lowered =
-      MakeTmaDescriptor(op.dst, op.dst_range, op.src_range, analyzer);
-  PrimExpr shared_ptr = MakeTmaSharedPtr(op.src, op.src_range, /*rw_mask=*/1);
   SwizzleLayout swizzle = GetSwizzleParams(op.src, args);
   if (swizzle.swizzle_granularity != SwizzleGranularity::kNone &&
       args.require_smem_alignment) {
     args.require_smem_alignment(op.src->data, 256);
   }
 
-  Array<PrimExpr> tma_args;
-  tma_args.push_back(lowered.descriptor);
-  tma_args.push_back(shared_ptr);
-  tma_args.insert(tma_args.end(), lowered.global_coords.begin(),
-                  lowered.global_coords.end());
-  tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
-                  lowered.box_dims.end());
-  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_granularity)));
-  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_stride)));
-  tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_line)));
-  Stmt store = Evaluate(Call(DataType::Handle(), tma_store(), tma_args));
+  auto emit_store = [&](const CopyNode &part) -> Stmt {
+    LoweredTMEDesc lowered =
+        MakeTmaDescriptor(part.dst, part.dst_range, part.src_range, analyzer);
+    PrimExpr shared_ptr =
+        MakeTmaSharedPtr(part.src, part.src_range, args, analyzer,
+                         /*rw_mask=*/1);
+    Array<PrimExpr> tma_args;
+    tma_args.push_back(lowered.descriptor);
+    tma_args.push_back(shared_ptr);
+    tma_args.insert(tma_args.end(), lowered.global_coords.begin(),
+                    lowered.global_coords.end());
+    tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
+                    lowered.box_dims.end());
+    tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_granularity)));
+    tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_stride)));
+    tma_args.push_back(Integer(static_cast<int>(swizzle.swizzle_line)));
+    return Evaluate(Call(DataType::Handle(), tma_store(), tma_args));
+  };
+
+  const std::vector<ObjectPtr<CopyNode>> splits =
+      SplitPanelizedCopy(op, args, analyzer);
+  Array<Stmt> store_parts;
+  if (splits.empty()) {
+    store_parts.push_back(emit_store(op));
+  } else {
+    for (const ObjectPtr<CopyNode> &part : splits) {
+      store_parts.push_back(emit_store(*part));
+    }
+  }
+  Stmt store = store_parts.size() == 1 ? store_parts[0] : SeqStmt(store_parts);
   Stmt commit = Evaluate(Call(DataType::Handle(), tma_store_arrive(), {}));
   Stmt issue = IfThenElse(EQ(args.thread_index, args.thread_bounds->min),
                           SeqStmt({store, commit}));
@@ -788,10 +951,21 @@ struct Copy {
     if (CopyInstIsTME(selection.inst)) {
       return LowerTmaLoad(op, lower_args, analyzer);
     }
-    if (CopyInstIsAsync(selection.inst)) {
-      return LowerAsyncCopy(op, lower_args, analyzer);
+    const std::vector<ObjectPtr<CopyNode>> splits =
+        SplitPanelizedCopy(op, lower_args, analyzer);
+    if (splits.empty()) {
+      if (CopyInstIsAsync(selection.inst)) {
+        return LowerAsyncCopy(op, lower_args, analyzer);
+      }
+      return LowerNormalCopy(op, lower_args, analyzer);
     }
-    return LowerNormalCopy(op, lower_args, analyzer);
+    Array<Stmt> lowered;
+    for (const ObjectPtr<CopyNode> &part : splits) {
+      lowered.push_back(CopyInstIsAsync(selection.inst)
+                            ? LowerAsyncCopy(*part, lower_args, analyzer)
+                            : LowerNormalCopy(*part, lower_args, analyzer));
+    }
+    return lowered.size() == 1 ? lowered[0] : SeqStmt(lowered);
   }
 };
 
