@@ -34,11 +34,13 @@ struct SwizzleLayout {
   SwizzleLine swizzle_line;
 };
 
-// Construct a 2D row-major layout with the requested byte-level swizzle.
+// Swizzle the final two dimensions of a row-major buffer. MP31 SQMMA operands
+// whose continuous dimension exceeds 256 bytes are stored as independent
+// 256-byte panels so every hardware descriptor has a representable stride.
 Layout MakeSwizzleLayout(const tirx::Buffer &buffer,
                          const SwizzleLayout &swizzle);
 
-// Identify the supported swizzle parameters represented by a 2D layout.
+// Identify the supported swizzle parameters represented by a layout.
 SwizzleLayout AnalyzeSwizzleLayout(const tirx::Buffer &buffer,
                                    const Layout &layout);
 
