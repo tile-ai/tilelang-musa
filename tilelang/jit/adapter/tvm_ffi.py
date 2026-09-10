@@ -3,16 +3,22 @@
 TVM-FFI obtains the active work stream through Torch's DLPack Exchange API.
 The Ascend adapter installs TileLang's Torch NPU callback before the first
 tensor reaches an executable.
+
+The wrapped callable accepts an optional raw stream handle and installs it as
+the TVM FFI current stream for the duration of the kernel invocation.
 """
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+from ctypes import c_void_p
 from typing import Any
 from collections.abc import Callable
 import sys
 import threading
 
 import torch
+import tvm_ffi
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
@@ -243,6 +249,27 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
+    def _raw_stream_context(self, stream: int | c_void_p | None, out_device: torch.device | None):
+        if stream is None or stream == -1:
+            return nullcontext()
+        if isinstance(stream, bool) or not isinstance(stream, (int, c_void_p)):
+            raise TypeError("stream must be a raw stream handle represented by int or ctypes.c_void_p")
+        raw_stream = stream.value if isinstance(stream, c_void_p) else stream
+        if raw_stream is not None and raw_stream < 0:
+            raise ValueError(f"stream must be non-negative or -1, got {raw_stream}")
+
+        runtime_device = resolve_runtime_device(self.target, allow_missing=True)
+        if runtime_device is None:
+            raise RuntimeError(f"No runtime device is registered for target {self.target}")
+        if out_device is None or out_device.index is None:
+            current_device = runtime_device.current_device()
+            device_id = current_device.index
+        else:
+            device_id = out_device.index
+        if device_id is None:
+            device_id = 0
+        return tvm_ffi.use_raw_stream(runtime_device.tvm_device(device_id), stream)
+
     def _convert_torch_func(self) -> Callable[..., Any]:
         if getattr(self, "_ffi_callee_allocated_output_abi", False):
             return self._convert_ffi_callee_allocated_output_func()
@@ -289,7 +316,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 expected_dtype_strs.append(None)
                 is_buffer_param.append(False)
 
-        def func(*inputs: torch.Tensor | Any):
+        def func(*inputs: torch.Tensor | Any, stream: int | c_void_p | None = None):
             # Validate input count strictly
             expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
@@ -376,10 +403,11 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
             if out_device is not None:
                 self._prepare_torch_device(out_device)
-            if executable is not None:
-                executable(*tensor_list)
-            else:
-                self._get_executable(out_device)(*tensor_list)
+            with self._raw_stream_context(stream, out_device):
+                if executable is not None:
+                    executable(*tensor_list)
+                else:
+                    self._get_executable(out_device)(*tensor_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -393,7 +421,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         current_device_functor = None
         expected_inputs = len(self.params) - len(self.result_idx)
 
-        def func(*inputs: torch.Tensor | Any):
+        def func(*inputs: torch.Tensor | Any, stream: int | c_void_p | None = None):
             nonlocal current_device_functor
             if len(inputs) != expected_inputs:
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
@@ -419,7 +447,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 # a zero-element anchor solely for that allocator/device state.
                 allocator_anchor = torch.empty(0, device=device)
 
-            result = self._get_executable(device)(*inputs, allocator_anchor)
+            with self._raw_stream_context(stream, allocator_anchor.device):
+                result = self._get_executable(device)(*inputs, allocator_anchor)
             if len(self.result_idx) == 1:
                 return result
             return list(result)
