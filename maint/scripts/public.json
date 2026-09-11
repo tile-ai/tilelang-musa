@@ -1,0 +1,9 @@
+{
+  "gitmodule_updates": {
+    "3rdparty/tvm": "https://github.com/MooreThreads/tvm_musa"
+  },
+  "gitmodule_refs": {
+    "3rdparty/tvm": "c79ad3066c88eef97de97dbac9aad9af2127ea60"
+  },
+  "remove_paths": []
+}
