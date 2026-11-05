@@ -1,4 +1,4 @@
-# Tilelang_MUSA
+# TileLang MUSA
 
 Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
 
@@ -12,7 +12,44 @@ In most cases, you only need to:
 
 <img src=./images/MatmulExample.png />
 
+## Version and Installation
+
+| Component | Version | Purpose |
+| --- | --- | --- |
+| Public source baseline | [`v0.1.12+musa.1`](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1) | Source code and API reference in this repository |
+| Recommended binary package | `tilelang_musa==0.1.12+musa.5` | Install from the Moore Threads Python package index |
+
+The public source baseline and the recommended binary package have different revision numbers. Building this repository produces the public `.1` source version; it does not reproduce the `.5` binary package.
+
+### Install the Binary Package
+
+Use a Linux x86_64 environment with Python 3.10 or later. Prepare a compatible MUSA SDK, GPU driver, PyTorch and `torch_musa` environment first, then install:
+
+```bash
+python -m pip install 'tilelang_musa==0.1.12+musa.5' -i https://dl.mthreads.com/repo/api/pypi/pypi/simple
+```
+
+The package is imported as `tilelang`. Use a separate virtual environment from upstream PyPI `tilelang`, which shares that import name.
+
+Check the installed package version and MUSA device visibility:
+
+```bash
+python -c "from importlib.metadata import version; import torch, torch_musa, tilelang; print('tilelang_musa:', version('tilelang_musa')); print('tilelang:', tilelang.__version__); print('MUSA available:', torch.musa.is_available())"
+```
+
+This check reports installation and device visibility; run an operator correctness test before using your workload.
+
 ## Latest News
+
+### 0.1.12+musa.5 Binary Package
+
+The recommended binary installation is now `tilelang_musa==0.1.12+musa.5`, available from the Moore Threads package index above. The public source baseline remains `v0.1.12+musa.1`.
+
+```bash
+python -m pip install 'tilelang_musa==0.1.12+musa.5' -i https://dl.mthreads.com/repo/api/pypi/pypi/simple
+```
+
+See [TileOPs v1.0.0](https://github.com/MooreThreads/TileOPs/releases/tag/v1.0.0) for MUSA operator implementations and development examples.
 
 ### 0.1.12+musa.1
 
@@ -38,7 +75,9 @@ Add support for DeepSeek [TileKernels](./tilekernels/) on the MUSA platform. The
 
 Tilelang MUSA already supports S5000, S4000, and M1000.
 
-## Build from Source
+## Build from Public Source
+
+To build the published `v0.1.12+musa.1` source version, use the version branch below. To use the recommended `.5` binary, follow [Install the Binary Package](#install-the-binary-package).
 
 We recommend using a virtual environment.
 
@@ -50,8 +89,8 @@ conda activate tilelang-dev
 Install Tilelang_MUSA
 
 ```
-git clone --recursive https://github.com/MooreThreads/tilelang_musa.git
-cd tilelang_musa
+git clone --branch v0.1.12+musa.1 --recursive https://github.com/tile-ai/tilelang-musa.git
+cd tilelang-musa
 pip install -r ./requirements-dev.txt
 pip install -e . -v --no-build-isolation
 ```
@@ -128,6 +167,7 @@ kernel = matmul.compile(
 
 # 2. Test the kernel in Python with PyTorch data
 import torch
+import torch_musa
 
 # Create random input tensors on the GPU
 a = torch.randn(M, K, device="musa", dtype=torch.float16)
@@ -157,11 +197,43 @@ latency = profiler.do_bench()
 print(f"Latency: {latency} ms")
 ```
 
+## Operator Development References / 算子开发参考
+
+### TileOPs: Operator Implementations and Examples
+
+[MooreThreads/TileOPs](https://github.com/MooreThreads/TileOPs/tree/v1.0.0) provides MUSA operator implementations built on TileLang, with operator interfaces, kernel implementations, tests and benchmarks. It is a useful reference for developing and integrating operators on MP31 / MTT S5000.
+
+- [TileOPs v1.0.0 release notes](https://github.com/MooreThreads/TileOPs/releases/tag/v1.0.0): environment setup, operator coverage, API usage and release scope.
+- [Operator and kernel source](https://github.com/MooreThreads/TileOPs/tree/v1.0.0/src/tileops): examples across GEMM, attention, normalization, reductions, MoE and other operator families.
+- [Tests](https://github.com/MooreThreads/TileOPs/tree/v1.0.0/tests) and [benchmarks](https://github.com/MooreThreads/TileOPs/tree/v1.0.0/benchmarks): reference inputs, correctness checks and measurement examples.
+
+TileOPs v1.0.0 documents `0.1.12+musa.4` as its compiler runtime. This README recommends `.5` for TileLang-MUSA installation; check your selected TileOPs operators in that environment. Consult the release notes for implementation status and validation scope.
+
+Install the recommended `.5` TileLang-MUSA package from the Moore Threads package index:
+
+```bash
+python -m pip install 'tilelang_musa==0.1.12+musa.5' -i https://dl.mthreads.com/repo/api/pypi/pypi/simple
+```
+
+### Programming, Validation and Optimization
+
+| Development topic | Public reference |
+| --- | --- |
+| Kernel syntax and the basic development flow | [Quick Start](#quick-start) and [upstream TileLang documentation](https://tilelang.com/) |
+| MUSA copy, synchronization and extension semantics | [TileLang MUSA Programming Guide](./docs/musa_docs/index.md) |
+| Elementwise, reductions and basic kernel behavior | [Common MUSA test cases](./testing/musa/common/README.md) |
+| GEMM, attention, pipeline and layout examples | [MP31 test cases and operator examples](./testing/musa/mp31/README.md) |
+| Operator interfaces, integration and measurement examples | [TileOPs v1.0.0](https://github.com/MooreThreads/TileOPs/releases/tag/v1.0.0) |
+
+Start with a small input and compare against a PyTorch reference. Check shapes, dtypes, layouts, boundary conditions and synchronization before tuning tile sizes, pipelines or memory layouts. Measure performance after correctness passes, and record the hardware and software versions with the results.
+
+The source code is based on the public `.1` revision. Documentation may describe other package revisions; check its version notes when using the `.5` binary or upstream examples.
+
 ## More Docs
 
 For more examples, see the [MUSA MP31 Test Cases](./testing/musa/mp31/README.md) and [Common MUSA Test Cases](./testing/musa/common/README.md) documents.
 
-See the official [Tilelang documentation](https://tilelang.com/) and [Tilelang MUSA Documentation](./docs/musa_docs/index.md).
+See the official [Tilelang documentation](https://tilelang.com/) and [Tilelang MUSA Programming Guide](./docs/musa_docs/index.md).
 
 ## Acknowledgments
 
