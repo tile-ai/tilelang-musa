@@ -13,7 +13,6 @@ namespace tl {
 
 bool TargetIsMetal(Target target);
 int TargetMetalGetWarpSize(Target target);
-bool TargetMetalSupportsMetal4(Target target);
 
 } // namespace tl
 } // namespace tvm

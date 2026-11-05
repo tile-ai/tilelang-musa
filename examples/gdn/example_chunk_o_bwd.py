@@ -109,7 +109,7 @@ def prepare_output(
 
 @tilelang.jit(
     out_idx=[-4, -3, -2, -1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def tilelang_chunk_o_bwd_dqkwg(
     # task config
@@ -190,6 +190,7 @@ def tilelang_chunk_o_bwd_dqkwg(
             ds_fragment_positive_transpose = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             dq_fragment = T.alloc_fragment((block_S, block_DK), dtype=accum_dtype)
             dk_fragment = T.alloc_fragment((block_S, block_DK), dtype=accum_dtype)
+            dk_fragment_2 = T.alloc_fragment((block_S, block_DK), dtype=accum_dtype)
             dw_fragment = T.alloc_fragment((block_S, block_DK), dtype=accum_dtype)
             q_fragment = T.alloc_fragment((block_S, block_DK), dtype=input_dtype)
             k_fragment = T.alloc_fragment((block_S, block_DK), dtype=input_dtype)
@@ -343,7 +344,6 @@ def tilelang_chunk_o_bwd_dqkwg(
                     dg[bk, bb, bs * block_S + i_s, bh] = dg_fragment_final[i_s]
 
             else:
-                dk_fragment_2 = T.alloc_fragment((block_S, block_DK), dtype=accum_dtype)
                 for i_s1, i_s2 in T.Parallel(block_S, block_S):
                     ds_fragment[i_s1, i_s2] = 0 if i_s1 < i_s2 else ds_fragment[i_s1, i_s2]
                 T.clear(dk_fragment_2)

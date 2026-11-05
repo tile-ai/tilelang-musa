@@ -1,3 +1,4 @@
+import pytest
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
@@ -103,7 +104,8 @@ def run_gemm(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_gemm_f16f16f16_nn():
     run_gemm(
         512,
@@ -121,6 +123,7 @@ def test_gemm_f16f16f16_nn():
     )
 
 
+@pytest.mark.ci_smoke
 def test_gemm_f16f16f32_nn():
     run_gemm(
         512,
@@ -153,8 +156,6 @@ def test_gemm_bf16bf16f32_nn():
     )
 
 
-# tfloat32 is an NVIDIA-only dtype and has no CDNA lowering.
-@tilelang.testing.requires_cuda
 def test_gemm_f32f32f32_nn():
     run_gemm(
         512,
@@ -171,7 +172,8 @@ def test_gemm_f32f32f32_nn():
     )
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_gemm_f16f16f16_tn():
     run_gemm(
         512,
@@ -189,7 +191,8 @@ def test_gemm_f16f16f16_tn():
     )
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_gemm_f16f16f16_nt():
     run_gemm(
         512,
@@ -207,23 +210,20 @@ def test_gemm_f16f16f16_nt():
     )
 
 
-@tilelang.testing.requires_cuda_or_cdna
 def test_gemm_i8i8i32_nt():
     run_gemm(512, 1024, 768, False, True, T.int8, T.int8, T.int32, 128, 128, 64)
 
 
-@tilelang.testing.requires_cuda_or_cdna
 def test_gemm_i8i8i32_tn():
     run_gemm(512, 1024, 768, True, False, T.int8, T.int8, T.int32, 128, 128, 64)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_gemm_f64f64f64_nt():
     run_gemm(512, 512, 512, False, True, T.float64, T.float64, T.float64, 64, 32, 16)
 
 
-# tfloat32 is an NVIDIA-only dtype and has no CDNA lowering.
-@tilelang.testing.requires_cuda
 def test_gemm_f32f32f32_nt():
     run_gemm(
         512,
@@ -241,7 +241,7 @@ def test_gemm_f32f32f32_nt():
 
 
 # TODO(Gong): Meets precision issue on ROCm, disable for now
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_gemm_f32f32f32_tn():
     run_gemm(
         512,
@@ -258,7 +258,8 @@ def test_gemm_f32f32f32_tn():
     )
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_pad_aligned_f16f16f16_nn():
     run_gemm(
         512 - 8,
@@ -276,7 +277,8 @@ def test_pad_aligned_f16f16f16_nn():
     )
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_pad_f16f16f16_nn():
     run_gemm(
         512 - 9,
@@ -411,8 +413,8 @@ def run_gemm_sr(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 # WGMMA only supports B in shared
-@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def test_gemm_f16f16f16_sr():
     run_gemm_sr(
         512,
@@ -530,8 +532,8 @@ def run_gemm_rs(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 # Register source A operand GMMAs must have K-major A layout.
-@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def test_gemm_f16f16f16_rs():
     run_gemm_rs(
         512,

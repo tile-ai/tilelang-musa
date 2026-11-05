@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 /*!
  * \file vectorize_loop.cc
  */
@@ -25,9 +44,7 @@
 #include "../op/utils.h"
 #include "arith/scalable_expression.h"
 #include "backend/common/target_utils.h"
-#include "loop_vectorize.h"
 #include "tir/analysis/check_contains.h"
-#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -102,6 +119,41 @@ inline PrimExpr BroadcastTo(PrimExpr e, int lanes, bool is_scalable) {
 }
 
 /*!
+ * \brief Extract BufferLoad from an expression that may be wrapped in
+ * address_of.
+ */
+inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
+  if (const auto *load = expr.as<BufferLoadNode>()) {
+    return GetRef<BufferLoad>(load);
+  }
+  if (const auto *call = expr.as<CallNode>()) {
+    if (call->op.same_as(builtin::address_of()) && !call->args.empty()) {
+      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+        return GetRef<BufferLoad>(load);
+      }
+    }
+    if (call->op.same_as(tl::access_ptr()) && !call->args.empty()) {
+      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+        return GetRef<BufferLoad>(load);
+      }
+    }
+    // Handle tvm_access_ptr: args are (dtype_annotation, data, offset, extent,
+    // access_mask)
+    if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
+      DataType dtype = call->args[0].dtype();
+      Var data_var = Downcast<Var>(call->args[1]);
+      PrimExpr offset = call->args[2];
+      // Create a dummy buffer with the correct dtype and a BufferLoad from data
+      // + offset
+      Buffer dummy_buf(data_var, dtype, {Integer(1)}, {}, Integer(0),
+                       data_var->name_hint, 0, 0, kDefault);
+      return BufferLoad(dummy_buf, {offset});
+    }
+  }
+  return Optional<BufferLoad>();
+}
+
+/*!
  * \brief Get the vectorized atomic add op based on vector size.
  */
 inline Op GetVectorizedAtomicOp(int vector_size) {
@@ -113,6 +165,20 @@ inline Op GetVectorizedAtomicOp(int vector_size) {
   default:
     return atomic_add_elem_op();
   }
+}
+
+/*!
+ * \brief Get the max vector size supported by the given dtype for atomic ops.
+ */
+inline int GetMaxAtomicVectorSize(DataType dtype, Target target) {
+  if (dtype.is_float16() || dtype.is_bfloat16()) {
+    return 2;
+  }
+  if (dtype.is_float() && dtype.bits() == 32 &&
+      TargetHasSMVersionGE(target, 90)) {
+    return 4;
+  }
+  return 1;
 }
 
 // Rewrite vectorized allocation access
@@ -211,13 +277,7 @@ public:
   // the mutator invocation pattern at call sites.
   static Stmt Vectorize(const Var &var, const PrimExpr &var_lanes, Stmt body) {
     TLVectorizer vec{var, var_lanes};
-    Stmt original_body = body;
-    auto vec_stmt = vec(std::move(body));
-    // If scalarization is needed, scalarize the entire original body
-    if (vec.need_scalarize_) {
-      return vec.Scalarize(original_body);
-    }
-    return vec_stmt;
+    return vec(std::move(body));
   }
 
   TLVectorizer(const Var &var, const PrimExpr &var_lanes)
@@ -226,12 +286,15 @@ public:
   }
 
   Stmt VisitStmt(const Stmt &stmt) final {
-    // If scalarization is already needed, return original stmt unchanged
-    // to let the top-level Vectorize handle it
+    ICHECK(!need_scalarize_);
+    Stmt ret = StmtMutator::VisitStmt(stmt);
     if (need_scalarize_) {
-      return stmt;
+      auto scalarized_stmt = Scalarize(stmt);
+      need_scalarize_ = false;
+      return scalarized_stmt;
+    } else {
+      return ret;
     }
-    return StmtMutator::VisitStmt(stmt);
   }
 
   PrimExpr VisitExpr(const PrimExpr &e) final {
@@ -379,34 +442,17 @@ public:
 
   PrimExpr VisitExpr_(const CastNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
-
-    // Vectorize PrimExpr values inside annotations (e.g. "rbits" for
-    // stochastic-rounding casts). Keys and non-PrimExpr values pass through
-    // unchanged.
-    ffi::Map<ffi::String, ffi::Any> new_annotations;
-    bool annotations_changed = false;
-    for (const auto &kv : op->annotations) {
-      if (auto opt = kv.second.as<PrimExpr>()) {
-        PrimExpr new_val = this->VisitExpr(opt.value());
-        new_annotations.Set(kv.first, new_val);
-        if (!new_val.same_as(opt.value()))
-          annotations_changed = true;
+    if (value.same_as(op->value)) {
+      return GetRef<PrimExpr>(op);
+    } else {
+      if (value.dtype().is_scalable_vector()) {
+        return Cast(op->dtype.with_scalable_vscale_factor(
+                        value.dtype().vscale_factor()),
+                    value);
       } else {
-        new_annotations.Set(kv.first, kv.second);
+        return Cast(op->dtype.with_lanes(value.dtype().lanes()), value);
       }
     }
-    if (value.same_as(op->value) && !annotations_changed) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-    DataType new_dtype = value.dtype().is_scalable_vector()
-                             ? op->dtype.with_scalable_vscale_factor(
-                                   value.dtype().vscale_factor())
-                             : op->dtype.with_lanes(value.dtype().lanes());
-    if (op->annotations.empty()) {
-      return Cast(new_dtype, value);
-    }
-    return Cast(new_dtype, value,
-                annotations_changed ? new_annotations : op->annotations);
   }
 
   PrimExpr VisitExpr_(const FloatImmNode *op) final {
@@ -563,8 +609,10 @@ public:
   PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(atomic_add_elem_op()));
 
-    ICHECK_GE(op->args.size(), 2U)
-        << "atomic_add_elem_op requires at least 2 args (dst and src)";
+    // Must have at least 2 args (dst_ptr and src)
+    if (op->args.size() < 2) {
+      return GetRef<PrimExpr>(op);
+    }
 
     // Get the vector size from var_lanes_
     auto lanes_ptr = as_const_int(var_lanes_);
@@ -582,38 +630,18 @@ public:
       src = BroadcastTo(src, vector_size, src.dtype().is_scalable_vector());
     }
 
-    // The emitter only needs the destination dtype and address space.
+    // Check if dtype supports this vector size
+    auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
     Target target = Target::Current(false);
-    int max_vec_size;
-    if (auto load = ExtractBufferLoadForAtomic(dst); load.defined()) {
-      const Buffer &buffer = load.value()->buffer;
-      max_vec_size =
-          GetMaxAtomicVectorSize(buffer->dtype, buffer.scope(), target);
-    } else {
-      Call ptr = Downcast<Call>(dst);
-      ICHECK(ptr->op.same_as(builtin::tvm_access_ptr()))
-          << "Unsupported atomic destination: " << dst;
-      ICHECK_EQ(ptr->args.size(), 5U)
-          << "tvm_access_ptr expects (dtype, data, offset, extent, rw_mask)";
-      max_vec_size = GetMaxAtomicVectorSize(
-          ptr->args[0].dtype(), GetPtrStorageScope(Downcast<Var>(ptr->args[1])),
-          target);
-    }
+    int max_vec_size =
+        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer->dtype, target);
     if (vector_size > max_vec_size) {
-      // Keep the loop binder when this atomic requires scalar lanes.
-      need_scalarize_ = true;
+      // Vector size not supported for this dtype, cannot vectorize
       return GetRef<PrimExpr>(op);
     }
 
-    // Return the vectorized atomic op, carrying the trailing operands
-    // (memory_order) so the wide atomic honors the requested ordering just like
-    // the scalar path does. Copied as-is: the order is a scalar constant and
-    // must not be broadcast to the vector lanes.
-    Array<PrimExpr> new_args{dst, src};
-    for (size_t i = 2; i < op->args.size(); ++i) {
-      new_args.push_back(op->args[i]);
-    }
-    return Call(op->dtype, GetVectorizedAtomicOp(vector_size), new_args);
+    // Return the vectorized atomic op
+    return Call(op->dtype, GetVectorizedAtomicOp(vector_size), {dst, src});
   }
 
   static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
@@ -667,7 +695,7 @@ public:
   // builtin::ptx_cp_async keeps the transfer width in bytes, while
   // tl::ptx_cp_async keeps it in logical element counts. The generic
   // vectorization pass widens either form by the vector lane count and lets
-  // the final codegen validate the derived PTX byte width.
+  // the final codegen validate the derived byte width.
   PrimExpr MutatePTXCPAsyncExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::ptx_cp_async()) ||
            op->op.same_as(tl::ptx_cp_async()));
@@ -919,7 +947,7 @@ public:
       return GetRef<Stmt>(op);
     } else {
       return For(op->loop_var, op->min, extent, op->kind, body,
-                 op->thread_binding, op->annotations, op->step, op->span);
+                 op->thread_binding, op->annotations);
     }
   }
 
@@ -1155,8 +1183,7 @@ public:
     Stmt stmt = StmtMutator::VisitStmt_(op);
     op = stmt.as<ForNode>();
     if (op->kind == ForKind::kVectorized) {
-      return For(op->loop_var, op->min, op->extent, ForKind::kSerial, op->body,
-                 op->thread_binding, op->annotations, op->step, op->span);
+      return For(op->loop_var, op->min, op->extent, ForKind::kSerial, op->body);
     } else {
       return stmt;
     }
@@ -1181,9 +1208,7 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def(
-      "tl.transform.VectorizeLoop",
-      [](bool enable_vectorize) { return VectorizeLoop(enable_vectorize); });
+  refl::GlobalDef().def("tl.transform.VectorizeLoop", VectorizeLoop);
 }
 
 } // namespace tl

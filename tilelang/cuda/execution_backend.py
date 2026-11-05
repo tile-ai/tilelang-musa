@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from tilelang.backend.execution_backend import ExecutionBackendSpec
+from tvm.target import Target
+
+from tilelang.backend.execution_backend import ExecutionBackendSpec, register_execution_backend
+
+
+def _is_cutedsl_target(target: Target) -> bool:
+    return target.kind.name == "cuda" and "cutedsl" in target.keys
+
+
+def _is_plain_cuda_target(target: Target) -> bool:
+    return target.kind.name == "cuda" and "cutedsl" not in target.keys
 
 
 def _is_nvrtc_available() -> bool:
@@ -21,17 +31,28 @@ def _is_cutedsl_available() -> bool:
     return True
 
 
-CUDA_EXECUTION_BACKENDS = [
+register_execution_backend(
+    "cuda",
     ExecutionBackendSpec(
         "tvm_ffi",
+        supports_target=_is_plain_cuda_target,
         enable_host_codegen=True,
         enable_device_compile=True,
-        supports_callee_allocated_outputs=True,
     ),
-    ExecutionBackendSpec("nvrtc", is_available=_is_nvrtc_available),
-    ExecutionBackendSpec("cython"),
-]
-
-CUTEDSL_EXECUTION_BACKENDS = [
-    ExecutionBackendSpec("cutedsl", is_available=_is_cutedsl_available),
-]
+    override=True,
+)
+register_execution_backend(
+    "cuda",
+    ExecutionBackendSpec("nvrtc", is_available=_is_nvrtc_available, supports_target=_is_plain_cuda_target),
+    override=True,
+)
+register_execution_backend(
+    "cuda",
+    ExecutionBackendSpec("cython", supports_target=_is_plain_cuda_target),
+    override=True,
+)
+register_execution_backend(
+    "cuda",
+    ExecutionBackendSpec("cutedsl", is_available=_is_cutedsl_available, supports_target=_is_cutedsl_target),
+    override=True,
+)

@@ -47,16 +47,12 @@ def get_cc():
         The path to the default C/C++ compiler, or None if none was found.
     """
 
+    if not _is_linux_like():
+        return None
+
     env_cxx = os.environ.get("CXX") or os.environ.get("CC")
     if env_cxx:
         return env_cxx
-
-    if _is_windows_like():
-        from tilelang.contrib.msvc import get_windows_compiler
-
-        compiler, _kind = get_windows_compiler()
-        return compiler
-
     cc_names = ["g++", "gcc", "clang++", "clang", "c++", "cc"]
     dirs_in_path = os.get_exec_path()
     for cc in cc_names:
@@ -77,16 +73,12 @@ def get_cplus_compiler():
         The path to the default C/C++ compiler, or None if none was found.
     """
 
+    if not _is_linux_like():
+        return None
+
     env_cxx = os.environ.get("CXX") or os.environ.get("CC")
     if env_cxx:
         return env_cxx
-
-    if _is_windows_like():
-        from tilelang.contrib.msvc import get_windows_compiler
-
-        compiler, _kind = get_windows_compiler()
-        return compiler
-
     cc_names = ["g++", "clang++", "c++"]
     dirs_in_path = os.get_exec_path()
     for cc in cc_names:
@@ -350,8 +342,7 @@ def cross_compiler(compile_func, options=None, output_format=None, get_target_tr
         compile_func = create_shared
 
     def _fcompile(outputs, objects, options=None):
-        # Use a fresh list per invocation so per-call options do not leak across builds.
-        all_options = list(base_options)
+        all_options = base_options
         if options is not None:
             all_options += options
         compile_func(outputs, objects + add_files, options=all_options, **kwargs)

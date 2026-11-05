@@ -1,7 +1,6 @@
 import torch
 import tilelang
 import tilelang.language as T
-import tilelang.testing
 
 
 def ref_program(x, y):
@@ -18,16 +17,8 @@ def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
             C_local = T.alloc_fragment((block_M, block_N), out_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            T.copy(
-                A[by * block_M, bx * block_N],
-                A_shared,
-                annotations={"prefer_instruction": "tma"},
-            )
-            T.copy(
-                B[by * block_M, bx * block_N],
-                B_shared,
-                annotations={"prefer_instruction": "tma"},
-            )
+            T.copy(A[by * block_M, bx * block_N], A_shared)
+            T.copy(B[by * block_M, bx * block_N], B_shared)
             for local_y, local_x in T.Parallel(block_M, block_N):
                 C_local[local_y, local_x] = A_shared[local_y, local_x] + B_shared[local_y, local_x]
             T.copy(C_local, C_shared)
@@ -37,8 +28,8 @@ def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
 
 
 def run_elementwise_add(M, N):
-    a = torch.randn(M, N, dtype=torch.float32, device="cuda")
-    b = torch.randn(M, N, dtype=torch.float32, device="cuda")
+    a = torch.randn(M, N, dtype=torch.float32, device="musa")
+    b = torch.randn(M, N, dtype=torch.float32, device="musa")
 
     # Default config
     block_M, block_N = 128, 128
@@ -55,12 +46,11 @@ def run_elementwise_add(M, N):
         assert "tma_load" in code and "CUtensorMap" in code
 
 
-@tilelang.testing.requires_cuda
-def test_tilelang_language_tma_1d():
+def main():
     run_elementwise_add(128, 128)
     run_elementwise_add(256, 128)
     run_elementwise_add(256, 256)
 
 
 if __name__ == "__main__":
-    test_tilelang_language_tma_1d()
+    main()

@@ -10,8 +10,6 @@ from tvm.tirx import (
 from tvm.tirx.stmt import Bind
 from tvm.tirx.transform import prim_func_pass
 
-from tilelang.ir import get_stmt_span, stamp_stmt_spans
-
 
 @tirx.functor.mutator
 class HoistBroadcastValuesMutator(PyStmtExprMutator):
@@ -46,7 +44,6 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         self.hoist_enabled = saved_hoist_enabled
         self.pending_defs = saved_pending_defs
 
-        stamp_stmt_spans(new_stmt, get_stmt_span(op))
         return new_stmt
 
     def visit_bind_(self, op: Bind):
@@ -68,7 +65,6 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         self.hoist_enabled = saved_hoist_enabled
         self.pending_defs = saved_pending_defs
 
-        stamp_stmt_spans(new_stmt, get_stmt_span(op))
         return new_stmt
 
 
@@ -94,6 +90,6 @@ def HoistBroadcastValues():
     def pass_fn(func: PrimFunc, mod, ctx):
         mutator = HoistBroadcastValuesMutator()
         new_body = mutator.visit_stmt(func.body)
-        return func.with_body(new_body, span=func.span)
+        return func.with_body(new_body)
 
     return prim_func_pass(pass_fn, opt_level=0)

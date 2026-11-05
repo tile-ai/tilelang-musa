@@ -17,12 +17,19 @@ from tilelang import PassConfigKey
 N = 1024
 
 
+def _pass_configs(disable_reuse: bool) -> dict[PassConfigKey, bool]:
+    return {
+        PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: disable_reuse,
+        PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    }
+
+
 def _make_data_integrity_kernel():
 
     @tilelang.jit(
-        pass_configs={
-            PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True,
-        },
+        target="musa",
+        pass_configs=_pass_configs(True),
     )
     def kernel(A, B, C, D):
         A: T.Tensor[[N], T.float16]
@@ -51,9 +58,8 @@ def _make_data_integrity_kernel():
 def _make_no_overlap_kernel(disable_reuse: bool):
 
     @tilelang.jit(
-        pass_configs={
-            PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: disable_reuse,
-        },
+        target="musa",
+        pass_configs=_pass_configs(disable_reuse),
     )
     def kernel(A, B, A_out, B_out):
         A: T.Tensor[[N], T.float16]
@@ -73,7 +79,7 @@ def _make_no_overlap_kernel(disable_reuse: bool):
     return kernel
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_disable_reuse_data_integrity():
     """Allocate multiple shared buffers, copy data in, compute sum, copy out.
 
@@ -81,17 +87,17 @@ def test_disable_reuse_data_integrity():
     """
     kernel = _make_data_integrity_kernel()
 
-    a = torch.randn(N, device="cuda", dtype=torch.float16)
-    b = torch.randn(N, device="cuda", dtype=torch.float16)
-    c = torch.randn(N, device="cuda", dtype=torch.float16)
-    d = torch.empty(N, device="cuda", dtype=torch.float16)
+    a = torch.randn(N, device="musa", dtype=torch.float16)
+    b = torch.randn(N, device="musa", dtype=torch.float16)
+    c = torch.randn(N, device="musa", dtype=torch.float16)
+    d = torch.empty(N, device="musa", dtype=torch.float16)
 
     kernel(a, b, c, d)
     ref = a + b + c
     torch.testing.assert_close(d, ref, rtol=1e-3, atol=1e-3)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_disable_reuse_no_overlap():
     """Two sequential buffers must NOT share the same offset when reuse is disabled.
 
@@ -102,18 +108,18 @@ def test_disable_reuse_no_overlap():
     kernel_no_reuse = _make_no_overlap_kernel(disable_reuse=True)
     kernel_reuse = _make_no_overlap_kernel(disable_reuse=False)
 
-    a = torch.randn(N, device="cuda", dtype=torch.float16)
-    b = torch.randn(N, device="cuda", dtype=torch.float16)
-    a_out = torch.empty(N, device="cuda", dtype=torch.float16)
-    b_out = torch.empty(N, device="cuda", dtype=torch.float16)
+    a = torch.randn(N, device="musa", dtype=torch.float16)
+    b = torch.randn(N, device="musa", dtype=torch.float16)
+    a_out = torch.empty(N, device="musa", dtype=torch.float16)
+    b_out = torch.empty(N, device="musa", dtype=torch.float16)
 
     # Correctness: both should produce correct results
     kernel_no_reuse(a, b, a_out, b_out)
     torch.testing.assert_close(a_out, a, rtol=0, atol=0)
     torch.testing.assert_close(b_out, b, rtol=0, atol=0)
 
-    a_out2 = torch.empty(N, device="cuda", dtype=torch.float16)
-    b_out2 = torch.empty(N, device="cuda", dtype=torch.float16)
+    a_out2 = torch.empty(N, device="musa", dtype=torch.float16)
+    b_out2 = torch.empty(N, device="musa", dtype=torch.float16)
     kernel_reuse(a, b, a_out2, b_out2)
     torch.testing.assert_close(a_out2, a, rtol=0, atol=0)
     torch.testing.assert_close(b_out2, b, rtol=0, atol=0)
@@ -124,20 +130,28 @@ def test_disable_reuse_no_overlap():
     src_no_reuse = kernel_no_reuse.get_kernel_source()
     src_reuse = kernel_reuse.get_kernel_source()
 
-    def extract_smem_offsets(src: str) -> list[int]:
-        """Extract merged shared-memory offsets from generated code."""
-        # Alias-preserving lowering emits:
-        #   void* a_shared = ((void*)((char*)buf_dyn_shmem + 0));
-        alias_pattern = r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);"
-        # Direct merged-buffer lowering emits access patterns such as:
-        #   buf_dyn_shmem)[1024])
-        direct_pattern = r"buf_dyn_shmem\)\[(\d+)\]"
-        offsets = {int(m) for m in re.findall(alias_pattern, src)}
-        offsets.update(int(m) for m in re.findall(direct_pattern, src))
+    def extract_smem_element_offsets(src: str) -> list[int]:
+        """Extract base element offsets from shared-memory source."""
+        alias_offsets = re.findall(
+            r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);",
+            src,
+        )
+        if alias_offsets:
+            return sorted(set(int(m) for m in alias_offsets))
+
+        offsets = set(int(m) for m in re.findall(r"buf_dyn_shmem\)\[(\d+)\]", src))
+        for line in src.splitlines():
+            if "buf_dyn_shmem" not in line or "threadIdx" not in line:
+                continue
+            line_offsets = re.findall(r"\+\s*(\d+)(?=[)\]])", line)
+            if line_offsets:
+                offsets.update(int(m) for m in line_offsets)
+            else:
+                offsets.add(0)
         return sorted(offsets)
 
-    offsets_no_reuse = extract_smem_offsets(src_no_reuse)
-    offsets_reuse = extract_smem_offsets(src_reuse)
+    offsets_no_reuse = extract_smem_element_offsets(src_no_reuse)
+    offsets_reuse = extract_smem_element_offsets(src_reuse)
 
     # With reuse disabled: must have at least 2 distinct offsets (buffers not merged)
     assert len(offsets_no_reuse) >= 2, f"Expected >=2 distinct smem offsets with reuse disabled, got {offsets_no_reuse}"

@@ -7,7 +7,7 @@ from tilelang.language.utils import get_buffer_region_from_load
 from functools import reduce
 from tvm import IRModule, DataType
 from tvm.tirx import PrimFunc
-from tvm import ir, tirx
+from tvm import arith, ir, tirx
 from tvm.tirx.expr import CallEffectKind
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
@@ -119,20 +119,6 @@ def is_fragment(buffer: BufferLikeType) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
-def is_reducer(buffer: BufferLikeType) -> bool:
-    """
-    Check if the buffer is a reducer v2 accumulator (scope local.reducer).
-
-    Args:
-        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
-
-    Returns:
-        bool: True if the buffer is a reducer accumulator, False otherwise.
-    """
-    buffer = _get_buffer(buffer)
-    return buffer.scope() == "local.reducer"
-
-
 def is_local_var(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the local.var memory scope.
@@ -195,6 +181,7 @@ def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list
 
     - Buffer/BufferLoad/BufferRegion -> returns BufferRegion when extents is None
     - Buffer/BufferLoad/BufferRegion -> returns a tl.region call when extents is provided
+    - tl.region Call -> returns the decoded BufferRegion for analysis
     """
     from tilelang.language.frame import has_let_value, get_let_value
 
@@ -265,25 +252,23 @@ def retrieve_shape(obj: BufferLikeType) -> list:
 
 def retrieve_stride(obj: BufferLikeType) -> list:
     """
-    Retrieve strides for a buffer-like object.
+    Retrieve row-major strides for a buffer-like object based on its buffer.shape.
 
-    For BufferRegion and BufferLoad, uses the underlying buffer. Declared
-    strides take precedence, with compact row-major strides as the fallback.
+    For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
     """
-    # Imported lazily to avoid a cycle: `tilelang.language` imports this module.
-    from tilelang.language.eager.utils import construct_strides
-
     if isinstance(obj, tirx.Buffer):
-        buffer = obj
+        shape = obj.shape
     elif isinstance(obj, (tirx.BufferRegion, tirx.BufferLoad)):
-        buffer = obj.buffer
+        shape = obj.buffer.shape
     else:
         raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
 
-    if len(buffer.strides) == len(buffer.shape) and len(buffer.strides) > 0:
-        return list(buffer.strides)
-
-    return list(construct_strides(buffer.shape))
+    strides = []
+    stride = 1
+    for s in reversed(shape):
+        strides.insert(0, stride)
+        stride *= s
+    return strides
 
 
 def retrive_ptr_from_buffer_region(buffer_or_load_or_region: BufferLikeType, access_type: str = "r") -> PrimExpr:
@@ -467,7 +452,8 @@ def prim_expr_equal(lhs, rhs) -> bool:
     """
     Robust equality for PrimExpr shapes/extents.
 
-    Tries structural_equal first, then falls back to expr_deep_equal.
+    Tries structural_equal first, then falls back to expr_deep_equal and
+    arithmetical equality proof.
     Python ints are converted to IntImm for comparison.
     """
     if isinstance(lhs, int) and isinstance(rhs, int):
@@ -478,7 +464,9 @@ def prim_expr_equal(lhs, rhs) -> bool:
         rhs = tirx.IntImm("int32", rhs)
     if ir.structural_equal(lhs, rhs):
         return True
-    return tirx.analysis.expr_deep_equal(lhs, rhs)
+    if tirx.analysis.expr_deep_equal(lhs, rhs):
+        return True
+    return arith.Analyzer().can_prove_equal(lhs, rhs)
 
 
 def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[list, list]:

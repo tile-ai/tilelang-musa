@@ -1,13 +1,9 @@
 from __future__ import annotations
-from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
-    WGMMADescriptorParams,
-    compute_gmma_descriptor,
-    select_wgmma_inst_n,
-)
+from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import gcd, compute_gmma_descriptor, WGMMADescriptorParams
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
-import tilelang.cuda.language as T
+import tilelang.language as T
 from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, BufferRegion, IndexMap, handle_add_byte_offset
+from tvm.tirx import PrimExpr, Buffer, Var, BufferRegion, IndexMap
 from tilelang.utils import is_fragment, is_shared, is_full_region
 from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
@@ -38,10 +34,10 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        e_dtype: str = "uint8",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        e_dtype: str = T.uint8,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         e_transposed: bool = False,
@@ -85,7 +81,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         return self
 
     def _initialize_wgmma_prefix(self, n_dim: int = 16):
-        inst_m, inst_n = 64, select_wgmma_inst_n(self.warp_col_tiles)
+        inst_m, inst_n = 64, gcd(self.warp_col_tiles, 256)
         assert inst_n % 8 == 0, (
             f"inst_n must be a multiple of 8, got {inst_n} (block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})"
         )
@@ -176,6 +172,8 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
         a_slice_byte_offset = a_params.slice_byte_offset
         b_slice_byte_offset = b_params.slice_byte_offset
+        a_is_sliced = not isinstance(a_slice_byte_offset, int) or a_slice_byte_offset != 0
+        b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
 
         accum_bits = DataType(accum_dtype).bits
         accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
@@ -184,8 +182,6 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         # where max specially handles the case when n_dim is 8.
         ak_atom_size = a_params.k_atom_size
         bk_atom_size = b_params.k_atom_size
-        a_k_panel_elems = a_params.k_panel_stride(m_dim)
-        b_k_panel_elems = b_params.k_panel_stride(n_dim)
         wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
         num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
         num_inst_n = self.warp_col_tiles // wgmma_inst_n
@@ -195,21 +191,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
         B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
         A_base_ptr = A_buf.access_ptr("r")
-        if not isinstance(a_slice_byte_offset, int):
-            a_is_sliced = True
-        elif a_slice_byte_offset != 0:
-            a_is_sliced = False
-            A_base_ptr = handle_add_byte_offset(A_base_ptr, a_slice_byte_offset)
-        else:
-            a_is_sliced = False
         B_base_ptr = B_buf.access_ptr("r")
-        if not isinstance(b_slice_byte_offset, int):
-            b_is_sliced = True
-        elif b_slice_byte_offset != 0:
-            b_is_sliced = False
-            B_base_ptr = handle_add_byte_offset(B_base_ptr, b_slice_byte_offset)
-        else:
-            b_is_sliced = False
         assert is_full_region(C_region), "Fragment output C must be a full region"
         C_buf = C_region.buffer
 
@@ -255,13 +237,13 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                         A_offset = (
                             (ki % ak_atom_size) * (micro_size_k // self.SPARSE_FACTOR)
                             + warp_i * 64 * a_swizzle_atom_elems
-                            + (ki // ak_atom_size) * a_k_panel_elems
+                            + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
                             if a_is_k_major
                             else warp_i * 64 * (k_dim // self.SPARSE_FACTOR)
                             + ki * a_swizzle_atom_elems * (micro_size_k // self.SPARSE_FACTOR)
                         )
                         B_offset = (
-                            (ki // bk_atom_size) * b_k_panel_elems
+                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
                             + (ki % bk_atom_size) * micro_size_k
                             + warp_j * wgmma_inst_n * b_swizzle_atom_elems
                             if b_is_k_major
@@ -340,8 +322,8 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         b_swizzle_mode = b_params.swizzle_mode
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
         b_slice_byte_offset = b_params.slice_byte_offset
+        b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
         bk_atom_size = b_params.k_atom_size
-        b_k_panel_elems = b_params.k_panel_stride(n_dim)
         wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
         num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
         num_inst_n = self.warp_col_tiles // wgmma_inst_n
@@ -353,16 +335,6 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         A_buf = A_region.buffer
         B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
         B_base_ptr = B_buf.access_ptr("r")
-        if not isinstance(b_slice_byte_offset, int):
-            # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
-            b_is_sliced = True
-        elif b_slice_byte_offset != 0:
-            # A static slice. Add to the pointer directly to avoid an excessive `increase_descriptor_offset`.
-            b_is_sliced = False
-            B_base_ptr = handle_add_byte_offset(B_base_ptr, b_slice_byte_offset)
-        else:
-            # Non-sliced.
-            b_is_sliced = False
         C_buf = C_region.buffer
 
         k_blocks = k_dim // micro_size_k
@@ -398,7 +370,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                         warp_j = warp_n * num_inst_n + j
                         A_offset = ki * warp_rows * local_size_a + i * local_size_a
                         B_offset = (
-                            (ki // bk_atom_size) * b_k_panel_elems
+                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
                             + warp_j * wgmma_inst_n * b_swizzle_atom_elems
                             + (ki % bk_atom_size) * micro_size_k
                             if b_is_k_major
@@ -617,20 +589,6 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             forward_index_fn=forward_index,
         )
         warp_n_layout = base_fragment.repeat([1, warp_cols], False, False)
-        # Decompose M warpgroup-major to match the instruction-issue side:
-        # each group of 4 warps owns a contiguous 128-row tile, and the
-        # per-warpgroup 64-row WGMMA atoms are consecutive local accumulator
-        # indices (see C_offset in wgmma_sp).
-        wg_row_warps = 4
-        assert block_row_warps % wg_row_warps == 0, f"block_row_warps must be a multiple of {wg_row_warps} for WGMMA, got {block_row_warps}"
-        num_warp_groups_m = block_row_warps // wg_row_warps
-        # Four M warps forming one warpgroup.
-        warpgroup_layout = warp_n_layout.repeat([wg_row_warps, 1], True, False)
-        # Per-warpgroup WGMMA M atoms are local accumulator indices.
-        warpgroup_layout = warpgroup_layout.repeat([warp_rows, 1], False, False)
-        # Repeat complete warpgroups along M.
-        warp_m_layout = warpgroup_layout.repeat([num_warp_groups_m, 1], True, False)
-        # Preserve the physical warp order:
-        # warp_id = warp_m + block_row_warps * warp_n.
-        warp_m_layout = warp_m_layout.repeat([1, block_col_warps], True, False)
+        block_layout = warp_n_layout.repeat([block_row_warps, block_col_warps], True, False)
+        warp_m_layout = block_layout.repeat([warp_rows, 1], False, False)
         return warp_m_layout

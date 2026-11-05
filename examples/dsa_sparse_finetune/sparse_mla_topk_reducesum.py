@@ -12,7 +12,10 @@ BF16 = T.bfloat16
 FP32 = T.float32
 INT32 = T.int32
 
-pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+pass_configs = {
+    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+}
 
 
 @tilelang.jit(pass_configs=pass_configs)

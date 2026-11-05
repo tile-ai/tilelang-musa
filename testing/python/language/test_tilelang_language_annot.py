@@ -5,11 +5,11 @@ import torch
 
 
 def test_tensor_annot_mul():
-    # There is a known issue where the cython execution backend fails to build with T.dynamic.
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
     # Forcing the TVM FFI execution backend to avoid the issue on HIP.
     @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
-        n = T.dynamic("n")
+        n = T.symbolic("n")
 
         @T.prim_func
         def kernel(
@@ -22,18 +22,18 @@ def test_tensor_annot_mul():
         return kernel
 
     ker = example_tensor_annot()
-    A = torch.arange(16, dtype=torch.int32, device="cuda")
+    A = torch.arange(16, dtype=torch.int32, device="musa")
     ker(A)
-    expected = torch.zeros(16, dtype=torch.int32, device="cuda")
+    expected = torch.zeros(16, dtype=torch.int32, device="musa")
     assert torch.equal(A, expected)
 
 
 def test_tensor_annot_add():
-    # There is a known issue where the cython execution backend fails to build with T.dynamic.
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
     # Forcing the TVM FFI execution backend to avoid the issue on HIP.
     @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
-        n = T.dynamic("n")
+        n = T.symbolic("n")
 
         @T.prim_func
         def kernel(
@@ -46,18 +46,18 @@ def test_tensor_annot_add():
         return kernel
 
     ker = example_tensor_annot()
-    A = torch.arange(16, dtype=torch.int32, device="cuda")
+    A = torch.arange(16, dtype=torch.int32, device="musa")
     ker(A)
-    expected = torch.zeros(16, dtype=torch.int32, device="cuda")
+    expected = torch.zeros(16, dtype=torch.int32, device="musa")
     assert torch.equal(A, expected)
 
 
 def test_tensor_annot_mul_add():
-    # There is a known issue where the cython execution backend fails to build with T.dynamic.
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
     # Forcing the TVM FFI execution backend to avoid the issue on HIP.
     @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
-        n = T.dynamic("n")
+        n = T.symbolic("n")
 
         @T.prim_func
         def kernel(
@@ -70,9 +70,9 @@ def test_tensor_annot_mul_add():
         return kernel
 
     ker = example_tensor_annot()
-    A = torch.arange(16, dtype=torch.int32, device="cuda")
+    A = torch.arange(16, dtype=torch.int32, device="musa")
     ker(A)
-    expected = torch.zeros(16, dtype=torch.int32, device="cuda")
+    expected = torch.zeros(16, dtype=torch.int32, device="musa")
     assert torch.equal(A, expected)
 
 

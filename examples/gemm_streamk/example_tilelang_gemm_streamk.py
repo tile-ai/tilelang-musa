@@ -157,7 +157,7 @@ def main():
         False,
         True,
         T.float16,
-        T.float32,  # fp32 for atom add
+        T.float16,
         T.float32,
         2,
         64,

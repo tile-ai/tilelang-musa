@@ -99,11 +99,9 @@ public:
     return substituter.VisitStmt(stmt);
   }
 
-protected:
+private:
   ParallelLoopFuser(arith::Analyzer *analyzer)
       : IRMutatorWithAnalyzer(analyzer) {};
-
-  virtual bool PreserveParallelLoopNest(const ForNode *) const { return false; }
 
   Stmt VisitStmt_(const ForNode *op) final {
     // Gather consecutive parallel loops
@@ -113,7 +111,7 @@ protected:
     FragmentAccessDetector detector;
     detector.Collect(op->body);
     // Do not fuse if there is a fragment access
-    if (detector.HasFragmentAccess() || PreserveParallelLoopNest(op)) {
+    if (detector.HasFragmentAccess()) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
     while (true) {

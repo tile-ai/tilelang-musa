@@ -102,7 +102,6 @@ public:
                              ///< (use __hmax_nan/__hmin_nan) instead of the
                              ///< default __hmax/__hmin which return the
                              ///< non-NaN operand.
-  Map<String, ObjectRef> annotations; ///< Backend-specific lowering controls.
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode,
                                     TileOperatorNode);
@@ -118,8 +117,7 @@ public:
         .def_ro("type", &ReduceOpNode::type)
         .def_ro("clear", &ReduceOpNode::clear)
         .def_ro("batch", &ReduceOpNode::batch)
-        .def_ro("nan_propagate", &ReduceOpNode::nan_propagate)
-        .def_ro("annotations", &ReduceOpNode::annotations);
+        .def_ro("nan_propagate", &ReduceOpNode::nan_propagate);
   }
 
   /// Lower the operator to TIR statements

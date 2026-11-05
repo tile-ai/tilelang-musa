@@ -32,9 +32,7 @@ std::vector<GemmImpl> &GemmImplRegistry() {
   return registry;
 }
 
-} // namespace
-
-const GemmImpl &ResolveGemmImpl(const Target &target) {
+const GemmImpl &ResolveGemmImpl(Target target) {
   const auto &registry = GemmImplRegistry();
   const GemmImpl *matched_impl = nullptr;
   for (const GemmImpl &impl : registry) {
@@ -53,6 +51,8 @@ const GemmImpl &ResolveGemmImpl(const Target &target) {
   return *matched_impl;
 }
 
+} // namespace
+
 void RegisterGemmImpl(GemmImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
@@ -67,21 +67,20 @@ void RegisterGemmImpl(GemmImpl impl) {
  *
  * Deserializes operator parameters from `args` and resolves buffer references,
  * populating an internal GemmNode with buffers, transpose flags, M/N/K,
- * warp policy, clear_accum, an optional mbarrier operand and the C tile
- * coordinates.
+ * warp policy, clear_accum, strides, offsets, optional kPack/wg_wait, and
+ * optional mbarrier.
  *
  * @param args Positional serialized arguments produced by the TL frontend:
  *   expected layout is:
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
- *      (optional) mbar (BufferLoad or const-0 placeholder),
- *      cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
- *   Block-scaled GEMM appends [SFA, SFB regions, k_start (PrimExpr)] and is
- *   built through tl.tileop.gemm_blockscaled (GemmBlockScaled) instead.
- *   Backend lowering knobs (k_pack, wg_wait) ride in the annotations map.
+ *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
+ *      (optional) kPack (Int), (optional) internal wg_wait (Int),
+ *      (optional) mbar (BufferLoad), cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
  */
-void GemmNode::InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
-                                 const Map<String, ObjectRef> &annotations) {
+Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+
   auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto b_access = NormalizeToAccessRegion(args[1], kAccessRead);
   auto c_access = NormalizeToAccessRegion(args[2], kAccessReadWrite);
@@ -101,20 +100,18 @@ void GemmNode::InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
   node->k_ = args[7].as<IntImm>().value()->value;
   node->policy_ = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
   node->clearAccum_ = args[9].as<PrimExpr>().value();
-  // k_pack rides in the annotations (a ROCm MFMA/WMMA lowering knob set by
-  // the ROCm dialect), not in the positional call protocol.
-  if (auto val = annotations.Get("k_pack")) {
-    const auto *int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "k_pack annotation must be IntImmNode";
-    node->kPack_ = int_val->value;
-    ICHECK(node->kPack_ == 1 || node->kPack_ == 2) << "kPack must be 1 or 2";
+  node->strideA_ = args[10].as<IntImm>().value()->value;
+  node->strideB_ = args[11].as<IntImm>().value()->value;
+  node->offsetA_ = args[12].as<PrimExpr>().value();
+  node->offsetB_ = args[13].as<PrimExpr>().value();
+  if (args.size() > 14) {
+    node->kPack_ = args[14].as<IntImm>().value()->value;
+    if (node->kPack_ != 1 && node->kPack_ != 2) {
+      ICHECK(false) << "kPack must be 1 or 2";
+    }
   }
-  // wg_wait is a Hopper warpgroup knob set by the CUDA dialect; like k_pack
-  // it rides in the annotations rather than the positional call protocol.
-  if (auto val = annotations.Get("wg_wait")) {
-    const auto *int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "wg_wait annotation must be IntImmNode";
-    node->wgWait_ = int_val->value;
+  if (args.size() > 15) {
+    node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
   if (auto val = annotations.Get("is_wgmma")) {
     const auto *int_val = val->as<IntImmNode>();
@@ -126,23 +123,21 @@ void GemmNode::InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
     ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
     node->isTcgen05_ = int_val->value != 0;
   }
-  if (args.size() > 10 && args[10]->IsInstance<BufferLoadNode>()) {
-    node->mbar_ = Downcast<BufferLoad>(args[10]);
+  if (args.size() > 16 && args[16]->IsInstance<BufferLoadNode>()) {
+    node->mbar_ = Downcast<BufferLoad>(args[16]);
   }
   node->cCoords_ = Array<PrimExpr>(
-      {args[11].as<PrimExpr>().value(), args[12].as<PrimExpr>().value()});
+      {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  if (args.size() > 19) {
+    node->sfaRegion_ = NormalizeToBufferRegion(args[19]);
+  }
+  if (args.size() > 20) {
+    node->sfbRegion_ = NormalizeToBufferRegion(args[20]);
+  }
+  if (args.size() > 21) {
+    node->sfKStart_ = args[21].as<PrimExpr>().value();
+  }
   node->annotations_ = annotations;
-}
-
-Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ICHECK_EQ(args.size(), 13)
-      << "tl.tileop.gemm expects exactly 13 positional slots, but got "
-      << args.size()
-      << "; a block-scaled GEMM (SFA, SFB, k_start) must be built as "
-         "tl.tileop.gemm_blockscaled so the scale factors are not silently "
-         "ignored.";
-  ObjectPtr<GemmNode> node = make_object<GemmNode>();
-  GemmNode::InitFromDenseArgs(node.get(), args, annotations);
   data_ = std::move(node);
 }
 
@@ -153,22 +148,13 @@ AccessRegions GemmNode::GetAccessRegions() const {
   if (!is_one(clearAccum_)) {
     result.reads.push_back(cRegion_);
   }
-  result.writes.push_back(cRegion_);
-  return result;
-}
-
-ffi::Array<BufferRegion> GemmNode::GetReadBeforeWriteRegions() const {
-  ffi::Array<BufferRegion> result;
-  result.push_back(aRegion_);
-  result.push_back(bRegion_);
-  // The accumulator's old contents are consumed only when the clear is
-  // provably absent. GetAccessRegions() uses !is_one() because a clear that
-  // cannot be proven still creates a read dependency for pipelining; here the
-  // question is whether the op definitely reads, so the pipelined idiom
-  // `clear_accum=(k == 0)` must not count.
-  if (is_zero(clearAccum_)) {
-    result.push_back(cRegion_);
+  if (sfaRegion_.defined()) {
+    result.reads.push_back(sfaRegion_);
   }
+  if (sfbRegion_.defined()) {
+    result.reads.push_back(sfbRegion_);
+  }
+  result.writes.push_back(cRegion_);
   return result;
 }
 
@@ -181,6 +167,15 @@ String GemmNode::GetGemmInstructionKey(int block_size, Target target) const {
   return ResolveGemmImpl(target).select_inst(*this, block_size, target);
 }
 
+std::optional<std::array<int, 3>>
+GemmNode::GetGemmInstructionShape(int block_size, Target target,
+                                  String gemm_inst) const {
+  const GemmImpl &impl = ResolveGemmImpl(target);
+  if (impl.select_inst_shape == nullptr) {
+    return std::nullopt;
+  }
+  return impl.select_inst_shape(*this, block_size, target, gemm_inst);
+}
 std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
     int M, int N, int block_size, Target target, String gemm_inst) const {
   return ResolveGemmImpl(target).compute_warp_partition(*this, M, N, block_size,
@@ -198,7 +193,7 @@ Stmt GemmNode::Lower(const LowerArgs &lower_args,
     // side.
     auto prim_func = Downcast<PrimFunc>(
         (*f)(GetRef<Gemm>(this), lower_args.layout_map, lower_args.target,
-             lower_args.thread_bounds, lower_args.thread_index, mbar_phase));
+             lower_args.thread_bounds, lower_args.thread_var, mbar_phase));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
@@ -322,6 +317,30 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         [](Gemm gemm, int block_size, Target target) {
                           return gemm->GetGemmInstructionKey(block_size,
                                                              target);
+                        });
+  refl::GlobalDef().def("tl.GemmSelectSQMMAInstShape",
+                        [](Gemm gemm, int block_size, Target target) {
+                          Array<Integer> result;
+                          auto inst_shape = gemm->GetGemmInstructionShape(
+                              block_size, target, kGemmInstMusaSQMMA);
+                          if (inst_shape.has_value()) {
+                            result.push_back(Integer((*inst_shape)[0]));
+                            result.push_back(Integer((*inst_shape)[1]));
+                            result.push_back(Integer((*inst_shape)[2]));
+                          }
+                          return result;
+                        });
+  refl::GlobalDef().def("tl.GemmSelectPH1WmmaInstShape",
+                        [](Gemm gemm, int block_size, Target target) {
+                          Array<Integer> result;
+                          auto inst_shape = gemm->GetGemmInstructionShape(
+                              block_size, target, kGemmInstMusaPH1WMMA);
+                          if (inst_shape.has_value()) {
+                            result.push_back(Integer((*inst_shape)[0]));
+                            result.push_back(Integer((*inst_shape)[1]));
+                            result.push_back(Integer((*inst_shape)[2]));
+                          }
+                          return result;
                         });
 }
 

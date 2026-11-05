@@ -3,17 +3,16 @@ name = "tilelang_musa"
 description = "Tilelang with MUSA backend."
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "Moore Threads" }, { name = "TileLang Contributors" }, { name = "Tile-AI" }]
+authors = [{name = "Moore Threads" }, { name = "TileLang Contributors" }, { name = "Tile-AI" }]
 maintainers = [
     { name = "Tianyi Xu", email = "tianyi.xu@mthreads.com" },
     { name = "Xujie Zhu", email = "xujie.zhu@mthreads.com" },
 ]
 license = "MIT"
-keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
+keywords = ["MUSA", "GPU DSL", "Code Generation", "TVM"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: GPU",
-    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: C++",
@@ -30,16 +29,10 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "apache-tvm-ffi>=0.1.11,<0.1.13",
-    # torch-c-dlpack-ext provides prebuilt torch extensions.
-    # Without it, TVM FFI may require JIT compilation on first import.
-    "torch-c-dlpack-ext; python_version < '3.14'",
     "cloudpickle",
     "ml-dtypes",
-    "numpy>=1.23.5",
+    "numpy<2",
     "psutil",
-    "torch",
-    "torch>=2.4; platform_system == 'Darwin'",
     # jit-compiling a torch extension needs setuptools
     "setuptools; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
@@ -55,24 +48,8 @@ fp4 = ["ml-dtypes>=0.5.1"]
 vis = ["matplotlib"]
 # if you want to build with CUDA NVCC support
 nvcc = [
-    "torch",
     "nvidia-cuda-nvcc>=13.0.48",
     "nvidia-cuda-cccl>=13.0.50",
-    # On Windows, ship nvrtc through the runtime deps so `pip install tilelang`
-    # works without a host CUDA install (TileLang JITs CUDA kernels via nvrtc).
-    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
-    # cuRAND is required when kernels use tilelang.cuda.language.random
-    "nvidia-curand>=10.4; platform_system == 'Windows'",
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'win32'", extra = "nvcc" },
 ]
 
 [build-system]
@@ -83,20 +60,11 @@ requires = [
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.
     "patchelf>=0.17.2; platform_system == 'Linux'",
-    # Under PEP 517 build isolation on Windows, provide nvcc and CUDA headers so
-    # CMake's find_package(CUDAToolkit) succeeds without a host CUDA install.
-    "nvidia-cuda-nvcc>=13; platform_system == 'Windows'",
-    "nvidia-cuda-cccl>=13; platform_system == 'Windows'",
-    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
-    # CMake's MSVC helpers in FindPipCUDAToolkit.cmake only activate under the
-    # Ninja generator; require ninja on Windows so scikit-build-core can pick
-    # it up (paired with the override below that passes -G Ninja).
-    "ninja>=1.11; platform_system == 'Windows'",
 ]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
-wheel.py-api = "cp39"
+wheel.py-api = "cp38"
 cmake.version = ">=3.26.1"
 build-dir = "build"
 
@@ -104,13 +72,6 @@ build-dir = "build"
 metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
-
-# On Windows, force the Ninja generator so the project's MSVC environment
-# activation path runs (it is guarded on `CMAKE_GENERATOR MATCHES "Ninja"`).
-# Linux and macOS keep the scikit-build-core default (Makefiles).
-[[tool.scikit-build.overrides]]
-if.platform-system = "win32"
-cmake.args = ["-G", "Ninja"]
 
 # editable.rebuild = true
 
@@ -120,6 +81,7 @@ cmake.args = ["-G", "Ninja"]
 [tool.scikit-build.sdist]
 include = [
     "./VERSION",
+    "./VERSION_PATCH",
     ".git_commit.txt",
     "./LICENSE",
     "THIRDPARTYNOTICES.txt",
@@ -132,9 +94,9 @@ include = [
     # The vendored 3rdparty contents in sdist should be same as wheel.
     # Need full TVM to build from source.
     "3rdparty/tvm",
-    # Vendored HIP headers (build-time only) so source builds work on hosts
-    # without a ROCm install. Not mapped into the wheel at runtime.
-    "3rdparty/hip-headers/include",
+    # MUTLASS
+    "3rdparty/mutlass/include",
+    "3rdparty/mutlass/tools",
     "testing/**",
     "examples/**",
 ]
@@ -158,6 +120,11 @@ tilelang = "tilelang"
 "tilelang/3rdparty/tvm/python" = "3rdparty/tvm/python"
 "tilelang/3rdparty/tvm/include" = "3rdparty/tvm/include"
 "tilelang/3rdparty/tvm/version.py" = "3rdparty/tvm/version.py"
+# MUTLASS
+"tilelang/3rdparty/mutlass/include" = "3rdparty/mutlass/include"
+"tilelang/3rdparty/mutlass/tools" = "3rdparty/mutlass/tools"
+
+
 [tool.codespell]
 ignore-words = "docs/spelling_wordlist.txt"
 skip = [
@@ -230,21 +197,18 @@ ignore = [
 ]
 
 [tool.pytest.ini_options]
+verbosity_assertions = 3
 filterwarnings = ["always"]
+addopts = "--import-mode=importlib"
 markers = [
     "perf: benchmark and performance API tests skipped by default",
     "slow: long-running correctness sweeps",
-    # Feature markers emitted by vendored TVM's tvm.testing.utils requires_*
-    # decorators (see 3rdparty/tvm/python/tvm/testing/utils.py). TVM registers
-    # these via its own conftest, but tilelang only imports the decorators, so
-    # they must be registered here to avoid PytestUnknownMarkWarning.
-    "cpu: Mark a test as running on CPU",
-    "gpu: Mark a test as using a GPU",
-    "multi_gpu: Mark a test as using multiple GPUs",
-    "cuda: Mark a test as using CUDA",
-    "llvm: Mark a test as using LLVM",
-    "metal: Mark a test as using Metal",
-    "rocm: Mark a test as using ROCm",
+    "gpu: mark test as requiring GPU runtime.",
+    "rocm: mark test as requiring ROCm runtime.",
+    "llvm: mark test as requiring LLVM runtime.",
+    "cuda: mark test as requiring CUDA runtime.",
+    "musa: mark test as requiring MUSA runtime.",
+    "ci_smoke: mark test as part of the CI smoke suite.",
 ]
 
 [tool.cibuildwheel]
@@ -266,7 +230,7 @@ environment-pass = [
 before-build = "env -0 | sort -z | tr '\\0' '\\n'"
 windows.before-build = "set"
 test-command = [
-    'python -c "import tilelang; print(tilelang.__version__)"',
+    "python -c 'import tilelang; print(tilelang.__version__)'",
 ]
 
 [tool.cibuildwheel.linux]
@@ -274,13 +238,6 @@ environment.PYTHONDEVMODE = "1"
 environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
-# Build a wheel with CUDA, ROCm, and Ascend support. ROCm uses vendored HIP
-# headers and Ascend uses local ACL declarations; both link to runtime stubs,
-# so the manylinux container only needs the CUDA toolkit. Execution still
-# requires the selected backend's real runtime and device.
-environment.USE_CUDA = "ON"
-environment.USE_ROCM = "ON"
-environment.USE_ASCEND = "ON"
 manylinux-x86_64-image  = "manylinux_2_28"  # AlmaLinux 8
 manylinux-aarch64-image = "manylinux_2_34"  # Z3 requires
 # Install CUDA runtime and stub driver library
@@ -293,11 +250,11 @@ uname -a
 
 case "$(uname -m)" in
     "x86_64")
-        DEFAULT_CUDA_VERSION="13.0"
+        DEFAULT_CUDA_VERSION="12.8"
         dnf config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
         ;;
     "aarch64")
-        DEFAULT_CUDA_VERSION="13.0"
+        DEFAULT_CUDA_VERSION="12.8"
         dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
         ;;
     *)

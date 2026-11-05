@@ -10,6 +10,8 @@
 #include "operator.h"
 #include "support/check.h"
 
+#include <array>
+#include <optional>
 #include <utility>
 
 namespace tvm {
@@ -107,6 +109,9 @@ public:
   BufferRegion aRegion_, bRegion_, cRegion_;
   bool transA_, transB_;
   int m_, n_, k_;
+  int strideA_, strideB_;
+  // Offsets may be symbolic (e.g. a sliced operand B[:, j*64:...] in a loop).
+  PrimExpr offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
   tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
@@ -118,8 +123,10 @@ public:
   bool isTcgen05_ = false;
   mutable GemmWarpPolicy policy_;
   Map<String, ObjectRef> annotations_;
+  BufferRegion sfaRegion_, sfbRegion_;
+  PrimExpr sfKStart_;
 
-  TVM_FFI_DECLARE_OBJECT_INFO("tl.Gemm", GemmNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = reflection;
@@ -135,6 +142,10 @@ public:
         .def_ro("m", &GemmNode::m_)
         .def_ro("n", &GemmNode::n_)
         .def_ro("k", &GemmNode::k_)
+        .def_ro("strideA", &GemmNode::strideA_)
+        .def_ro("strideB", &GemmNode::strideB_)
+        .def_ro("offsetA", &GemmNode::offsetA_)
+        .def_ro("offsetB", &GemmNode::offsetB_)
         .def_ro("clearAccum", &GemmNode::clearAccum_)
         .def_ro("mbar", &GemmNode::mbar_)
         .def_ro("cCoords", &GemmNode::cCoords_)
@@ -143,7 +154,10 @@ public:
         .def_ro("isWgmma", &GemmNode::isWgmma_)
         .def_ro("isTcgen05", &GemmNode::isTcgen05_)
         .def_ro("policy", &GemmNode::policy_)
-        .def_ro("annotations", &GemmNode::annotations_);
+        .def_ro("annotations", &GemmNode::annotations_)
+        .def_ro("sfaRegion", &GemmNode::sfaRegion_)
+        .def_ro("sfbRegion", &GemmNode::sfbRegion_)
+        .def_ro("sfKStart", &GemmNode::sfKStart_);
   }
 
   Stmt Lower(const LowerArgs &lower_args,
@@ -151,18 +165,14 @@ public:
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
-  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
 
-  TileOperator Clone() const override;
+  TileOperator Clone() const;
 
   // Target-specific GEMM instruction key.
-  virtual String GetGemmInstructionKey(int block_size, Target target) const;
-
-  // Parse the 13 positional slots shared by every GEMM flavour
-  // (see the protocol documented at Gemm::Gemm) into `node`. Shared by the
-  // constructors of every GEMM flavour.
-  static void InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
-                                const Map<String, ObjectRef> &annotations);
+  String GetGemmInstructionKey(int block_size, Target target) const;
+  std::optional<std::array<int, 3>>
+  GetGemmInstructionShape(int block_size, Target target,
+                          String gemm_inst) const;
 
 private:
   mutable bool completed_ = false;
@@ -181,12 +191,13 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
+
+  std::optional<std::array<int, 3>> (*select_inst_shape)(
+      const GemmNode &op, int block_size, Target target,
+      String gemm_inst) = nullptr;
 };
 
 void RegisterGemmImpl(GemmImpl impl);
-
-/*! \brief Resolve the shared backend implementation for the GEMM family. */
-const GemmImpl &ResolveGemmImpl(const Target &target);
 
 class Gemm : public TileOperator {
 public:

@@ -16,8 +16,6 @@ from tilelang.profiler import do_bench
 
 
 def _load_vertical_slash_index_ops():
-    import fcntl
-
     from torch.utils.cpp_extension import load
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,18 +55,7 @@ def _load_vertical_slash_index_ops():
             os.replace(tmp_path, stable_path)
         stable_sources.append(stable_path)
 
-    # torch's JIT build guards build_dir with a plain lock *file* (FileBaton)
-    # that is not tied to the owning process: a build killed mid-compile leaves
-    # the file behind and every later load() polls on it forever. Serialize
-    # builds with an OS-level flock instead (released automatically when the
-    # holder dies); any FileBaton lock still present while we hold the flock is
-    # necessarily stale, so drop it before handing over to torch.
-    baton_path = os.path.join(build_dir, "lock")
-    with open(os.path.join(extension_root, ".build.flock"), "w") as flock_file:
-        fcntl.flock(flock_file, fcntl.LOCK_EX)
-        if os.path.exists(baton_path):
-            os.remove(baton_path)
-        return load(name=name, sources=stable_sources, build_directory=build_dir, verbose=False)
+    return load(name=name, sources=stable_sources, build_directory=build_dir, verbose=False)
 
 
 @tilelang.jit(out_idx=[3])
@@ -98,9 +85,8 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
         def Prefetch(
             K: T.Tensor(shape, dtype),
             V: T.Tensor(shape, dtype),
-            K_shared: T.SharedBuffer([num_stages, block_N, dim], dtype),
-            V_shared: T.SharedBuffer([num_stages, block_N, dim], dtype),
-            stage: T.int32,
+            K_shared: T.SharedBuffer([block_N, dim], dtype),
+            V_shared: T.SharedBuffer([block_N, dim], dtype),
             column_index: T.SharedBuffer([vertical_size_round], int_dtype),
             column_count: T.int32,
             k: T.int32,
@@ -108,10 +94,10 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             by: T.int32,
         ):
             for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
-                K_shared[stage, i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
+                K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
 
             for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
-                V_shared[stage, i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
+                V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
 
             T.ptx_commit_group()
 
@@ -125,9 +111,8 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             k: T.int32,
             column_count: T.int32,
             Q_shared: T.SharedBuffer([block_M, dim], dtype),
-            K_shared: T.SharedBuffer([num_stages, block_N, dim], dtype),
-            V_shared: T.SharedBuffer([num_stages, block_N, dim], dtype),
-            stage: T.int32,
+            K_shared: T.SharedBuffer([block_N, dim], dtype),
+            V_shared: T.SharedBuffer([block_N, dim], dtype),
             scores_scale: T.FragmentBuffer([block_M], accum_dtype),
             scores_sum: T.FragmentBuffer([block_M], accum_dtype),
             logsum: T.FragmentBuffer([block_M], accum_dtype),
@@ -136,7 +121,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             T.ptx_wait_group(count)
             for i, j in T.Parallel(block_M, block_N):
                 acc_s[i, j] = T.if_then_else(k + j < column_count, 0, -T.infinity(acc_s.dtype))
-            T.gemm(Q_shared, K_shared[stage, :, :], acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+            T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
             T.copy(scores_max, scores_max_prev)
             T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -152,7 +137,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
 
             T.copy(acc_s, acc_s_cast)
 
-            T.gemm(acc_s_cast, V_shared[stage, :, :], acc_o, policy=T.GemmWarpPolicy.FullRow)
+            T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             T.reduce_sum(acc_s, scores_sum, dim=1)
 
@@ -173,8 +158,12 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=256) as (bc, by, bz):
                 bx = T.ceildiv(seq_len, block_M) - 1 - bc
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
-                K_shared = T.alloc_shared([num_stages, block_N, dim], dtype)
-                V_shared = T.alloc_shared([num_stages, block_N, dim], dtype)
+                K_shared = T.alloc_shared([2, block_N, dim], dtype)
+                V_shared = T.alloc_shared([2, block_N, dim], dtype)
+                K_shared_1 = T.alloc_shared([block_N, dim], dtype)
+                V_shared_1 = T.alloc_shared([block_N, dim], dtype)
+                K_shared_2 = T.alloc_shared([block_N, dim], dtype)
+                V_shared_2 = T.alloc_shared([block_N, dim], dtype)
                 O_shared = T.alloc_shared([block_M, dim], dtype)
                 acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
                 acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
@@ -206,15 +195,15 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
 
                 if tid >= 128:
                     T.annotate_producer_reg_dealloc()
-                    T.tma_copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared, barrier=mbars[8])
+                    T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
                     T.mbarrier_arrive(mbarrier=mbars[8])
                     for bi in T.serial(block_count):
                         k = block_offset[bi]
                         T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 4], parity=(((bi & 3) >> 1) ^ 1))
-                        T.tma_copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :], barrier=mbars[bi % 2])
+                        T.copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :])
                         T.mbarrier_arrive(mbarrier=mbars[bi % 2])
                         T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 6], parity=(((bi & 3) >> 1) ^ 1))
-                        T.tma_copy(V[bz, by, k : k + block_N, :], V_shared[bi % 2, :, :], barrier=mbars[bi % 2 + 2])
+                        T.copy(V[bz, by, k : k + block_N, :], V_shared[bi % 2, :, :])
                         T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 2])
                 else:
                     T.annotate_consumer_reg_alloc()
@@ -256,57 +245,81 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                             logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
 
                     if column_count != 0:
-                        Prefetch(K, V, K_shared, V_shared, 0, column_index, column_count, 0, bz, by)
+                        Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, 0, bz, by)
                         for bi in T.serial(T.ceildiv(column_count, block_N) - 1):
                             k = bi * block_N
-                            Prefetch(
-                                K,
-                                V,
-                                K_shared,
-                                V_shared,
-                                (bi + 1) % num_stages,
-                                column_index,
-                                column_count,
-                                k + block_N,
-                                bz,
-                                by,
-                            )
+                            if bi % 2 == 0:
+                                Prefetch(K, V, K_shared_2, V_shared_2, column_index, column_count, k + block_N, bz, by)
 
+                                Compute(
+                                    acc_s,
+                                    acc_s_cast,
+                                    acc_o,
+                                    scores_max,
+                                    scores_max_prev,
+                                    k,
+                                    column_count,
+                                    Q_shared,
+                                    K_shared_1,
+                                    V_shared_1,
+                                    scores_scale,
+                                    scores_sum,
+                                    logsum,
+                                    1,
+                                )
+                            else:
+                                Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, k + block_N, bz, by)
+
+                                Compute(
+                                    acc_s,
+                                    acc_s_cast,
+                                    acc_o,
+                                    scores_max,
+                                    scores_max_prev,
+                                    k,
+                                    column_count,
+                                    Q_shared,
+                                    K_shared_2,
+                                    V_shared_2,
+                                    scores_scale,
+                                    scores_sum,
+                                    logsum,
+                                    1,
+                                )
+                        if T.ceildiv(column_count, block_N) % 2 == 0:
                             Compute(
                                 acc_s,
                                 acc_s_cast,
                                 acc_o,
                                 scores_max,
                                 scores_max_prev,
-                                k,
+                                T.ceildiv(column_count, block_N) * block_N - block_N,
                                 column_count,
                                 Q_shared,
-                                K_shared,
-                                V_shared,
-                                bi % num_stages,
+                                K_shared_2,
+                                V_shared_2,
                                 scores_scale,
                                 scores_sum,
                                 logsum,
-                                1,
+                                0,
                             )
-                        last_stage = (T.ceildiv(column_count, block_N) - 1) % num_stages
-                        Compute(
-                            acc_s,
-                            acc_s_cast,
-                            acc_o,
-                            scores_max,
-                            scores_max_prev,
-                            T.ceildiv(column_count, block_N) * block_N - block_N,
-                            column_count,
-                            Q_shared,
-                            K_shared,
-                            V_shared,
-                            last_stage,
-                            scores_scale,
-                            scores_sum,
-                            logsum,
-                            0,
-                        )
+                        else:
+                            Compute(
+                                acc_s,
+                                acc_s_cast,
+                                acc_o,
+                                scores_max,
+                                scores_max_prev,
+                                T.ceildiv(column_count, block_N) * block_N - block_N,
+                                column_count,
+                                Q_shared,
+                                K_shared_1,
+                                V_shared_1,
+                                scores_scale,
+                                scores_sum,
+                                logsum,
+                                0,
+                            )
                     for i, j in T.Parallel(block_M, dim):
                         acc_o[i, j] /= logsum[i]
                     T.copy(acc_o, O_shared)

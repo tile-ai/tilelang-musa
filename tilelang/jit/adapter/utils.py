@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Literal, Any
 from collections.abc import Callable
 from tilelang import tvm as tvm
+from tvm import IRModule, tirx
 from tvm.target import Target
+from tilelang.engine.lower import (
+    get_device_call,
+    get_host_call,
+    determine_target,
+    canon_target_host,
+    is_cpu_device_backend,
+)
+from tilelang.backend.pass_pipeline.pipeline import resolve_pipeline
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
 
 
 def match_global_kernel(source: str, annotation: str = "__global__") -> int:
@@ -92,6 +102,10 @@ def is_hip_target(target: Target) -> bool:
     return target.kind.name == "hip"
 
 
+def is_musa_target(target: Target) -> bool:
+    return target.kind.name == "musa"
+
+
 def is_cpu_target(target: Target) -> bool:
     return target.kind.name in ["c"]
 
@@ -100,20 +114,50 @@ def is_metal_target(target: Target) -> bool:
     return target.kind.name == "metal"
 
 
-def is_ascend_target(target: Target) -> bool:
-    return target.kind.name == "ascend"
-
-
 def is_cutedsl_target(target: Target) -> bool:
     return target.kind.name == "cuda" and "cutedsl" in target.keys
 
 
+def get_annotated_mod(
+    func_or_mod: tirx.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
+    model_type: Literal["device", "host", "all"] = "all",
+) -> IRModule | tuple[IRModule, IRModule]:
+    # Validate model_type early
+    if model_type not in {"device", "host", "all"}:
+        raise ValueError(f"Invalid model type: {model_type}")
+
+    # Convert PrimFunc to IRModule if needed
+    mod = func_or_mod
+    if isinstance(func_or_mod, tirx.PrimFunc):
+        mod = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+
+    # Handle target and target_host
+    if isinstance(target, str):
+        target = determine_target(target)
+    target_host = tvm.target.Target(canon_target_host(target, target_host))
+    target = tvm.target.Target(target, target_host)
+
+    _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
+    _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
+
+    # Apply transformations
+    PreLowerSemanticCheck(mod)
+    mod = resolve_pipeline(target).lower(mod, target)
+
+    # Define dispatch dictionary for different model types
+    dispatch = {
+        "device": lambda m: tirx.transform.Filter(_is_device_call)(m),
+        "host": lambda m: tirx.transform.Filter(_is_host_call)(m),
+        "all": lambda m: (tirx.transform.Filter(_is_device_call)(m), tirx.transform.Filter(_is_host_call)(m)),
+    }
+
+    return dispatch[model_type](mod)
+
+
 def pythonic_expr(
-    expr: tvm.tirx.PrimExpr,
-    dtype_map: dict[str, str] | None = None,
-    ignore_cast: bool = False,
-    floor_div_op: str = "/",
-    func_name_map: dict[str, str] | None = None,
+    expr: tvm.tirx.PrimExpr, dtype_map: dict[str, str] | None = None, ignore_cast: bool = False, floor_div_op: str = "/"
 ) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
@@ -126,8 +170,6 @@ def pythonic_expr(
                       behavior (suitable for generating C/C++ expressions). For generating
                       Python code where integer division is required (e.g. grid/block),
                       pass '//' explicitly.
-        func_name_map: Optional mapping for rendered helper function names, e.g.
-                       {"max": "std::max"} when generating C++.
     Returns:
         A string representation of the expression.
     """
@@ -230,8 +272,6 @@ def pythonic_expr(
             p = my_precedence
         elif isinstance(node, (tvm.tirx.Min, tvm.tirx.Max)):
             op_name = "min" if isinstance(node, tvm.tirx.Min) else "max"
-            if func_name_map is not None:
-                op_name = func_name_map.get(op_name, op_name)
             a_str, _ = node_to_result_map[node.a]
             b_str, _ = node_to_result_map[node.b]
             s = f"{op_name}({a_str}, {b_str})"

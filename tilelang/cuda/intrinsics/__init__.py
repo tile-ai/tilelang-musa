@@ -8,7 +8,7 @@ from .macro.mma_macro_generator import (  # noqa: F401
     TensorCoreIntrinEmitter,
     TensorCoreIntrinEmitterWithLadderTransform,
 )
-from .macro.mma_sm120_macro_generator import TensorCoreIntrinEmitterSM120  # noqa: F401
+from .macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter  # noqa: F401
 
 from .layout.mma_layout import get_swizzle_layout  # noqa: F401
 from .layout.mma_layout import make_mma_swizzle_layout  # noqa: F401

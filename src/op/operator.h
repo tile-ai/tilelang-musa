@@ -41,22 +41,12 @@ using UpdateBarrierArriveCallback = std::function<void(tirx::Var, PrimExpr)>;
 using RequireSmemAlignmentCallback = std::function<void(tirx::Var, int)>;
 using LayoutMap = ffi::Map<tirx::Buffer, Layout>;
 using BufferMap = ffi::Map<tirx::Var, tirx::Buffer>;
-using BlockAnnotations = ffi::Map<ffi::String, ffi::Any>;
 
 enum AccessMask : int {
   kAccessRead = 1,
   kAccessWrite = 2,
   kAccessReadWrite = kAccessRead | kAccessWrite,
 };
-
-// Preserve known read/write bits and conservatively assume both when a mask
-// cannot be resolved at compile time.
-inline int GetConservativeAccessMask(const PrimExpr &rw_mask) {
-  if (const auto *mask = rw_mask.as<IntImmNode>()) {
-    return static_cast<int>(mask->value) & kAccessReadWrite;
-  }
-  return kAccessReadWrite;
-}
 
 struct AccessRegion {
   tirx::BufferRegion region;
@@ -105,19 +95,19 @@ inline const char *InferLevelToString(InferLevel level) {
 struct LowerArgs {
   Target target;
   Range thread_bounds;
-  // Logical thread index consumed by lowering helpers. This is an expression
-  // rather than a Var: GPU lowering passes the real threadIdx.x Var (bound by
-  // a thread_extent AttrStmt), while targets without thread bindings (e.g.
-  // CPU) pass constant 0. It must never be an unbound synthetic Var.
-  PrimExpr thread_index;
+  tirx::Var thread_var;
   LayoutMap layout_map;
+  ffi::Map<Layout, Bool> layout_k_major;
+  ffi::Map<Layout, Bool> layout_sqmma;
+  ffi::Map<Layout, PrimExpr> layout_sqmma_inst_split;
   ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
   ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
   // Fallback mbarrier parity for ops that do not carry an explicit
   // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
-  // zero-based epoch of the nearest enclosing serial loop.
+  // nearest enclosing serial loop so non-pipelined TMA loops still alternate
+  // barrier phase correctly.
   PrimExpr mbar_phase_expr = IntImm(DataType::Int(32), 0);
   // Pointer to the shared.barrier buffer for compiler-generated mbarriers.
   // Points to the LowerTileOpPass member so copy.cc sees the buffer
@@ -141,24 +131,12 @@ struct LowerArgs {
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
 };
 
-/*! \brief One reducer_update site, as seen by layout analysis: the update
- *  loop's solved layout (undefined Fragment while the loop is still
- *  unsolved), the parallel nest vars, the update target's logical indices
- *  and the contribution expression. Assembled by ParallelOp for its own
- *  partial-layout proposal and by ReducerPlanAndMaterialize for lowering
- *  (both feed AnalyzeReducerUpdateSite). */
-struct ReducerUpdateSiteHint {
-  Fragment loop_layout; // undefined while the update loop is unsolved
-  ffi::Array<tirx::Var> loop_vars;
-  ffi::Array<PrimExpr> indices;
-  PrimExpr value;
-};
-
 struct LayoutInferArgs {
   Target target;
   Range thread_bounds;
   LayoutMap layout_map;
   arith::Analyzer *analyzer;
+  bool buffer_oob = false;
   ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
@@ -166,16 +144,6 @@ struct LayoutInferArgs {
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
-  // Snapshot of the layouts fixed at kStrict (annotations included), taken
-  // by the inference engine after the strict pass. Ops use it to recognize
-  // authoritative constraints — e.g. an annotated reducer PartialFragment
-  // that update nests must satisfy rather than widen. Empty at
-  // lowering-time re-inference call sites.
-  LayoutMap strict_layout_map;
-  // Per-call cap for generating a free-mode parallel candidate. Zero preserves
-  // the vectorizer's width; scalar reducer-root attempts pass one. This is
-  // a search option, not operator state or a constraint on inferred layouts.
-  int candidate_vector_size_limit = 0;
 };
 
 class TileOperator;
@@ -198,19 +166,6 @@ public:
     return result;
   }
 
-  /*!
-   * \brief Regions whose preexisting contents this op consumes before
-   *        establishing a value of its own.
-   *
-   * A subset of GetAccessRegions().reads, which answers the weaker may-read
-   * question ("could this op read this region?") and is deliberately
-   * conservative for dependency analysis. Ops whose read set depends on an
-   * argument value narrow it here; the default reports every read.
-   */
-  virtual ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const {
-    return GetAccessRegions().reads;
-  }
-
   void SetAccessRegions(std::vector<AccessRegion> access_regions) {
     access_regions_ = std::move(access_regions);
   }
@@ -229,20 +184,11 @@ public:
 
 tirx::Var GetVarFromAccessPtr(const PrimExpr &expr);
 
-TileOperator
-ParseOperator(const tirx::Call &call,
-              const BlockAnnotations &block_annotations = BlockAnnotations());
-TileOperator
-ParseOperator(const tirx::Stmt &stmt,
-              const BlockAnnotations &block_annotations = BlockAnnotations());
+TileOperator ParseOperator(tirx::Call call);
+TileOperator ParseOperator(tirx::Stmt stmt);
 
 using OpBuilderFunc = ffi::TypedFunction<TileOperator(
     ffi::Array<PrimExpr>, ffi::Map<ffi::String, ffi::ObjectRef>)>;
-using OpBlockAnnotationHandlerFunc =
-    ffi::TypedFunction<TileOperator(TileOperator, BlockAnnotations)>;
-
-static constexpr const char *kTLOpBlockAnnotationHandler =
-    "TLOpBlockAnnotationHandler";
 
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \

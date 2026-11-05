@@ -76,14 +76,15 @@ void RegisterGemmSPImpl(GemmSPImpl impl) {
  *
  * Deserializes operator parameters from `args` and resolves buffer references,
  * populating an internal GemmSPNode with buffers, transpose flags, M/N/K,
- * warp policy and clear_accum.
+ * warp policy, clear_accum, strides, offsets, and optional kPack/wg_wait.
  *
  * @param args Positional serialized arguments produced by the TL frontend:
  *   expected layout is:
  *     [Aptr, Eptr, Bptr, Cptr, trans_A (Bool), trans_E (Bool),
  *      trans_B (Bool), M (Int), N (Int), K (Int), policy (Int),
- *      clear_accum (Bool)]
- *   Backend lowering knobs (wg_wait) ride in the annotations map.
+ *      clear_accum (Bool), stride_A (Int), stride_B (Int),
+ *      offset_A (Int), offset_B (Int),
+ *      (optional) kPack (Int), (optional) wg_wait (Int)]
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
@@ -111,12 +112,18 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->K = args[9].as<IntImm>().value()->value;
   node->policy = GemmSPWarpPolicy(args[10].as<IntImm>().value()->value);
   node->clear_accum = args[11].as<PrimExpr>().value();
-  // wg_wait is a Hopper warpgroup knob set by the CUDA dialect; it rides in
-  // the annotations rather than the positional call protocol.
-  if (auto val = annotations.Get("wg_wait")) {
-    const auto *int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "wg_wait annotation must be IntImmNode";
-    node->wg_wait = int_val->value;
+  node->stride_A = args[12].as<IntImm>().value()->value;
+  node->stride_B = args[13].as<IntImm>().value()->value;
+  node->offset_A = args[14].as<IntImm>().value()->value;
+  node->offset_B = args[15].as<IntImm>().value()->value;
+  if (args.size() > 16) {
+    node->kPack = args[16].as<IntImm>().value()->value;
+    if (node->kPack != 1 && node->kPack != 2) {
+      ICHECK(false) << "kPack must be 1 or 2";
+    }
+  }
+  if (args.size() > 17) {
+    node->wg_wait = args[17].as<IntImm>().value()->value;
   }
   if (auto val = annotations.Get("is_wgmma")) {
     const auto *int_val = val->as<IntImmNode>();
@@ -144,19 +151,6 @@ AccessRegions GemmSPNode::GetAccessRegions() const {
   return result;
 }
 
-ffi::Array<BufferRegion> GemmSPNode::GetReadBeforeWriteRegions() const {
-  ffi::Array<BufferRegion> result;
-  result.push_back(aRegion_);
-  result.push_back(eRegion_);
-  result.push_back(bRegion_);
-  // See GemmNode::GetReadBeforeWriteRegions: only a provable absence of the
-  // clear makes the accumulator's old contents a definite read.
-  if (is_zero(clear_accum)) {
-    result.push_back(cRegion_);
-  }
-  return result;
-}
-
 TileOperator GemmSPNode::Clone() const {
   auto op = make_object<GemmSPNode>(*this);
   return GemmSP(op);
@@ -172,7 +166,7 @@ Stmt GemmSPNode::Lower(const LowerArgs &lower_args,
   if (const auto f = Function::GetGlobal("tl.gemm_sp.lower")) {
     auto prim_func = Downcast<PrimFunc>(
         (*f)(GetRef<GemmSP>(this), lower_args.target, lower_args.layout_map,
-             lower_args.thread_bounds, lower_args.thread_index));
+             lower_args.thread_bounds, lower_args.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());

@@ -9,18 +9,17 @@
 
 #include <tvm/target/target.h>
 
-#include "ascend/target_utils.h"
 #include "cpu/target_utils.h"
 #include "cuda/target_utils.h"
+#include "backend/musa/target_utils.h"
 #include "metal/target_utils.h"
-#include "musa/target_utils.h"
 #include "rocm/target_utils.h"
 
 namespace tvm {
 namespace tl {
 
 bool TargetHasAsyncCopy(Target target);
-bool TargetCanPropagateKernelErrors(Target target);
+int TargetGetWarpSize(Target target);
 } // namespace tl
 } // namespace tvm
 

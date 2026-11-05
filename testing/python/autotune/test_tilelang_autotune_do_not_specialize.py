@@ -65,8 +65,8 @@ def matmul_do_not_spec(M, N, K, threads=128):
 def _call_and_count_new_entries(fn, M, N, K, threads=None):
     """Call fn and return how many *new* cache entries were added."""
     prev_size = len(fn._tuner_cache)
-    a = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    b = torch.randn(N, K, dtype=torch.float16, device="cuda")
+    a = torch.randn(M, K, dtype=torch.float16, device="musa")
+    b = torch.randn(N, K, dtype=torch.float16, device="musa")
     call_kwargs = {"M": M, "N": N, "K": K}
     if threads is not None:
         call_kwargs["threads"] = threads
@@ -87,7 +87,7 @@ def _clear_autotune_cache():
     matmul_do_not_spec._tuner_cache.clear()
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_do_not_specialize_same_key_for_different_values():
     """Changing N and K (in do_not_specialize) should reuse the same cache entry."""
     new1 = _call_and_count_new_entries(matmul_do_not_spec, M=512, N=256, K=256, threads=64)
@@ -97,7 +97,7 @@ def test_do_not_specialize_same_key_for_different_values():
     assert new2 == 0, f"do_not_specialize failed: second call with different N/K should reuse cache (0 new entries), got {new2}"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_do_not_specialize_new_key_for_m_param():
     """Changing M (NOT in do_not_specialize) should trigger a new autotune run."""
     new1 = _call_and_count_new_entries(matmul_do_not_spec, M=512, N=256, K=256, threads=64)
@@ -107,11 +107,11 @@ def test_do_not_specialize_new_key_for_m_param():
     assert new2 == 1, f"Expected 1 new cache entry because M is NOT in do_not_specialize, got {new2}"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_do_not_specialize_kwargs_and_args():
     """do_not_specialize should work whether params are passed as args or kwargs."""
-    a = torch.randn(512, 256, dtype=torch.float16, device="cuda")
-    b = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    a = torch.randn(512, 256, dtype=torch.float16, device="musa")
+    b = torch.randn(256, 256, dtype=torch.float16, device="musa")
 
     # First call: all kwargs
     with set_autotune_inputs([a, b]):
@@ -126,7 +126,7 @@ def test_do_not_specialize_kwargs_and_args():
     assert new == prev, f"do_not_specialize failed with positional args: cache grew from {prev} to {new} (expected no new entries)"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_do_not_specialize_threads_new_entry():
     """threads is NOT in do_not_specialize → different values = new cache entry."""
     new1 = _call_and_count_new_entries(matmul_do_not_spec, M=512, N=256, K=256, threads=64)
@@ -136,7 +136,7 @@ def test_do_not_specialize_threads_new_entry():
     assert new2 == 1, f"Changing threads (not in do_not_specialize) should create a new cache entry, got {new2}"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_do_not_specialize_all_specialized_params_same_cache():
     """When all params except do_not_specialize are the same, cache is shared."""
     new1 = _call_and_count_new_entries(matmul_do_not_spec, M=512, N=256, K=256, threads=64)

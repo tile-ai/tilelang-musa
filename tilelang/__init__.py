@@ -106,17 +106,11 @@ if not env.is_light_import():
 del _init_logger
 
 
-def _disable_tvm_ffi_torch_c_dlpack(torch_module):
-    is_rocm = getattr(torch_module.version, "hip", None) is not None
-    mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
-    is_mps = sys.platform == "darwin" and mps_backend is not None and mps_backend.is_available()
-    if not is_rocm and not is_mps:
+def _disable_rocm_tvm_ffi_torch_c_dlpack(torch_module):
+    if getattr(torch_module.version, "hip", None) is None:
         return
 
     os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
-    if is_mps:
-        # PyTorch's native exchange API queries a stream handle that MPS cannot provide.
-        os.environ.setdefault("TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API", "1")
     try:
         from tvm_ffi import _optional_torch_c_dlpack
     except Exception:
@@ -134,7 +128,7 @@ def _disable_tvm_ffi_torch_c_dlpack(torch_module):
 def _lazy_load_lib():
     import torch  # preload torch to avoid dlopen errors
 
-    _disable_tvm_ffi_torch_c_dlpack(torch)
+    _disable_rocm_tvm_ffi_torch_c_dlpack(torch)
 
     if sys.platform.startswith("win32"):
         yield
@@ -162,27 +156,19 @@ if not env.is_light_import():
             enable_cache,
             disable_cache,
             is_cache_enabled,
-            get_runtime_library_dirs,
+            get_windows_runtime_dll_dirs,
             prepend_dll_search_path,
         )
         from . import libinfo
 
-        runtime_library_dirs = get_runtime_library_dirs()
         if sys.platform.startswith("win32"):
             # Make sibling-package DLLs (tvm_ffi, z3) discoverable via PATH,
             # then register all native dependency dirs with the secure DLL
             # loader used by Python 3.8+ for absolute-path DLL loads.
-            prepend_dll_search_path(runtime_library_dirs)
-            dll_dirs = dict.fromkeys([*libinfo.get_dll_directories(), *runtime_library_dirs])
+            runtime_dll_dirs = get_windows_runtime_dll_dirs()
+            prepend_dll_search_path(runtime_dll_dirs)
+            dll_dirs = dict.fromkeys([*libinfo.get_dll_directories(), *runtime_dll_dirs])
             _dll_handles = [os.add_dll_directory(p) for p in dll_dirs]
-        else:
-            # Symlink installs break sibling-relative RPATHs. TVM-FFI loads its
-            # own library during discovery above; load Z3 from its package path.
-            _z3_handles = [
-                ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
-                for directory in runtime_library_dirs
-                if (path := Path(directory) / ("libz3.dylib" if sys.platform == "darwin" else "libz3.so")).is_file()
-            ]
 
         import tvm
         import tvm.base  # noqa: F401
@@ -223,23 +209,14 @@ if not env.is_light_import():
     from . import ir  # noqa: F401
     from . import tileop  # noqa: F401
     from . import cpu as cpu  # noqa: F401
-    from . import ascend as ascend  # noqa: F401
     from . import cuda as cuda  # noqa: F401
-    from . import rocm as rocm  # noqa: F401
-    from . import metal as metal  # noqa: F401
-    from . import webgpu as webgpu  # noqa: F401
     from . import musa as musa  # noqa: F401
+    from . import rocm as rocm  # noqa: F401
 
-    if env.get_lower_trace_mode() is not None:
-        from .tools.lower_trace import enable as _lower_trace_enable
-
-        _lower_trace_enable()
 del _lazy_load_lib
 
-# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off).
-# AutoDD uses a light package import so its CLI can run without loading TVM.
-if not env.is_light_import():
-    from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
+# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off)
+from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
 
-    _install_pass_diff_hook()
-    del _install_pass_diff_hook
+_install_pass_diff_hook()
+del _install_pass_diff_hook

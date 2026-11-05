@@ -5,8 +5,6 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_BIND_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_BIND_UTILS_H_
 
-#include <tvm/ir/type.h>
-#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt.h>
 
 #include <unordered_set>
@@ -26,19 +24,8 @@ inline bool IsReplayableScalarBind(const Stmt &stmt,
   if (bind == nullptr) {
     return false;
   }
-  if (!bind->var.dtype().is_scalar() || bind->var.dtype().is_handle() ||
-      bind->var->type_annotation.as<PointerTypeNode>()) {
-    return false;
-  }
-  if (!bind->value.dtype().is_scalar() || bind->value.dtype().is_handle()) {
-    return false;
-  }
-  // A bind value that carries a side effect (e.g. an atomic RMW returning the
-  // previous value, or any opaque call) must be materialized exactly once:
-  // replaying it at every use site re-executes the side effect and silently
-  // corrupts results. Pure and read-only values remain replayable; read
-  // consistency is guaranteed by the read/write disjointness check below.
-  if (SideEffect(bind->value) > CallEffectKind::kReadState) {
+  if (bind->var->type_annotation.as<PointerTypeNode>() ||
+      bind->value.dtype().is_handle()) {
     return false;
   }
   for (const BufferRegion &read : reads) {

@@ -46,22 +46,10 @@ private:
       PrimExpr simplified = analyzer_.Simplify(indices[i]);
       IndexSignState state = IndexSignState::kUnknown;
 
-      // Handle scalar indices with the standard analyzer
-      if (simplified.dtype().lanes() == 1) {
-        if (analyzer_.CanProve(simplified >= 0))
-          state = IndexSignState::kNonNegative;
-        else if (analyzer_.CanProve(simplified < 0))
-          state = IndexSignState::kNegative;
-        else
-          DLOG(WARNING)
-              << "LegalizeNegativeIndex: cannot prove non-negative index "
-              << simplified << " for buffer " << buffer_name << " (axis " << i
-              << ", index " + indices[i]->Script() + ").";
-      }
       // Vector indices: try to reason about non-negativity/negativity
       // Common patterns are Ramp(base, stride, lanes) and Broadcast(value,
       // lanes).
-      else if (const auto *ramp = simplified.as<RampNode>()) {
+      if (const auto *ramp = simplified.as<RampNode>()) {
         // Compute a safe lower/upper bound for the vector lanes
         // lower_bound = base_min + min(0, stride_min) * (lanes - 1)
         // upper_bound = base_max + max(0, stride_max) * (lanes - 1)
@@ -111,6 +99,16 @@ private:
                 << simplified << " for buffer " << buffer_name << " (axis " << i
                 << ", index " + indices[i]->Script() + ").";
         }
+      } else {
+        if (analyzer_.CanProve(simplified >= 0))
+          state = IndexSignState::kNonNegative;
+        else if (analyzer_.CanProve(simplified < 0))
+          state = IndexSignState::kNegative;
+        else
+          DLOG(WARNING)
+              << "LegalizeNegativeIndex: cannot prove non-negative index "
+              << simplified << " for buffer " << buffer_name << " (axis " << i
+              << ", index " + indices[i]->Script() + ").";
       }
       states.push_back(state);
     }
@@ -182,13 +180,8 @@ private:
           ramp->base + ramp->stride * IntImm(ramp->stride.dtype(), lane_id));
       if (analyzer_->CanProve(lane < 0))
         lane = analyzer_->Simplify(buffer_extent + lane);
-      else if (!analyzer_->CanProve(lane >= 0)) {
-        PrimExpr original = lane;
-        PrimExpr wrapped = analyzer_->Simplify(buffer_extent + lane);
-        wrapped = wrapped.dtype() == dtype ? wrapped : Cast(dtype, wrapped);
-        original = original.dtype() == dtype ? original : Cast(dtype, original);
-        lane = analyzer_->Simplify(Select(lane < 0, wrapped, original));
-      }
+      else if (!analyzer_->CanProve(lane >= 0))
+        return PrimExpr();
       values.push_back(lane.dtype() == dtype ? lane : Cast(dtype, lane));
       shuffle_indices.push_back(IntImm(DataType::Int(32), lane_id));
     }

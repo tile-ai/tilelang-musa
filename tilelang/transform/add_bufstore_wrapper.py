@@ -2,8 +2,6 @@ from tvm.tirx import BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferL
 from tvm.tirx.stmt_functor import ir_transform, post_order_visit
 from tvm.tirx.transform import prim_func_pass
 
-from tilelang.ir import get_stmt_span, stamp_stmt_spans
-
 
 def AddWrapperForSingleBufStore():
     """
@@ -145,15 +143,12 @@ def AddWrapperForSingleBufStore():
                                 )
 
                     # Wrap fragment[0] access with T.Parallel loop
-                    new_loop = For(Var("_", "int32"), 0, 1, ForKind.PARALLEL, statement)
-                    # The wrapper loop inherits the wrapped statement's source span.
-                    stamp_stmt_spans(new_loop, get_stmt_span(statement))
-                    return new_loop
+                    return For(Var("_", "int32"), 0, 1, ForKind.PARALLEL, statement)
 
             return statement
 
         new_body = ir_transform(func.body, pre_visit, post_visit)
 
-        return func.with_body(new_body, span=func.span)
+        return func.with_body(new_body)
 
-    return prim_func_pass(pass_fn, opt_level=0, name="tl.AddWrapperForSingleBufStore")
+    return prim_func_pass(pass_fn, opt_level=0)

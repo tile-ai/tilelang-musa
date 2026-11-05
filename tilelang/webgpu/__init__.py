@@ -1,3 +1,2 @@
-"""WebGPU backend package."""
-
-from . import backend as backend  # noqa: F401
+from . import codegen  # noqa: F401
+from . import pipeline  # noqa: F401

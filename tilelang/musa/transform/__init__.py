@@ -1,37 +1,69 @@
 """MUSA-specific transformation frontends."""
 
-from .. import _ffi_api
-
-
-def LowerLDGSTG():
-    """Lower global memory load/store to MUSA ldg/stg intrinsics."""
-    return _ffi_api.LowerLDGSTG()  # type: ignore
-
-
-def LowerFastDivmod():
-    """Lower explicit MUSA fast integer division operations."""
-    return _ffi_api.LowerFastDivmod()  # type: ignore
-
-
-def LowerTMEIntrin():
-    """Lower MP31 TME descriptors and barrier handles."""
-    return _ffi_api.LowerTMEIntrin()  # type: ignore
+from tilelang.transform import _ffi_api
 
 
 def ProducerConsumerWarpSpecialized():
-    """Split eligible MP31 TME pipelines into producer and consumer warps."""
+    """Apply the MUSA-aware warp-specialized producer/consumer rewrite."""
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 
-def LowerPartialThreadSync():
-    """Lower partial shared-memory sync to MP31 TME barriers."""
-    return _ffi_api.LowerPartialThreadSync()  # type: ignore
+def FuseMBarrierArriveExpectTx():
+    """Fuse adjacent MUSA mbarrier arrive/expect-tx operations."""
+    return _ffi_api.FuseMBarrierArriveExpectTx()  # type: ignore
+
+
+def InjectFenceProxy():
+    """Inject backend-safe async proxy fences for MUSA lowering."""
+    return _ffi_api.InjectFenceProxy()  # type: ignore
+
+
+def LowerLDGSTG():
+    """Lower MUSA global/shared vector copies to LDGSTG forms."""
+    return _ffi_api.LowerLDGSTG()  # type: ignore
+
+
+def LowerAsyncCopy():
+    """Lower MUSA global-to-shared copies into async-copy intrinsics."""
+    return _ffi_api.LowerMUSAAsyncCopy()  # type: ignore
+
+
+def LowerSharedBarrier():
+    """Lower shared barriers using MUSA barrier semantics."""
+    return _ffi_api.LowerSharedBarrier()  # type: ignore
+
+
+def LowerSharedTmem():
+    """Lower shared tensor-memory allocations when supported."""
+    return _ffi_api.LowerSharedTmem()  # type: ignore
+
+
+def LowerPHIntrin():
+    """LowerPHIntrin"""
+    if hasattr(_ffi_api, "LowerPHIntrin"):
+        return _ffi_api.LowerPHIntrin()  # type: ignore
+    return lambda f: f
+
+
+def LowerL2Persistent():
+    """LowerL2Persistent"""
+    return _ffi_api.LowerL2Persistent()  # type: ignore
+
+
+def PersistThreadblock():
+    """PersistThreadblock"""
+    return _ffi_api.PersistThreadblock()  # type: ignore
 
 
 __all__ = [
-    "LowerLDGSTG",
-    "LowerFastDivmod",
-    "LowerTMEIntrin",
-    "LowerPartialThreadSync",
     "ProducerConsumerWarpSpecialized",
+    "FuseMBarrierArriveExpectTx",
+    "InjectFenceProxy",
+    "LowerLDGSTG",
+    "LowerAsyncCopy",
+    "LowerSharedBarrier",
+    "LowerSharedTmem",
+    "LowerPHIntrin",
+    "LowerL2Persistent",
+    "PersistThreadblock",
 ]

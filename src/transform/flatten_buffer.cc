@@ -23,7 +23,6 @@
 
 #include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include "common/int64_promoter.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
@@ -50,9 +49,10 @@ using namespace ffi;
  */
 class BufferFlattener : public arith::IRMutatorWithAnalyzer {
 public:
-  static PrimFunc Flatten(PrimFunc func) {
+  static PrimFunc Flatten(PrimFunc func, bool disable_index_type_promotion) {
     arith::Analyzer ana;
     auto pass = BufferFlattener(&ana);
+    pass.disable_index_type_promotion_ = disable_index_type_promotion;
     if (auto init_map =
             func->attrs.GetAttr<Map<Var, PrimExpr>>(tl::attr::kLocalVarInit)) {
       pass.local_var_init_map_ = init_map.value();
@@ -72,6 +72,43 @@ private:
   using IRMutatorWithAnalyzer::VisitExpr_;
   using IRMutatorWithAnalyzer::VisitStmt;
   using IRMutatorWithAnalyzer::VisitStmt_;
+
+  class Int64Promoter : public tirx::IndexDataTypeRewriter {
+  public:
+    using Parent = IndexDataTypeRewriter;
+
+    PrimExpr VisitExpr_(const VarNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return cast(DataType::Int(64), GetRef<Var>(op));
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr VisitExpr_(const IntImmNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return IntImm(DataType::Int(64), op->value);
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr VisitExpr_(const CastNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return cast(DataType::Int(64), op->value);
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    Stmt VisitStmt_(const BufferStoreNode *op) final {
+      // Force indices to be int64
+      auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
+      return std::move(node);
+    }
+
+    PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+      auto node = Downcast<BufferLoad>(Parent::VisitExpr_(op));
+      return std::move(node);
+    }
+  };
 
   explicit BufferFlattener(arith::Analyzer *ana) : IRMutatorWithAnalyzer(ana) {}
 
@@ -221,7 +258,7 @@ private:
       ICHECK_GE(call->args.size(), 3)
           << "tvm_access_ptr must have at least 3 arguments";
       PrimExpr offset = call->args[2];
-      if (NeedsInt64Promotion(offset)) {
+      if (!disable_index_type_promotion_ && NeedsInt64Promotion(offset)) {
         Int64Promoter promoter;
         call.CopyOnWrite()->args.Set(2, promoter(offset));
       }
@@ -246,6 +283,9 @@ private:
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
                                           const Array<PrimExpr> &indices) {
     auto flattened_indices = buffer->ElemOffset(indices);
+    if (disable_index_type_promotion_) {
+      return this->IterMapSimplifyWithContext(flattened_indices, false);
+    }
     Array<PrimExpr> safe_indices;
     Int64Promoter promoter;
     for (const auto &index : flattened_indices) {
@@ -309,10 +349,17 @@ private:
 
   /*! \brief Local var initializers preserved from block annotations. */
   Map<Var, PrimExpr> local_var_init_map_;
+
+  /*! \brief Disable automatic widening of index expressions. */
+  bool disable_index_type_promotion_{false};
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
-  return BufferFlattener::Flatten(std::move(f));
+  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+  bool disable_index_type_promotion =
+      ctxt->GetConfig(kDisableIndexTypePromotion, Optional<Bool>())
+          .value_or(false);
+  return BufferFlattener::Flatten(std::move(f), disable_index_type_promotion);
 }
 
 using namespace tirx::transform;

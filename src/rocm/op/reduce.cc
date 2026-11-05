@@ -17,15 +17,13 @@ using namespace tirx;
 namespace rocm {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
-  static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
-    return reducing_threads > 32;
-  }
-
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
 
-  static int GetPreferredVectorizedSize(const ReduceOpNode &, Target) {
-    return 1;
+  static int GetPreferedVectorizedSize(DataType dt, Target) {
+    return backend::reduce::GetPreferedVectorizedSize(dt);
   }
+
+  static bool UseSyncBarrier(Target, int) { return false; }
 
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,

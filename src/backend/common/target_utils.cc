@@ -14,32 +14,38 @@ bool TargetHasAsyncCopy(Target target) {
   if (TargetIsCuda(target)) {
     return TargetCudaHasAsyncCopy(target);
   }
+  if (TargetIsMusa(target)) {
+    return TargetMusaHasAsyncCopy(target);
+  }
   if (TargetIsRocm(target)) {
     return TargetRocmHasAsyncCopy(target);
-  }
-  if (TargetIsMUSA(target)) {
-    return TargetMUSAHasAsyncCopy(target);
   }
   return false;
 }
 
-bool TargetCanPropagateKernelErrors(Target target) {
-  if (auto status_return =
-          target->GetAttr<Bool>("supports_kernel_status_return")) {
-    return static_cast<bool>(status_return.value());
+int TargetGetWarpSize(Target target) {
+  if (TargetIsCuda(target)) {
+    return TargetCudaGetWarpSize(target);
   }
-  if (TargetIsMUSA(target)) {
-    return TargetMUSACanPropagateKernelErrors(target);
+  if (TargetIsMusa(target)) {
+    return TargetMusaGetWarpSize(target);
   }
-  auto kind = target->GetTargetDeviceType();
-  return kind == kDLCPU || kind == kDLExtDev || kind == kDLHexagon;
+  if (TargetIsRocm(target)) {
+    return TargetRocmGetWarpSize(target);
+  }
+  if (TargetIsMetal(target)) {
+    return TargetMetalGetWarpSize(target);
+  }
+  return 32;
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.TargetHasAsyncCopy", [](Target target) {
-    return TargetHasAsyncCopy(target);
-  });
+  refl::GlobalDef()
+      .def("tl.TargetHasAsyncCopy",
+           [](Target target) { return TargetHasAsyncCopy(target); })
+      .def("tl.TargetGetWarpSize",
+           [](Target target) { return TargetGetWarpSize(target); });
 }
 
 } // namespace tl

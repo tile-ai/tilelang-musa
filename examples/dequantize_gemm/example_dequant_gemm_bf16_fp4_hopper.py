@@ -41,7 +41,7 @@ def get_configs():
 )
 @tilelang.jit(
     out_idx=[-1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def matmul(
     M,
@@ -76,7 +76,7 @@ def matmul(
     - num_bits (default 4) is the bit-width of the quantized elements; storage_dtype is uint8 and num_elems_per_byte = 8 // num_bits.
     - QK = K // num_elems_per_byte and Block_QK = block_K // num_elems_per_byte determine B and shared-buffer shapes.
     - Asserts that K % (block_K * split) == 0; K must be divisible by block_K * split for the tiling to be valid.
-    - When fast_dequant is True, a valid mxfp intrinsic group (C source and function name) must be available via quantize.get_mxfp_intrin_group.
+    - When fast_dequant is True, a valid mxfp intrinsic group (C source and function name) must be available via tilelang.quantize.get_mxfp_intrin_group.
     - The kernel launches a 2D grid over ceildiv(N, block_N) and ceildiv(M, block_M) and uses `threads` threads per block with `num_stages` pipeline stages.
 
     Parameters that alter kernel layout/behavior (brief):
@@ -101,7 +101,7 @@ def matmul(
     B_dequantize_shared_shape = (block_N, block_K)
     assert K % (block_K * split) == 0
 
-    from quantize import get_mxfp_intrin_group
+    from tilelang.quantize import get_mxfp_intrin_group
 
     # fast_dequant_bf16_fp4_twiddling
     # It requires that the 2 consecutive uint8 elements (16bits) contains 4 fp4 elements in a bit-twiddling way.
@@ -451,6 +451,7 @@ def run_regression_perf(m=4096, n=4096, k=4096, fast_dequant=True):
         threads=256,
         split=1,
     )
+    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     return profiler.do_bench(backend="cupti")
 

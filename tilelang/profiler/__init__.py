@@ -15,6 +15,7 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
+from tilelang.utils.device import synchronize
 from tvm import tirx
 
 
@@ -120,9 +121,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        synchronize()
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        synchronize()
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -178,9 +179,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        synchronize()
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        synchronize()
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -225,12 +226,11 @@ class Profiler:
         n_warmup: int = 0,
         n_repeat: int = 0,
         input_tensors: list[torch.Tensor] = None,
-        backend: Literal["event", "cupti", "cudagraph", "wall", "msprof", "msprof_detail"] = "event",
+        backend: Literal["event", "cupti", "cudagraph"] = "event",
         quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
         dynamic_symbolic_constraints: dict[str, int] | None = None,
         device: int | torch.device | None = None,
-        early_stop_baseline: float | None = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -240,14 +240,12 @@ class Profiler:
             rep: Number of repetitions for timing
             n_warmup: Number of warmup iterations
             n_repeat: Number of timing iterations
-            backend: Which profiling backend to use - "event", "cupti", "cudagraph", "wall", "msprof", or "msprof_detail"
+            backend: Which profiling backend to use - "event", "cupti", or "cudagraph"
             input_tensors: Optional pre-generated input tensors
             dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
                 names to concrete int values. Use this when benchmarking kernels with
                 dynamic shapes, e.g., {"m": 2048, "n": 1024}
-            device: Optional device to benchmark on. MPS and NPU support "event" and
-                "wall"; CPU requires "wall". Asynchronous wall timing needs
-                an explicit device.
+            device: Optional CUDA device to benchmark on.
 
         Returns:
             float: Average execution time in milliseconds
@@ -276,13 +274,9 @@ class Profiler:
                 backend=backend,
                 return_mode=return_mode,
                 device=device,
-                early_stop_baseline=early_stop_baseline,
             )
 
-        if device is not None and not isinstance(device, int) and torch.device(device).type == "npu":
-            with torch.npu.device(device):
-                return run_bench()
-        if device is None or (not isinstance(device, int) and torch.device(device).type != "cuda"):
+        if device is None:
             return run_bench()
         with torch.cuda.device(device):
             return run_bench()

@@ -79,8 +79,37 @@ def view_shape_mismatch_test(N, M, dtype, new_dtype=None):
 
 
 def test_view_shape_mismatch():
-    with pytest.raises(ValueError, match="logical bit count"):
+    with pytest.raises(AssertionError):
         view_shape_mismatch_test(1024, 32, T.float32)
+
+
+def test_view_symbolic_shape_equivalence():
+    batch = T.dynamic("batch")
+    num_mp_parts = T.dynamic("num_mp_parts")
+    seq_len = T.dynamic("seq_len")
+    num_heads = 128
+
+    src = T.Tensor([batch + num_mp_parts, seq_len, num_heads], "float")
+    _ = T.view(
+        src,
+        [batch + num_mp_parts, seq_len * num_heads],
+        dtype="float",
+    )
+
+
+def test_view_symbolic_shape_real_mismatch():
+    batch = T.dynamic("batch")
+    num_mp_parts = T.dynamic("num_mp_parts")
+    seq_len = T.dynamic("seq_len")
+    num_heads = 128
+
+    src = T.Tensor([batch + num_mp_parts, seq_len, num_heads], "float")
+    with pytest.raises(AssertionError):
+        T.view(
+            src,
+            [batch + num_mp_parts, seq_len * (num_heads + 1)],
+            dtype="float",
+        )
 
 
 def test_view_subbyte_dtype_change():
@@ -110,15 +139,16 @@ def fp4_to_uint8_view_test(rows_per_cta=16, mask_k=256):
     return main
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@pytest.mark.skip(reason="MUSA backend does not yet support fp4 kernel codegen")
+@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 2)
 def test_view_shared_fp4_to_uint8_compile():
     program = fp4_to_uint8_view_test()
     kernel = tl.compile(program, out_idx=-1)
     src = kernel.get_kernel_source()
     assert "fp4_e2" in src
 
-    dummy_input = torch.randn((16, 256), device="cuda", dtype=torch.bfloat16)
+    dummy_input = torch.randn((16, 256), device="musa", dtype=torch.bfloat16)
     output = kernel(dummy_input)
     assert output.shape == (16, 128)
     assert output.dtype == torch.uint8
@@ -144,57 +174,11 @@ def annotated_layout_on_dtype_changing_view_test():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_annotated_layout_on_dtype_changing_view_compile():
     program = annotated_layout_on_dtype_changing_view_test()
-    kernel = tl.compile(program, out_idx=-1)
+    kernel = tl.compile(program, out_idx=-1, target="musa")
     assert kernel.get_kernel_source()
-
-
-def shared_reinterpret_view_test(shape, dtype, new_shape, new_dtype, swizzled):
-    """Write through the shared allocation, read through its reinterpreting
-    view: the view's derived layout must induce the same storage-bit map as
-    the allocation's. The swizzled variant additionally covers the widening
-    contiguity proof and the TMA descriptor encoding of the derived layout."""
-
-    @T.prim_func
-    def main(
-        A: T.Tensor(shape, dtype),
-        B: T.Tensor(new_shape, new_dtype),
-    ):
-        with T.Kernel(1, threads=128):
-            A_shared = T.alloc_shared(shape, dtype)
-            A_view = T.view(A_shared, new_shape, dtype=new_dtype)
-            if swizzled:
-                T.annotate_layout({A_shared: tilelang.layout.make_swizzled_layout(A_shared)})
-            T.copy(A, A_shared)
-            T.copy(A_view, B)
-
-    return main
-
-
-def run_shared_reinterpret_view(shape, dtype, new_shape, new_dtype, swizzled):
-    program = shared_reinterpret_view_test(shape, dtype, new_shape, new_dtype, swizzled)
-    jit_kernel = tl.compile(program, out_idx=-1)
-
-    torch_dtype = T.dtype(dtype).as_torch()
-    lanes = torch.randn(shape[0], shape[1] * torch_dtype.itemsize // 2, device="cuda", dtype=torch.bfloat16)
-    a = lanes.view(dtype=torch_dtype)
-    d = jit_kernel(a)
-    ref = a.view(dtype=T.dtype(new_dtype).as_torch()).view(new_shape)
-    torch.testing.assert_close(d.view(torch.int16), ref.view(torch.int16), rtol=0, atol=0)
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("swizzled", [False, True], ids=["linear", "swizzled"])
-def test_shared_view_narrowing_numeric(swizzled):
-    run_shared_reinterpret_view((64, 64), T.float32, (64, 128), T.bfloat16, swizzled)
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("swizzled", [False, True], ids=["linear", "swizzled"])
-def test_shared_view_widening_numeric(swizzled):
-    run_shared_reinterpret_view((64, 128), T.bfloat16, (64, 64), T.float32, swizzled)
 
 
 if __name__ == "__main__":

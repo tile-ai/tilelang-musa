@@ -70,7 +70,6 @@ void RegisterReduceImpl(ReduceImpl impl) {
 
 ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>();
-  node->annotations = annotations;
   // Accept BufferRegion/BufferLoad for src/dst
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
@@ -99,16 +98,6 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     } else if (auto i = opt.value().as<IntImm>()) {
       node->nan_propagate = i.value()->value != 0;
     }
-  }
-  const bool is_minmax =
-      node->type->IsMax() || node->type->IsMin() || node->type->IsAbsMax();
-
-  if (node->nan_propagate && is_minmax) {
-    CHECK(node->dst->dtype.is_float16() || node->dst->dtype.is_bfloat16(),
-          ValueError)
-        << "reduce_" << reduce_type
-        << " with nan_propagate=True requires float16 or bfloat16 output, got "
-        << node->dst->dtype;
   }
   data_ = std::move(node);
 }

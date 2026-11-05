@@ -115,8 +115,6 @@ class Analyzer:
         def _ftransform(f, mod, ctx):
             # Initialize the set of global buffers
             self.global_buffers = set(f.buffer_map.values())
-            self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1}
-            self.loop_stack.clear()
 
             def _pre_visit(stmt):
                 """
@@ -133,21 +131,15 @@ class Analyzer:
                             extent = stmt.value.value if hasattr(stmt.value, "value") else stmt.value
                             self.block_counts[thread_tag] = extent
                 elif isinstance(stmt, tvm.tirx.For):
-                    thread_binding = stmt.thread_binding
-                    if thread_binding is not None:
-                        thread_tag = thread_binding.thread_tag
-                        if thread_tag in self.block_counts:
-                            extent = stmt.extent.value if hasattr(stmt.extent, "value") else stmt.extent
-                            self.block_counts[thread_tag] = extent
-                    else:
-                        self.loop_stack.append(stmt.extent)
+                    # Push loop extent onto the stack
+                    self.loop_stack.append(stmt.extent)
                 elif isinstance(stmt, tvm.tirx.Evaluate):
                     # Handle Evaluate nodes containing calls
                     value = stmt.value
                     if isinstance(value, tvm.tirx.Call):
-                        if value.op.name in ("tl.copy", "tl.tileop.copy"):
+                        if value.op.name == "tl.copy":
                             self._analyze_copy(value)
-                        elif value.op.name in ("tl.gemm", "tl.tileop.gemm"):
+                        elif value.op.name == "tl.gemm":
                             self._analyze_gemm(value)
                 return None
 
@@ -157,7 +149,7 @@ class Analyzer:
                 Args:
                     stmt: The current IR node being visited.
                 """
-                if isinstance(stmt, tvm.tirx.For) and stmt.thread_binding is None and self.loop_stack:
+                if isinstance(stmt, tvm.tirx.For) and self.loop_stack:
                     self.loop_stack.pop()
                 return None
 

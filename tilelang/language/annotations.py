@@ -1,69 +1,87 @@
 """Annotation helpers exposed on the TileLang language surface."""
 
+import threading
 from collections.abc import Callable
 
-from tilelang.layout import Fragment, Layout, PartialFragment
-from tilelang.utils.language import is_fragment, is_reducer
-from tvm.tirx import FloatImm, IntImm, tvm_tuple
+import tvm
+from tilelang.layout import Fragment, Layout
+from tilelang.utils.language import is_fragment
 from tvm.tirx.script.parser import attr
-from tvm.tirx.script.builder.ir import sblock_attr
+from tvm.tirx.script.builder.ir import evaluate, sblock_attr
+from tvm.tirx import FloatImm, tvm_tuple
 
 __all__ = [
-    "WSID",
     "use_swizzle",
     "annotate_layout",
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
     "annotate_restrict_buffers",
     "annotate_min_blocks_per_sm",
-    "annotate_ws_pipeline_depth",
-    "annotate_ws_schedule",
-    "ws_op",
 ]
 
-# Annotation key carrying a statement's stable warp-specialization op id
-# (kWSOpIdKey in src/transform/common/warp_specialize.h). Shorthand so kernels
-# write ``annotations={T.WSID: "copy_A"}`` on tile ops and loops.
-WSID = "tl.ws_op_id"
+_tls = threading.local()
+
+
+def _next_layout_override_step() -> int:
+    if not hasattr(_tls, "layout_override_step"):
+        _tls.layout_override_step = 0
+    step = _tls.layout_override_step
+    _tls.layout_override_step += 1
+    return step
 
 
 def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     """Annotate a kernel to use a specific threadblock swizzle pattern."""
-    if order == "row":
-        device_func = "rasterization2DRow"
-    elif order == "column":
-        device_func = "rasterization2DColumn"
-    elif order == "mlx":
-        device_func = "rasterization2DMLX"
-    else:
-        raise ValueError(f"Unsupported swizzle order: {order}")
+    device_func = "rasterization2DRow" if order == "row" else "rasterization2DColumn"
     if not enable:
         return None
     return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
 
 
-def annotate_layout(layout_map: dict):
-    """Annotate the layout of the buffer."""
+def annotate_layout(layout_map: dict, allow_reannotation: bool = False, allow_buffer_region: bool = False):
+    """Annotate the layout of the buffer.
+
+    Parameters
+    ----------
+    layout_map : dict
+        Buffer-to-layout map.
+    allow_reannotation : bool
+        If False (default), keep original block-level semantics.
+        If True, record an ordered manual-layout declaration that can update
+        a buffer layout in later statements.
+    allow_buffer_region : bool
+        If False (default), reject BufferRegion keys.
+        If True, allow BufferRegion keys and map them to their underlying buffer.
+    """
     _layout_map = {}
     for buffer, layout in layout_map.items():
-        if is_reducer(buffer):
-            # The reducer's replicas are addends awaiting the finalize
-            # collective, not equal copies: plain Fragment semantics would
-            # silently misdescribe them.
-            assert isinstance(layout, PartialFragment), (
-                f"for reducer {buffer} (T.alloc_reducer), the layout must be a "
-                f"PartialFragment describing the per-thread partials, but got {type(layout)}"
-            )
-        elif is_fragment(buffer):
-            assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
+        if isinstance(buffer, tvm.tirx.Buffer):
+            if is_fragment(buffer):
+                assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
+            buffer_data = buffer.data
+            target_shape = buffer.shape
+        elif isinstance(buffer, tvm.tirx.BufferRegion):
+            if not allow_buffer_region:
+                raise ValueError("BufferRegion is not allowed in annotate_layout unless allow_buffer_region=True")
+            buffer_data = buffer.buffer.data
+            target_shape = buffer.buffer.shape
+        else:
+            raise ValueError(f"Invalid annotate_layout key type: {type(buffer)}")
         if isinstance(layout, Layout):
-            _layout_map[buffer.data] = layout
+            _layout_map[buffer_data] = layout
         elif isinstance(layout, Callable):
-            _layout_map[buffer.data] = Layout(buffer.shape, layout)
+            _layout_map[buffer_data] = Layout(target_shape, layout)
         else:
             raise ValueError(f"Invalid layout: {layout}")
 
-    return sblock_attr({"layout_map": _layout_map})
+    if not allow_reannotation:
+        return sblock_attr({"layout_map": _layout_map})
+
+    step = _next_layout_override_step()
+    sblock_attr({"layout_override_seq": {str(step): _layout_map}})
+    marker_op = tvm.ir.Op.get("tl.layout_marker")
+    evaluate(tvm.tirx.Call("int32", marker_op, [tvm.tirx.IntImm("int32", step)]))
+    return None
 
 
 def annotate_safe_value(safe_value_map: dict):
@@ -131,63 +149,3 @@ def annotate_restrict_buffers(*buffers):
             raise TypeError(f"annotate_restrict_buffers expects Buffer arguments, got {type(buf)}") from e
     # Also return as block attribute (root block exists by default) for readability/tools.
     return sblock_attr({"tl.non_restrict_params": data_vars})
-
-
-def annotate_ws_pipeline_depth(depth_map: dict):
-    """Declare the depth of the pipelines the automatic scheduler hosts at
-    the ENCLOSING scope for the given buffers, asserting each recurrence
-    resets per version — otherwise the depth derives from the loop's
-    ``num_stages``, and accumulators pin single-buffered.
-
-    ``depth_map`` maps each buffer to its pipeline depth at this scope.
-    """
-    _map = {}
-    for buffer, depth in depth_map.items():
-        assert isinstance(depth, int) and depth >= 1, f"pipeline depth must be a positive int, got {depth!r}"
-        _map[buffer.data] = IntImm("int32", depth)
-    return attr(_map, "tl.ws_pipeline_depth", 0)
-
-
-def annotate_ws_schedule(schedule):
-    """Attach a warp-specialization schedule to the kernel.
-
-    ``schedule`` is a typed :class:`~tilelang.language.warp_specialize.WSSchedule`
-    object describing how to transform the straight-line kernel into a
-    warp-specialized one: warp roles, pipelines (full/empty barrier pairs
-    protecting multi-versioned buffers), and per-role instruction sequences
-    per loop scope. It is materialized by the ``MaterializeWSSchedule`` pass;
-    see ``examples/aws/gemm.py`` for a complete example.
-    """
-    from tilelang.language.warp_specialize import WSSchedule
-
-    assert isinstance(schedule, WSSchedule), f"annotate_ws_schedule expects a T.WSSchedule object, got {type(schedule)}"
-    return sblock_attr({"tl.ws_schedule": schedule})
-
-
-def ws_op(op_id: str):
-    """Manually annotate the enclosed statement(s) with a stable
-    warp-specialization op or scope id.
-
-    Wraps the body in an ``AttrStmt`` with key :data:`WSID`. This is the
-    annotation of last resort, for statement forms that cannot carry
-    ``annotations=`` themselves. The enclosed statements — a scalar Bind,
-    or several statements such as an inlined scheduler method — become
-    ONE opaque op:
-
-    >>> with T.ws_op("rescale_vote"):
-    ...     should_rescale = T.any_sync(scale_shared[tid] < 1.0)
-    >>> with T.ws_op("sched_next"):
-    ...     sched.next_tile()
-
-    With a scope id the wrapper encloses a ``while`` loop and opens that
-    scope (serial scope loops carry the id in their own annotations):
-
-    >>> with T.ws_op("loop_wave"):
-    ...     while sched.valid():
-    ...         ...
-
-    Tile ops and loops pass ``annotations={T.WSID: ...}`` directly
-    instead.
-    """
-    assert isinstance(op_id, str) and op_id, "ws_op id must be a non-empty string"
-    return attr(None, WSID, op_id)

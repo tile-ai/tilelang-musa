@@ -22,22 +22,9 @@ get_started/targets
 :caption: TUTORIALS
 
 tutorials/debug_tools_for_tilelang
+env_usage
 tutorials/auto_tuning
 tutorials/logging
-:::
-
-:::{toctree}
-:maxdepth: 1
-:caption: TOOLS
-
-tools/index
-tools/compile_only
-tools/analyzer
-tools/layout_visualization
-tools/autodd
-tools/lower_trace
-tools/pass_diff
-tools/iket
 :::
 
 :::{toctree}
@@ -72,14 +59,6 @@ deeplearning_operators/deepseek_mla
 compiler_internals/letstmt_inline
 compiler_internals/inject_fence_proxy
 compiler_internals/tensor_checks
-compiler_internals/metal_tilelang_development
-:::
-
-:::{toctree}
-:maxdepth: 1
-:caption: DEVELOPER GUIDE
-
-developer_guide/cpp_style
 :::
 
 :::{toctree}

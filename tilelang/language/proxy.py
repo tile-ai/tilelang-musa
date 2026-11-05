@@ -154,14 +154,18 @@ class TensorProxy(BaseTensorProxy):
     the tensor should be by default contiguous.
     """
 
-    def __call__(self, shape: ShapeType | PrimExpr | int, dtype: DType = "float32", data=None, scope=None) -> tirx.Buffer:
-        # Imported lazily: `tilelang.language.eager` pulls in the builder, which
-        # imports this module transitively.
-        from tilelang.language.eager.utils import construct_strides
+    @staticmethod
+    def _construct_strides(shape: tuple[Any]):
+        s, strides = 1, [1]
+        for dim in shape[:0:-1]:
+            s *= dim
+            strides.append(s)
+        return tuple(reversed(strides))
 
+    def __call__(self, shape: ShapeType | PrimExpr | int, dtype: DType = "float32", data=None, scope=None) -> tirx.Buffer:
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
-        return super().__call__(shape, dtype=dtype, strides=construct_strides(shape), data=data, scope=scope)
+        return super().__call__(shape, dtype=dtype, strides=TensorProxy._construct_strides(shape), data=data, scope=scope)
 
 
 class StridedTensorProxy(BaseTensorProxy):
@@ -170,10 +174,10 @@ class StridedTensorProxy(BaseTensorProxy):
     This class implements the default tensor proxy with global memory scope, with the stride information required.
     """
 
-    def __call__(self, shape: ShapeType, strides: tuple[Any], dtype: DType = "float32", scope=None, *, data=None) -> tirx.Buffer:
+    def __call__(self, shape: ShapeType, strides: tuple[Any], dtype: DType = "float32", scope=None) -> tirx.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
-        return super().__call__(shape, dtype=dtype, data=data, strides=strides, scope=scope)
+        return super().__call__(shape, dtype=dtype, strides=strides, scope=scope)
 
 
 class FragmentBufferProxy(BaseTensorProxy):
@@ -293,7 +297,6 @@ def _get_pointer_type_annotation(value: object) -> tvm_ir.PointerType | None:
 
 def _materialize_pointer_from_addr(addr: PrimExpr, dtype: DType, storage_scope: str = "global") -> Var:
     from tilelang.language.eager.builder import Builder
-    from tilelang.language.frame import register_let_value
 
     builder = Builder.current()
     if builder is None:
@@ -301,9 +304,7 @@ def _materialize_pointer_from_addr(addr: PrimExpr, dtype: DType, storage_scope: 
 
     value = addr if str(addr.dtype) == "handle" else tirx.reinterpret("handle", addr)
     ptr_type = tvm_ir.PointerType(tvm_ir.PrimType(DataType(dtype)), storage_scope)
-    pointer_var = bind(value, type_annotation=ptr_type)
-    register_let_value(pointer_var, value)
-    return pointer_var
+    return bind(value, type_annotation=ptr_type)
 
 
 def make_tensor_from_addr(

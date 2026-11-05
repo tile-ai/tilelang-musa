@@ -4,6 +4,7 @@
  */
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -15,10 +16,11 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <vector>
 
-#include "cuda/op/builtin.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
+#include "op/builtin.h"
 #include "op/utils.h"
 #include "tir/ir/buffer_common.h"
 
@@ -30,8 +32,19 @@ using namespace ffi;
 
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
-  explicit PTXAsyncCopyInjector(bool async_without_async_commit_wait)
-      : async_without_async_commit_wait_(async_without_async_commit_wait) {}
+  explicit PTXAsyncCopyInjector(bool enable_auto_async_copy,
+                                bool async_without_async_commit_wait,
+                                bool disable_force_async_wait = false,
+                                bool sync_inside_conditionals = false)
+      : enable_auto_async_copy_(enable_auto_async_copy),
+        async_without_async_commit_wait_(async_without_async_commit_wait),
+        disable_force_async_wait_(disable_force_async_wait),
+        sync_inside_conditionals_(sync_inside_conditionals),
+        disable_safe_robust_copy_predication_(
+            tvm::transform::PassContext::Current()
+                ->GetConfig<Bool>(kDisableSafeRobustCopyPredication,
+                                  Bool(false))
+                .value()) {}
 
   bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
 
@@ -51,6 +64,30 @@ public:
     return SeqStmt(seq);
   }
 
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tl::attr::kSourceRobustDesc) {
+      PrimExpr previous_src_robust_desc = current_src_robust_desc_;
+      current_src_robust_desc_ = op->value;
+      Stmt body = this->VisitStmt(op->body);
+      current_src_robust_desc_ = previous_src_robust_desc;
+      return AttrStmt(op->node, op->attr_key, op->value, body);
+    }
+    if (op->attr_key == tl::attr::kForceAsyncCopy) {
+      bool previous_force_async_copy = in_force_async_copy_;
+      in_force_async_copy_ = true;
+      Stmt body = this->VisitStmt(op->body);
+      in_force_async_copy_ = previous_force_async_copy;
+      return AttrStmt(op->node, op->attr_key, op->value, body);
+    }
+    if (op->attr_key == s_tir::attr::async_scope) {
+      ++explicit_async_scope_depth_;
+      Stmt body = this->VisitStmt(op->body);
+      --explicit_async_scope_depth_;
+      // `async_scope` is a lowering-only marker for cp.async semantics.
+      return body;
+    }
+    return StmtMutator::VisitStmt_(op);
+  }
   Stmt VisitStmt_(const ForNode *op) final {
     // Track nested vectorized loop extents so we can decide whether an
     // element-wise copy has a legal final cp.async width after later loop
@@ -97,6 +134,14 @@ public:
       return Optional<Stmt>();
     }
 
+    std::optional<PointerTypeInfo> ptr_info;
+    if (current_src_robust_desc_.defined()) {
+      ptr_info = PreparePointerTypeInfo(load, store);
+      if (!ptr_info.has_value() || index_info->per_access_bytes <= 0) {
+        return Optional<Stmt>();
+      }
+    }
+
     if (index_info->index_lanes == 1) {
       if (current_vectorized_lanes_ > 1 &&
           !HasContiguousVectorizedOffsets(index_info->src_index,
@@ -104,11 +149,11 @@ public:
         return Optional<Stmt>();
       }
       return MakeCPAsyncStmtFromLoads(
-          store,
+          store, ptr_info,
           /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
           /*src_base_load=*/BufferLoad(load->buffer, load->indices),
-          /*num_elems=*/index_info->per_access_num_elems, predicated,
-          predicate_value);
+          index_info->per_access_num_elems, index_info->per_access_bytes,
+          predicated, predicate_value, current_src_robust_desc_);
     }
 
     Optional<Array<PrimExpr>> src_base_indices =
@@ -125,11 +170,11 @@ public:
       return Optional<Stmt>();
     }
     return MakeCPAsyncStmtFromLoads(
-        store,
+        store, ptr_info,
         /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
         /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
-        /*num_elems=*/index_info->per_access_num_elems, predicated,
-        predicate_value);
+        index_info->per_access_num_elems, index_info->per_access_bytes,
+        predicated, predicate_value, current_src_robust_desc_);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -217,6 +262,41 @@ public:
     bool pending_before = pending_sync_copies_;
     bool uncommitted_before = uncommitted_sync_copies_;
 
+    // MUSA's compiler is sensitive to commit_group on control-flow paths that
+    // did not execute a cp.async, so keep branch-local copies branch-local.
+    if (sync_inside_conditionals_ && !pending_before && !uncommitted_before) {
+      pending_sync_copies_ = false;
+      uncommitted_sync_copies_ = false;
+      Stmt then_case = this->VisitStmt(op->then_case);
+      bool pending_then = pending_sync_copies_;
+      bool uncommitted_then = uncommitted_sync_copies_;
+      if (pending_then) {
+        then_case =
+            AppendSyncVisibilityToStmt(std::move(then_case), uncommitted_then);
+      }
+
+      Optional<Stmt> else_case;
+      if (op->else_case.defined()) {
+        pending_sync_copies_ = false;
+        uncommitted_sync_copies_ = false;
+        else_case = this->VisitStmt(op->else_case.value());
+        bool pending_else = pending_sync_copies_;
+        bool uncommitted_else = uncommitted_sync_copies_;
+        if (pending_else) {
+          else_case = AppendSyncVisibilityToStmt(std::move(else_case.value()),
+                                                 uncommitted_else);
+        }
+      }
+
+      pending_sync_copies_ = false;
+      uncommitted_sync_copies_ = false;
+      if (then_case.same_as(op->then_case) &&
+          (!else_case.defined() || else_case.same_as(op->else_case))) {
+        return GetRef<Stmt>(op);
+      }
+      return IfThenElse(op->condition, then_case, else_case);
+    }
+
     pending_sync_copies_ = pending_before;
     uncommitted_sync_copies_ = uncommitted_before;
     Stmt then_case = this->VisitStmt(op->then_case);
@@ -248,6 +328,10 @@ public:
     if (!IsSharedBuffer(store->buffer)) {
       return StmtMutator::VisitStmt_(store);
     }
+    // Only lower copies in regions where async-copy rewrite is enabled.
+    if (!enable_auto_async_copy_ && !in_force_async_copy_) {
+      return StmtMutator::VisitStmt_(store);
+    }
 
     Optional<PrimExpr> predicate = std::nullopt;
     const BufferLoadNode *load =
@@ -258,7 +342,8 @@ public:
                        predicate.defined() ? predicate.value() : PrimExpr());
       if (injected.defined()) {
         injected_ptx_async_copy_ = true;
-        if (!UseExplicitAsyncSemantics()) {
+        if (!UseExplicitAsyncSemantics() &&
+            !(in_force_async_copy_ && disable_force_async_wait_)) {
           pending_sync_copies_ = true;
           uncommitted_sync_copies_ = true;
         }
@@ -280,6 +365,13 @@ private:
     PrimExpr dst_index;
     int index_lanes{1};
     int per_access_num_elems{0};
+    int per_access_bytes{0};
+  };
+
+  // Pointer element type metadata extracted from buffer handle annotations.
+  struct PointerTypeInfo {
+    DataType dst_elem_type;
+    DataType src_elem_type;
   };
 
   // Synchronization state for injected cp.async runs carried across statements.
@@ -399,32 +491,31 @@ private:
     info.dst_index = dst_index;
     info.index_lanes = index_lanes;
     info.per_access_num_elems = effective_lanes;
+    info.per_access_bytes =
+        per_access_bits % 8 == 0 ? static_cast<int>(per_access_bits / 8) : 0;
     return info;
   }
 
-  static PrimExpr ExtractVectorBase(const PrimExpr &index) {
-    if (index.dtype().lanes() == 1) {
-      return index;
+  static std::optional<PointerTypeInfo>
+  PreparePointerTypeInfo(const BufferLoadNode *load,
+                         const BufferStoreNode *store) {
+    auto dst_elem_type = GetPointerType(store->buffer->data->type_annotation);
+    auto src_elem_type = GetPointerType(load->buffer->data->type_annotation);
+    if (!dst_elem_type.has_value() || !src_elem_type.has_value()) {
+      return std::nullopt;
     }
-    if (const auto *broadcast = index.as<BroadcastNode>()) {
-      return broadcast->value;
-    }
-    if (const auto *ramp = index.as<RampNode>()) {
-      if (!is_one(ramp->stride)) {
-        return PrimExpr();
-      }
-      return ramp->base;
-    }
+    return PointerTypeInfo{dst_elem_type.value(), src_elem_type.value()};
+  }
 
+  // Common pattern after flattening a vectorized N-D buffer access:
+  //   (broadcast(base_offset) + ramp(vec_base, 1, lanes))
+  // or its commuted form:
+  //   (ramp(vec_base, 1, lanes) + broadcast(base_offset))
+  static PrimExpr ExtractRampBroadcastAddBase(const PrimExpr &index) {
     const auto *add = index.as<AddNode>();
     if (!add) {
       return PrimExpr();
     }
-
-    // Common pattern after flattening a vectorized N-D buffer access:
-    //   (broadcast(base_offset) + ramp(vec_base, 1, lanes))
-    // or its commuted form:
-    //   (ramp(vec_base, 1, lanes) + broadcast(base_offset))
     const PrimExpr &lhs = add->a;
     const PrimExpr &rhs = add->b;
     if (const auto *lhs_ramp = lhs.as<RampNode>()) {
@@ -443,6 +534,139 @@ private:
         return tirx::Add(rhs_ramp->base, lhs_broadcast->value);
       }
     }
+    return PrimExpr();
+  }
+
+  static bool IsLaneWiseScalarizableCall(const CallNode *call) {
+    return call->op.same_as(builtin::bitwise_and()) ||
+           call->op.same_as(builtin::bitwise_or()) ||
+           call->op.same_as(builtin::bitwise_xor()) ||
+           call->op.same_as(builtin::bitwise_not()) ||
+           call->op.same_as(builtin::shift_left()) ||
+           call->op.same_as(builtin::shift_right());
+  }
+
+  // Input: a scalar PrimExpr, or a vector PrimExpr whose lanes may all carry
+  // the same value.
+  //
+  // Output: the scalar expression shared by all lanes. If `expr` is already
+  // scalar, return it directly. If `expr` is a lane-invariant vector expression
+  // such as Broadcast(x, lanes) or a whitelisted lane-wise call over
+  // lane-invariant arguments, return the scalarized value. Otherwise return an
+  // undefined PrimExpr().
+  static PrimExpr ExtractLaneInvariantScalar(const PrimExpr &expr) {
+    if (expr.dtype().lanes() == 1) {
+      return expr;
+    }
+    if (const auto *broadcast = expr.as<BroadcastNode>()) {
+      return broadcast->value;
+    }
+    if (const auto *cast = expr.as<CastNode>()) {
+      PrimExpr value = ExtractLaneInvariantScalar(cast->value);
+      if (!value.defined() || value.dtype().lanes() != 1) {
+        return PrimExpr();
+      }
+      return tirx::Cast(cast->dtype.with_lanes(1), value);
+    }
+    if (const auto *add = expr.as<AddNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(add->a);
+      PrimExpr b = ExtractLaneInvariantScalar(add->b);
+      return a.defined() && b.defined() ? tirx::Add(a, b) : PrimExpr();
+    }
+    if (const auto *sub = expr.as<SubNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(sub->a);
+      PrimExpr b = ExtractLaneInvariantScalar(sub->b);
+      return a.defined() && b.defined() ? tirx::Sub(a, b) : PrimExpr();
+    }
+    if (const auto *mul = expr.as<MulNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(mul->a);
+      PrimExpr b = ExtractLaneInvariantScalar(mul->b);
+      return a.defined() && b.defined() ? tirx::Mul(a, b) : PrimExpr();
+    }
+    if (const auto *div = expr.as<FloorDivNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(div->a);
+      PrimExpr b = ExtractLaneInvariantScalar(div->b);
+      return a.defined() && b.defined() ? tirx::FloorDiv(a, b) : PrimExpr();
+    }
+    if (const auto *mod = expr.as<FloorModNode>()) {
+      PrimExpr a = ExtractLaneInvariantScalar(mod->a);
+      PrimExpr b = ExtractLaneInvariantScalar(mod->b);
+      return a.defined() && b.defined() ? tirx::FloorMod(a, b) : PrimExpr();
+    }
+    if (const auto *call = expr.as<CallNode>()) {
+      if (!IsLaneWiseScalarizableCall(call)) {
+        return PrimExpr();
+      }
+      Array<PrimExpr> args;
+      args.reserve(call->args.size());
+      for (const PrimExpr &arg : call->args) {
+        PrimExpr scalar_arg = ExtractLaneInvariantScalar(arg);
+        if (!scalar_arg.defined() || scalar_arg.dtype().lanes() != 1) {
+          return PrimExpr();
+        }
+        args.push_back(scalar_arg);
+      }
+      return tirx::Call(call->dtype.with_lanes(1), call->op, args,
+                        call->annotations);
+    }
+    return PrimExpr();
+  }
+
+  // Nested Add tree where one term is a unit-stride Ramp and every other term
+  // is lane-invariant:
+  //   offset_0 + ... + ramp(vec_base, 1, lanes) + ... + offset_n
+  static PrimExpr ExtractNestedRampInvariantAddBase(const PrimExpr &index) {
+    if (const auto *ramp = index.as<RampNode>()) {
+      return is_one(ramp->stride) ? ramp->base : PrimExpr();
+    }
+
+    const auto *add = index.as<AddNode>();
+    if (!add) {
+      return PrimExpr();
+    }
+
+    PrimExpr lhs_base = ExtractNestedRampInvariantAddBase(add->a);
+    if (lhs_base.defined()) {
+      PrimExpr rhs_offset = ExtractLaneInvariantScalar(add->b);
+      if (rhs_offset.defined()) {
+        return tirx::Add(lhs_base, rhs_offset);
+      }
+    }
+
+    PrimExpr rhs_base = ExtractNestedRampInvariantAddBase(add->b);
+    if (rhs_base.defined()) {
+      PrimExpr lhs_offset = ExtractLaneInvariantScalar(add->a);
+      if (lhs_offset.defined()) {
+        return tirx::Add(rhs_base, lhs_offset);
+      }
+    }
+
+    return PrimExpr();
+  }
+
+  static PrimExpr ExtractVectorBase(const PrimExpr &index) {
+    if (index.dtype().lanes() == 1) {
+      return index;
+    }
+    if (const auto *broadcast = index.as<BroadcastNode>()) {
+      return broadcast->value;
+    }
+    if (const auto *ramp = index.as<RampNode>()) {
+      if (is_one(ramp->stride)) {
+        return ramp->base;
+      }
+    }
+
+    PrimExpr add_base = ExtractRampBroadcastAddBase(index);
+    if (add_base.defined()) {
+      return add_base;
+    }
+
+    PrimExpr nested_add_base = ExtractNestedRampInvariantAddBase(index);
+    if (nested_add_base.defined()) {
+      return nested_add_base;
+    }
+
     return PrimExpr();
   }
 
@@ -467,25 +691,46 @@ private:
                  IntImm(DataType::Int(32), rw_mask)});
   }
 
-  static Optional<Stmt>
-  MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
-                           const BufferLoad &dst_base_load,
-                           const BufferLoad &src_base_load, int num_elems,
-                           bool predicated, const PrimExpr &predicate_value) {
-    PrimExpr dst_access_ptr =
-        MakeAccessPtrFromLoad(dst_base_load, num_elems, /*rw_mask=*/2);
-    PrimExpr src_access_ptr =
-        MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
-
+  Optional<Stmt> MakeCPAsyncStmtFromLoads(
+      const BufferStoreNode *store,
+      const std::optional<PointerTypeInfo> &ptr_info,
+      const BufferLoad &dst_base_load, const BufferLoad &src_base_load,
+      int num_elems, int bytes, bool predicated,
+      const PrimExpr &predicate_value, const PrimExpr &robust_desc) const {
     Array<PrimExpr> cp_async_args;
-    if (predicated) {
-      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems),
-                       predicate_value};
+    Op op = tvm::tl::ptx_cp_async();
+    if (robust_desc.defined()) {
+      ICHECK(ptr_info.has_value())
+          << "MUSA robust cp.async requires pointer type metadata";
+      int dst_elem_count = bytes / ptr_info->dst_elem_type.bytes();
+      int src_elem_count = bytes / ptr_info->src_elem_type.bytes();
+      if (dst_elem_count <= 0 || src_elem_count <= 0) {
+        return Optional<Stmt>();
+      }
+      op = tl::musa_cp_async_robust();
+      auto [robust_base, robust_size] = GetRobustDescArgs(robust_desc);
+      PrimExpr dst_access_ptr =
+          MakeAccessPtrFromLoad(dst_base_load, dst_elem_count, /*rw_mask=*/2);
+      PrimExpr src_access_ptr =
+          MakeAccessPtrFromLoad(src_base_load, src_elem_count, /*rw_mask=*/1);
+      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes),
+                       robust_base, robust_size};
+      if (predicated && !disable_safe_robust_copy_predication_) {
+        cp_async_args.push_back(predicate_value);
+      }
     } else {
-      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems)};
+      PrimExpr dst_access_ptr =
+          MakeAccessPtrFromLoad(dst_base_load, num_elems, /*rw_mask=*/2);
+      PrimExpr src_access_ptr =
+          MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
+      if (predicated) {
+        cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems),
+                         predicate_value};
+      } else {
+        cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems)};
+      }
     }
-    return Evaluate(
-        Call(store->buffer->dtype, tvm::tl::ptx_cp_async(), cp_async_args));
+    return Evaluate(Call(store->buffer->dtype, op, cp_async_args));
   }
 
   static Stmt MakeCommitGroupStmt() {
@@ -495,6 +740,14 @@ private:
   static Stmt MakeWaitGroupStmt(int n) {
     return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
                          {IntImm(DataType::Int(32), n)}));
+  }
+
+  static std::pair<PrimExpr, PrimExpr> GetRobustDescArgs(const PrimExpr &desc) {
+    const auto *call = desc.as<CallNode>();
+    ICHECK(call && call->op.same_as(tl::make_robust_desc()))
+        << "Expected tl.make_robust_desc call, but got " << desc;
+    ICHECK_EQ(call->args.size(), 2);
+    return {call->args[0], call->args[1]};
   }
 
   // ---- Vectorized-offset contiguity helpers ----
@@ -595,7 +848,8 @@ private:
         return out;
       }
       if (call->op.same_as(builtin::ptx_cp_async()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
+          call->op.same_as(tl::ptx_cp_async()) ||
+          call->op.same_as(tl::musa_cp_async_robust())) {
         return out;
       }
       if (call->op.same_as(builtin::ptx_commit_group())) {
@@ -665,24 +919,52 @@ private:
     seq->push_back(MakeWaitGroupStmt(0));
   }
 
+  Stmt AppendSyncVisibilityToStmt(Stmt stmt, bool include_commit) const {
+    Array<Stmt> seq;
+    seq.reserve(3);
+    if (!is_no_op(stmt)) {
+      seq.push_back(stmt);
+    }
+    AppendSyncVisibility(&seq, include_commit);
+    return seq.size() == 1 ? seq[0] : SeqStmt(seq);
+  }
+
   // Note: AnalyzeCopyRegion replaces both the old `IsPureCopyRegion` and
   // `SummarizeAsyncIntrinsics` helpers to avoid redundant traversals.
 
+  bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
+  bool disable_force_async_wait_{false};
+  bool sync_inside_conditionals_{false};
+  bool disable_safe_robust_copy_predication_{false};
+  int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;
+  bool in_force_async_copy_{false};
+  PrimExpr current_src_robust_desc_;
   bool injected_ptx_async_copy_{false};
   bool pending_sync_copies_{false};
   bool uncommitted_sync_copies_{false};
 };
 
 PTXAsyncCopyInjectResult
-InjectPTXAsyncCopy(const Stmt &body, bool async_without_async_commit_wait) {
-  PTXAsyncCopyInjector injector(async_without_async_commit_wait);
+InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
+                   bool async_without_async_commit_wait,
+                   bool disable_force_async_wait,
+                   bool sync_inside_conditionals) {
+  PTXAsyncCopyInjector injector(enable_auto_async_copy,
+                                async_without_async_commit_wait,
+                                disable_force_async_wait,
+                                sync_inside_conditionals);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }
 
+PTXAsyncCopyInjectResult
+InjectPTXAsyncCopy(const Stmt &body, bool async_without_async_commit_wait) {
+  return InjectPTXAsyncCopy(body, /*enable_auto_async_copy=*/true,
+                            async_without_async_commit_wait);
+}
 } // namespace tl
 } // namespace tvm

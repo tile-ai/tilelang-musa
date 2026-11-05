@@ -86,8 +86,8 @@ def test_profiler_dynamic_symbolic_correctness(m_val):
 
     kernel = matmul(M, N, K, block_M, block_N, block_K)
 
-    a = torch.randn(m_val, K, dtype=torch.float16, device="cuda")
-    b = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    a = torch.randn(m_val, K, dtype=torch.float16, device="musa")
+    b = torch.randn(K, N, dtype=torch.float16, device="musa")
 
     c = kernel(a, b)
     ref_c = a @ b
@@ -132,8 +132,8 @@ def test_profiler_dynamic_symbolic_with_input_tensors():
     # Manually create input tensors
     # Note: out_idx=[-1] means C is output, so we only need A and B as inputs
     concrete_M = 512
-    a = torch.randn(concrete_M, K, dtype=torch.float16, device="cuda")
-    b = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    a = torch.randn(concrete_M, K, dtype=torch.float16, device="musa")
+    b = torch.randn(K, N, dtype=torch.float16, device="musa")
 
     # input_tensors should take precedence
     latency = profiler.do_bench(input_tensors=[a, b])

@@ -23,11 +23,7 @@ from .cc import get_cplus_compiler
 
 
 def get_nvcc_subprocess_env() -> dict[str, str] | None:
-    """Return the environment used by NVCC subprocesses.
-
-    On Windows, the pip CUDA toolkit can provide nvcc without a system CUDA
-    install, but nvcc still needs MSVC's host compiler environment.
-    """
+    """Return the host compiler environment required by NVCC."""
     if os.name != "nt":
         return None
 
@@ -156,15 +152,6 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         cmd += arch
     elif isinstance(arch, str):
         cmd += ["-arch", arch]
-    if os.name == "nt":
-        # /Zc:preprocessor: standards-conforming preprocessor (needed by some
-        # CUDA macros).
-        # /Zc:__cplusplus: makes MSVC report the actual C++ standard via the
-        # __cplusplus macro. Without it MSVC reports 199711L, which silently
-        # disables `alignas(128)` on CUtensorMap in cuda.h (CUDA 13). NVCC
-        # then emits ``.param .align 8 .b8 ...[128]`` for the descriptor and
-        # cuLaunchKernel returns CUDA_ERROR_MISALIGNED_ADDRESS at runtime.
-        cmd += ["-Xcompiler", "/Zc:preprocessor /Zc:__cplusplus"]
 
     if options:
         if isinstance(options, str):
@@ -199,18 +186,15 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
             msg += f"Output:\n{captured}\n"
         raise RuntimeError(msg) from exc
 
+    if env.is_print_device_compile_command_enabled():
+        print(f"compile_cuda command: {' '.join(cmd)}")
+
     if verbose:
         logger.info("NVCC compilation command: %s", " ".join(cmd))
         logger.info("PTXAS verbose output:\n%s", py_str(out))
 
     if proc.returncode != 0:
         msg = f"{code}\nCompilation error:\n{py_str(out)}\nCommand: {' '.join(cmd)}\n"
-        if os.name == "nt":
-            from tilelang.contrib.msvc import get_msvc_environment_error
-
-            msvc_error = get_msvc_environment_error()
-            if msvc_error:
-                msg += f"MSVC environment: {msvc_error}\n"
         raise RuntimeError(msg)
 
     with open(file_target, "rb") as f:
@@ -237,9 +221,7 @@ def default_compile_options(compile_flags: list[str] | None = None) -> list[str]
     List[str]
         A list of flags suitable for NVCC's command line.
     """
-    # Match libgen.py: tl_templates require C++20 (explicit lambda template
-    # parameters used in tl_templates/cuda/reduce.h).
-    options: list[str] = ["-std=c++20"]
+    options: list[str] = ["-std=c++17"]
     try:
         if TILELANG_TEMPLATE_PATH:
             options.append(f"-I{TILELANG_TEMPLATE_PATH}")
@@ -658,19 +640,6 @@ def is_hopper(target):
 
 
 def have_pdl(target):
-    if target.kind.name != "cuda":
-        return False
-    compute_version = get_target_compute_version(target)
-    major, minor = parse_compute_version(compute_version)
-    return major >= 9
-
-
-def have_mbarrier(target):
-    """Whether hardware mbarrier support (the cutlass Barrier type,
-    tl_shuffle_elect, fence_barrier_init) is available on the target.
-
-    Available on Hopper (sm_90) and later architectures.
-    """
     if target.kind.name != "cuda":
         return False
     compute_version = get_target_compute_version(target)

@@ -14,6 +14,7 @@ def Parallel(
     *extents: int | tirx.PrimExpr,
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
+    prefer_async: bool | None = None,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Tools to construct nested parallel for loop.
@@ -34,11 +35,16 @@ def Parallel(
         For a k-dimensional ``T.Parallel(...)`` nest, the fragment's
         ``InputDim`` must equal ``k``.
 
+    prefer_async : Optional[bool]
+        Optional hint for PTX async-copy rewrite in this parallel loop subtree.
+        When set to ``True``, it requests cp.async injection even outside
+        pipelined loops. ``False``/``None`` keeps default behavior.
+        Internally lowered as loop annotation ``"parallel_prefer_async"``.
+
     annotations : Optional[Dict[str, Any]]
         Optional user-provided loop annotations attached to the outermost
-        generated parallel loop. Backend hints ride through this dict; the
-        CUDA dialect (``tilelang.cuda.language.Parallel``) exposes
-        ``prefer_async`` (PTX cp.async rewrite) as a typed keyword instead.
+        generated parallel loop. For example:
+        ``{"parallel_async_without_async_commit_wait": True}``.
 
     Notes on layout constraints
     ---------------------------
@@ -76,6 +82,8 @@ def Parallel(
         # Pass through to C++ as the standard parallel loop layout key.
         # The builder will attach it only on the outermost parallel loop.
         merged_annotations["parallel_loop_layout"] = loop_layout
+    if prefer_async is not None:
+        merged_annotations["parallel_prefer_async"] = prefer_async
     return _ffi_api.Parallel(extents, merged_annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
@@ -84,9 +92,6 @@ def Persistent(
     wave_size: tirx.PrimExpr,
     index: tirx.PrimExpr,
     group_size: tirx.PrimExpr | int | None = 8,
-    num_stages: int = 0,
-    *,
-    annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Tools to construct persistent for loop.
 
@@ -100,13 +105,8 @@ def Persistent(
         The tile index in one wave.
     group_size : tirx.PrimExpr
         The group size.
-    num_stages : int
-        The number of pipeline stages for double buffering.
-        If 0, pipeline is disabled.
     """
-    if annotations is None:
-        annotations: dict[str, Any] = {}
-    return _ffi_api.Persistent(domain, wave_size, index, group_size, num_stages, annotations)
+    return _ffi_api.Persistent(domain, wave_size, index, group_size)
 
 
 def Pipelined(
@@ -115,7 +115,8 @@ def Pipelined(
     num_stages: int = 0,
     order: list[int] | None = None,
     stage: list[int] | None = None,
-    annotations: dict[str, Any] | None = None,
+    sync: list[list[int]] | None = None,
+    group: list[list[int]] | None = None,
 ) -> frame.ForFrame:
     """Tools to construct pipelined for loop.
 
@@ -139,8 +140,10 @@ def Pipelined(
         Optional manual pipeline stage for each scheduled statement in the loop
         body. The list is aligned with ``order`` and follows the same statement
         counting rule.
-    annotations : Optional[Dict[str, Any]]
-        Additional loop annotations.
+    sync : Optional[List[List[int]]]
+        Optional synchronization metadata for manual pipeline lowering.
+    group : Optional[List[List[int]]]
+        Optional producer grouping metadata for manual pipeline lowering.
 
     Notes
     -----
@@ -180,10 +183,12 @@ def Pipelined(
         order = []
     if stage is None:
         stage = []
-    if annotations is None:
-        annotations: dict[str, Any] = {}
+    if sync is None:
+        sync = []
+    if group is None:
+        group = []
     # type: ignore[attr-defined] # pylint: disable=no-member
-    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, annotations)
+    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group)
 
 
 def serial(
@@ -233,6 +238,7 @@ def unroll(
     step: tirx.PrimExpr | None = None,
     *,
     explicit: bool = False,
+    unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """The unrolled For statement.
@@ -251,10 +257,11 @@ def unroll(
     explicit : bool
         Whether to explicitly unroll the loop.
 
+    unroll_factor : int
+        The unroll factor of the loop.
+
     annotations : Dict[str, Any]
-        The optional annotations of the For statement. The CUDA dialect
-        (``tilelang.cuda.language.unroll``) additionally exposes
-        ``unroll_factor`` (``#pragma unroll N``, honored by CUDA codegen only).
+        The optional annotations of the For statement.
 
     Returns
     -------
@@ -270,20 +277,19 @@ def unroll(
         else:
             start = 0
 
+    # Ensure annotations has {"pragma_unroll_explicit": True} by default
     if annotations is None:
-        annotations = dict()
+        annotations = {"pragma_unroll_explicit": explicit}
     else:
+        # Add "pragma_unroll_explicit": True if not already present
         annotations = dict(annotations)
+        annotations.setdefault("pragma_unroll_explicit", explicit)
 
-    if explicit:
-        annotations["pragma_unroll_explicit"] = True
-    else:
-        explicit = annotations.get("pragma_unroll_explicit", False)
-
-    unroll_factor = annotations.get("pragma_unroll_factor")
-
-    if explicit and unroll_factor is not None:
-        raise ValueError("T.unroll's explicit and unroll_factor params are mutually exclusive.")
+    if unroll_factor is not None:
+        # check pragma_unroll_explicit must be False
+        if annotations.get("pragma_unroll_explicit", True):
+            raise ValueError("pragma_unroll_explicit must be True when unroll_factor is not None")
+        annotations.update({"pragma_unroll_factor": unroll_factor})
 
     if step is None or step_is_one:
         return tb_tir.unroll(start, stop, annotations=annotations)
@@ -312,11 +318,12 @@ def Unroll(
     step: tirx.PrimExpr | None = None,
     *,
     explicit: bool = False,
+    unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Alias of T.unroll."""
 
-    return unroll(start, stop, step, explicit=explicit, annotations=annotations)
+    return unroll(start, stop, step, explicit=explicit, unroll_factor=unroll_factor, annotations=annotations)
 
 
 def vectorized(

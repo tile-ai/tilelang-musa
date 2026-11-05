@@ -4,7 +4,14 @@ import tilelang as tl
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
+import pytest
+from tilelang.cuda import _ffi_api as cuda_ffi_api
 from tvm import tirx
+
+pytestmark = pytest.mark.skipif(
+    not hasattr(cuda_ffi_api, "FuseMBarrierArriveExpectTx"),
+    reason="CUDA pipeline is not built in a MUSA-only wheel",
+)
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -27,7 +34,6 @@ def _collect_calls(stmt, op_name: str):
     return calls
 
 
-@tilelang.testing.requires_cuda
 def test_fuse_simple_tma_expect_arrive():
     @T.prim_func
     def before(A_desc: T.handle("uint8x128", "grid_constant")):
@@ -53,7 +59,6 @@ def test_fuse_simple_tma_expect_arrive():
     assert len(_collect_calls(main.body, "tirx.ptx_arrive_barrier")) == 0
 
 
-@tilelang.testing.requires_cuda
 def test_fuse_requires_same_barrier():
     @T.prim_func
     def before(A_desc: T.handle("uint8x128", "grid_constant")):
@@ -79,7 +84,6 @@ def test_fuse_requires_same_barrier():
     assert len(_collect_calls(main.body, "tirx.ptx_arrive_barrier")) == 1
 
 
-@tilelang.testing.requires_cuda
 def test_fuse_inside_warp_specialization_scope():
     @T.prim_func
     def before(A_desc: T.handle("uint8x128", "grid_constant")):

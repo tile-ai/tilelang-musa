@@ -10,8 +10,8 @@
 
 #include "backend/common/target_utils.h"
 #include "layout/layout.h"
+#include "op/builtin.h"
 #include "op/utils.h"
-#include "rocm/op/builtin.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
@@ -222,15 +222,17 @@ struct AtomicAdd {
                            lower_args.thread_bounds,
                            lower_args.layout_map,
                            analyzer,
+                           false,
                            lower_args.buffer_remap,
                            {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    return LowerParallelLoop(
-        fused_loop, loop_layout, lower_args.thread_index, analyzer,
-        lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+    return LowerParallelLoop(fused_loop, loop_layout, lower_args.thread_var,
+                             analyzer, lower_args.layout_map,
+                             par_op->GetPredicate(lower_args.thread_var),
+                             /*parallel_loop=*/true, /*should_vectorize=*/true,
+                             par_op->LoopLayoutRequiresPaddingGuard());
   }
 
   static LayoutMap InferLayout(const AtomicAddNode &op,

@@ -19,7 +19,7 @@
  *
  * Usage:
  *
- * 1. Link against libstub_cuda.so instead of libcuda.so
+ * 1. Link against libcuda_stub.so instead of libcuda.so
  *
  * 2. Call CUDA driver API functions normally - they are provided as
  *    exported global functions with C linkage:
@@ -47,12 +47,13 @@
 
 #undef _TILELANG_CUDA_STUB_INCLUDE_GUARD
 
-// Symbol visibility macros for shared library export.
-// On Windows, vendor/cuda.h already declares these functions (with CUDAAPI
-// calling convention). Adding __declspec(dllexport) would cause C2375
-// (different linkage). Use WINDOWS_EXPORT_ALL_SYMBOLS in CMake instead.
+// Symbol visibility macros for shared library export
 #if defined(_WIN32) || defined(__CYGWIN__)
-#define TILELANG_CUDA_STUB_API
+#ifdef TILELANG_CUDA_STUB_EXPORTS
+#define TILELANG_CUDA_STUB_API __declspec(dllexport)
+#else
+#define TILELANG_CUDA_STUB_API __declspec(dllimport)
+#endif
 #else
 #define TILELANG_CUDA_STUB_API __attribute__((visibility("default")))
 #endif
@@ -151,12 +152,7 @@ struct TILELANG_CUDA_STUB_API CUDADriverAPI {
 // These functions provide drop-in replacements for CUDA driver API calls.
 // They are exported from the stub library and can be linked against directly.
 // The implementations are in cuda.cc.
-//
-// On Windows, vendor/cuda.h already declares all these functions (with CUDAAPI
-// calling convention), so we skip the re-declarations to avoid C2375 linkage
-// conflicts. On POSIX, we need them for __attribute__((visibility("default"))).
 
-#if !defined(_WIN32) || defined(__CYGWIN__)
 extern "C" {
 
 TILELANG_CUDA_STUB_API CUresult cuGetErrorName(CUresult error,
@@ -228,4 +224,3 @@ TILELANG_CUDA_STUB_API CUresult cuTensorMapEncodeIm2col(
 #endif
 
 } // extern "C"
-#endif // !_WIN32

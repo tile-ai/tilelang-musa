@@ -10,11 +10,8 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 
-#include <optional>
 #include <string>
-#include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "codegen_py.h"
@@ -27,8 +24,6 @@ public:
   CodeGenTileLangCuTeDSL();
 
 protected:
-  void InitFuncState_(const PrimFunc &f) override;
-
   void PrintFuncDecorator_(std::ostream &os) override; // NOLINT(*)
   void PreFunctionBody_(const PrimFunc &f) override;
 
@@ -46,14 +41,10 @@ protected:
   void VisitExpr_(const MaxNode *op, std::ostream &os) override;    // NOLINT(*)
   void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
   void VisitExpr_(const SelectNode *op, std::ostream &os) override; // NOLINT(*)
-  void VisitExpr_(const LetNode *op, std::ostream &os) override;    // NOLINT(*)
-  void VisitExpr_(const ShuffleNode *op,
-                  std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const BufferLoadNode *op,
                   std::ostream &os) override; // NOLINT(*)
 
   void VisitStmt_(const BufferStoreNode *op) override;
-  void VisitStmt_(const BindNode *op) override;
   void VisitStmt_(const AllocBufferNode *op) override;
   void VisitStmt_(const AttrStmtNode *op) override;
   void VisitStmt_(const ForNode *op) override;
@@ -82,13 +73,8 @@ protected:
                         std::ostream &os) override; // NOLINT(*)
 
   std::string GetBufferPtr_(const BufferNode *buffer, PrimExpr index);
-  std::string GetSubByteBufferPtrAsByte_(const BufferNode *buffer,
-                                         PrimExpr index);
-  std::string PrintBytePointerExpr_(const PrimExpr &expr);
   std::string GetBufferRef_(DataType t, const BufferNode *buffer,
                             PrimExpr index) override;
-  PrimExpr LinearizeBufferIndices_(const BufferNode *buffer,
-                                   const ffi::Array<PrimExpr> &indices);
 
   // Get pointer string from a Var expression (local buffer -> vid.iterator)
   std::string GetVarPtr_(const PrimExpr &expr);
@@ -110,13 +96,8 @@ private:
 
   std::unordered_map<const VarNode *, IntImm> unroll_factor_;
 
-  std::unordered_set<const VarNode *> raw_pointer_vars_;
-  std::unordered_set<const VarNode *> zero_like_vars_;
-
   std::vector<std::string> eviction_policy_names_ = {
       "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};
-
-  std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims_;
 
   // Fastmath configuration (read from PassContext)
   bool enable_fastmath_ = false;

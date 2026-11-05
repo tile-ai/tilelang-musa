@@ -14,12 +14,12 @@
 #include <string>
 #include <unordered_map>
 
-#include "backend/common/codegen/codegen_c_line_directives.h"
+#include "target/source/codegen_c.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangHIP final : public CodeGenCWithLineDirectives {
+class CodeGenTileLangHIP final : public CodeGenC {
 public:
   CodeGenTileLangHIP();
   std::string Finish();
@@ -50,12 +50,9 @@ public:
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
-  void VisitExpr_(const NotNode *op, std::ostream &os) final;
-  void VisitExpr_(const SelectNode *op, std::ostream &os) final;
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
-  void VisitStmt_(const BufferStoreNode *op) final;
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const PrimFunc &f);
@@ -86,10 +83,6 @@ private:
   bool need_wmma_h_{false};
   // whether need fp8.h
   bool enable_fp8_{false};
-  // whether need hip_fp4.h (gfx950 only)
-  bool enable_fp4_{false};
-  // Map from FP4 buffer Var to packed buffer variable name (gfx950)
-  std::unordered_map<Var, std::string> fp4_packed_buffers_;
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // whether need mma.h

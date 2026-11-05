@@ -28,7 +28,7 @@ def matmul_nt(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype):
             for k in T.Pipelined(T.ceildiv(K, bK), num_stages=2):
                 T.copy(A[by * bM, k * bK], A_shared)
                 T.copy(B[bx * bN, k * bK], B_shared)
-                T.tcgen05_gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar, clear_accum=k == 0)
+                T.gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar, wg_wait=-1, clear_accum=k == 0)
                 T.mbarrier_wait_parity(mbar, k % 2)
 
             T.copy(C_tmem, C_local)
@@ -43,7 +43,7 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
     kernel = tilelang.compile(
         func,
         out_idx=-1,
-        target="cuda",
+        target="musa",
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
 
@@ -51,11 +51,11 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
     assert accum_dtype in [T.int32], "Currently only int32 is supported"
 
     if in_dtype is T.int8:
-        A = torch.randint(-128, 128, (M, K), device="cuda", dtype=torch.int8)
-        B = torch.randint(-128, 128, (N, K), device="cuda", dtype=torch.int8)
+        A = torch.randint(-128, 128, (M, K), device="musa", dtype=torch.int8)
+        B = torch.randint(-128, 128, (N, K), device="musa", dtype=torch.int8)
     elif in_dtype is T.uint8:
-        A = torch.randint(0, 256, (M, K), device="cuda", dtype=torch.uint8)
-        B = torch.randint(0, 256, (N, K), device="cuda", dtype=torch.uint8)
+        A = torch.randint(0, 256, (M, K), device="musa", dtype=torch.uint8)
+        B = torch.randint(0, 256, (N, K), device="musa", dtype=torch.uint8)
     else:
         raise ValueError(f"Unsupported input dtype: {in_dtype}")
 
@@ -70,7 +70,6 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
 def test_assert_matmul():
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 128, T.int8, T.int32, T.int32)
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 128, T.uint8, T.int32, T.int32)

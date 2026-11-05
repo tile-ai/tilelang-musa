@@ -1,25 +1,34 @@
 from __future__ import annotations
 
-import os
-
 from tvm import IRModule
 from tvm.target import Target
 
 import tilelang
+from tilelang.contrib import mcc, nvcc
 from tilelang.transform import PassContext
 
 
-def _env_data_race_check_enabled() -> bool:
-    """Whether the data race check is enabled via the environment.
-
-    The check is disabled by default; users can opt in by setting the
-    ``TILELANG_ENABLE_DATA_RACE_CHECK`` environment variable to a truthy value
-    (e.g. ``1``, ``true``, ``yes``, ``on``).
-    """
-    value = os.environ.get("TILELANG_ENABLE_DATA_RACE_CHECK")
-    if value is None:
+def target_has_tma(target: Target | None = None) -> bool:
+    if target is None:
         return False
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    if target.kind.name == "cuda":
+        return nvcc.have_tma(target)
+    if target.kind.name == "musa":
+        return mcc.have_tma(target)
+    return False
+
+
+def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
+    from tilelang.jit.adapter.utils import is_cuda_target, is_musa_target
+
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    if target is None:
+        return False
+    if not ((is_cuda_target(target) or is_musa_target(target)) and target_has_tma(target)):
+        return False
+    disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
+    return not disable_warp_specialized
 
 
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
@@ -37,10 +46,12 @@ def allow_global_thread_synchronization(pass_ctx: PassContext | None = None) -> 
 
 
 def should_enable_aggressive_merge(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
-    del target
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    return bool(pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE, False))
+    enable_aggressive_merge = bool(pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE, False))
+    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
+        enable_aggressive_merge = False
+    return enable_aggressive_merge
 
 
 def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
@@ -58,14 +69,7 @@ def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
 def should_enable_race_check(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    # The check is disabled by default because it can report false positives
-    # (e.g. shared buffer stores whose per-thread addresses cannot be proven
-    # distinct). Users can opt in via the TILELANG_ENABLE_DATA_RACE_CHECK
-    # environment variable, or override it per-compile through the
-    # `tl.disable_data_race_check` pass config.
-    default_disable = not _env_data_race_check_enabled()
-    disable = pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK, default_disable)
-    return not disable
+    return not pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK, False)
 
 
 def should_disable_shared_memory_reuse(pass_ctx: PassContext | None = None) -> bool:

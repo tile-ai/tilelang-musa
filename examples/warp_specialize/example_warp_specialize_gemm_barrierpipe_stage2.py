@@ -57,8 +57,8 @@ def main(M=16384, N=16384, K=16384):
 
     import torch
 
-    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
-    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    a = torch.randn(M, K, device="musa", dtype=torch.float16)
+    b = torch.randn(K, N, device="musa", dtype=torch.float16)
 
     # Run the kernel
     c = matmul(a, b, block_M, block_N, block_K)

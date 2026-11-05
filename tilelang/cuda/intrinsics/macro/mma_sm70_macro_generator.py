@@ -49,9 +49,9 @@ class TensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -92,7 +92,7 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    def _initialize_k_dim(self, a_dtype=T.float16):
         self.k_dim = 4
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16):
@@ -188,7 +188,6 @@ class TensorCoreIntrinEmitter:
             return lane_id, warp_n, warp_m
 
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
-        """Load matrix A fragments from shared memory into per-thread local storage."""
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -208,7 +207,6 @@ class TensorCoreIntrinEmitter:
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
-        A_other = [r.min for r in A_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -225,12 +223,11 @@ class TensorCoreIntrinEmitter:
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
                 for j in T.vectorized(local_size_a):
                     mi, mk = mma_load_layout(tx, j)
-                    A_local_buf[i * local_size_a + j] = A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
+                    A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
 
         return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
     def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
-        """Load matrix B fragments from shared memory into per-thread local storage."""
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -247,7 +244,6 @@ class TensorCoreIntrinEmitter:
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
-        B_other = [r.min for r in B_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -270,15 +266,14 @@ class TensorCoreIntrinEmitter:
                 for j in T.vectorized(local_size_b):
                     if b_transposed:
                         mi, mk = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = B_buf[tuple(B_other) + (B_base0 + wi + mi, B_base1 + wk + mk)]
+                        B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wi + mi, B_base1 + wk + mk]
                     else:
                         mk, mi = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = B_buf[tuple(B_other) + (B_base0 + wk + mk, B_base1 + wi + mi)]
+                        B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wk + mk, B_base1 + wi + mi]
 
         return _warp_ldmatrix_b(B_local_buf, B_region, ki, thread_binding, rk)
 
     def mma(self, A_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr | None = 0):
-        """Issue SM70 MMA operations using the loaded A/B fragments."""
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a

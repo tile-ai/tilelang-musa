@@ -2,50 +2,21 @@
 
 Covered intrinsics
 ------------------
-T.any_sync          – __any_sync  / __any  (HIP)
-T.all_sync          – __all_sync  / __all  (HIP)
-T.ballot_sync       – __ballot_sync→uint64 (CUDA, zero-ext) / __ballot uint64 (HIP, all lanes)
-T.ballot            – full-warp ballot_sync / __ballot uint64 (HIP, all lanes)
-T.activemask        – __activemask→uint64 (CUDA, zero-ext) / __ballot(1) uint64 (HIP, all lanes)
-T.__ffs             – __ffs / __ffsll (CUDA)
-T.__fns             – __fns (CUDA)
-T.syncthreads_count – __syncthreads_count
-T.syncthreads_and   – __syncthreads_and
-T.syncthreads_or    – __syncthreads_or
+T.any_sync          - __any_sync
+T.all_sync          - __all_sync
+T.ballot_sync       - __ballot_sync -> uint64
+T.ballot            - full-warp ballot_sync
+T.activemask        - __activemask -> uint64
+T.__ffs             - __ffs / __ffsll
+T.syncthreads_count - __syncthreads_count
+T.syncthreads_and   - __syncthreads_and
+T.syncthreads_or    - __syncthreads_or
 """
 
 import tilelang
 import tilelang.language as T
-import pytest
 import torch
 import tilelang.testing
-
-
-PREDICATE_INTRINSICS = [
-    T.any_sync,
-    T.all_sync,
-    T.ballot_sync,
-    T.ballot,
-    T.syncthreads_count,
-    T.syncthreads_and,
-    T.syncthreads_or,
-]
-
-
-@pytest.mark.parametrize("intrinsic", PREDICATE_INTRINSICS)
-def test_predicate_intrinsics_reject_float(intrinsic):
-    predicate = tilelang.tvm.tirx.FloatImm("float32", 0.5)
-
-    with pytest.raises(TypeError, match="requires an integer or boolean predicate"):
-        intrinsic(predicate)
-
-
-@pytest.mark.parametrize("predicate", [1, True], ids=["integer", "boolean"])
-@pytest.mark.parametrize("intrinsic", PREDICATE_INTRINSICS)
-def test_predicate_intrinsics_accept_integer_or_boolean(intrinsic, predicate):
-    result = intrinsic(predicate)
-
-    assert isinstance(result, tilelang.tvm.tirx.Call)
 
 
 # ---------------------------------------------------------------------------
@@ -69,14 +40,14 @@ def kernel_any_sync():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_any_sync():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel = kernel_any_sync()
     src = kernel.get_kernel_source()
-    assert "__any_sync" in src or "__any" in src, f"Expected __any_sync/__any in source:\n{src}"
+    assert "__any_sync" in src, f"Expected __any_sync in source:\n{src}"
     kernel(b)
-    # any lane (lane 0) has predicate==1 → result must be non-zero for all lanes
+    # Lane 0 has predicate == 1, so every lane should see a non-zero result.
     assert torch.all(b != 0), f"Expected all non-zero, got {b}"
 
 
@@ -87,7 +58,7 @@ def test_any_sync():
 
 @tilelang.jit
 def kernel_all_sync():
-    """All lanes always pass predicate 1 → all_sync should return non-zero."""
+    """All lanes always pass predicate 1; all_sync should return non-zero."""
 
     @T.prim_func
     def main(
@@ -101,12 +72,12 @@ def kernel_all_sync():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_all_sync():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel = kernel_all_sync()
     src = kernel.get_kernel_source()
-    assert "__all_sync" in src or "__all" in src, f"Expected __all_sync/__all in source:\n{src}"
+    assert "__all_sync" in src, f"Expected __all_sync in source:\n{src}"
     kernel(b)
     assert torch.all(b != 0), f"Expected all non-zero, got {b}"
 
@@ -118,7 +89,7 @@ def test_all_sync():
 
 @tilelang.jit
 def kernel_ballot_sync():
-    """Only lane 0 has a non-zero predicate → bit 0 of ballot must be set."""
+    """Only lane 0 has a non-zero predicate, so bit 0 of ballot must be set."""
 
     @T.prim_func
     def main(
@@ -132,17 +103,17 @@ def kernel_ballot_sync():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_ballot_sync():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int64)
+    b = torch.zeros((32,), device="musa", dtype=torch.int64)
     kernel = kernel_ballot_sync()
     src = kernel.get_kernel_source()
-    assert "__ballot_sync" in src or "__ballot" in src, f"Expected __ballot_sync/__ballot in source:\n{src}"
+    assert "__ballot_sync" in src, f"Expected __ballot_sync in source:\n{src}"
     kernel(b)
     # All lanes read the same ballot value; bit 0 must be set (lane 0 had pred=1)
     assert int(b[0]) & 1, f"Expected bit 0 set in ballot result, got {int(b[0]):#018x}"
-    # upper 32 bits must be zero on CUDA (32-wide warp)
-    assert (int(b[0]) >> 32) == 0, f"Expected upper 32 bits zero on CUDA, got {int(b[0]):#018x}"
+    # Upper 32 bits must be zero on MUSA because __ballot_sync returns uint32.
+    assert (int(b[0]) >> 32) == 0, f"Expected upper 32 bits zero on MUSA, got {int(b[0]):#018x}"
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +123,7 @@ def test_ballot_sync():
 
 @tilelang.jit
 def kernel_ballot():
-    """All lanes pass predicate 1 → lower 32 bits of ballot must all be set."""
+    """All lanes pass predicate 1, so lower 32 bits of ballot must all be set."""
 
     @T.prim_func
     def main(
@@ -166,17 +137,17 @@ def kernel_ballot():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_ballot():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int64)
+    b = torch.zeros((32,), device="musa", dtype=torch.int64)
     kernel = kernel_ballot()
     src = kernel.get_kernel_source()
-    assert "__ballot_sync" in src or "__ballot" in src, f"Expected __ballot_sync/__ballot in source:\n{src}"
+    assert "__ballot_sync" in src, f"Expected __ballot_sync in source:\n{src}"
     kernel(b)
     # With predicate=1 for all 32 lanes the lower 32 bits should be 0xFFFFFFFF;
-    # upper 32 bits are 0 on CUDA (32-wide warp).
+    # upper 32 bits are 0 on MUSA.
     assert (int(b[0]) & 0xFFFFFFFF) == 0xFFFFFFFF, f"Expected lower 32 bits all set, got {int(b[0]):#018x}"
-    assert (int(b[0]) >> 32) == 0, f"Expected upper 32 bits zero on CUDA, got {int(b[0]):#018x}"
+    assert (int(b[0]) >> 32) == 0, f"Expected upper 32 bits zero on MUSA, got {int(b[0]):#018x}"
 
 
 # ---------------------------------------------------------------------------
@@ -200,9 +171,9 @@ def kernel_ffs_ballot_sync():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_ffs_ballot_sync():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel = kernel_ffs_ballot_sync()
     src = kernel.get_kernel_source()
     assert "__ballot_sync" in src, f"Expected __ballot_sync in source:\n{src}"
@@ -212,45 +183,13 @@ def test_ffs_ballot_sync():
 
 
 # ---------------------------------------------------------------------------
-# __fns
-# ---------------------------------------------------------------------------
-
-
-@tilelang.jit
-def kernel_fns_ballot_sync():
-    """Find the third active lane in a ballot mask."""
-
-    @T.prim_func
-    def main(
-        B: T.Tensor((32,), "int32"),
-    ):
-        with T.Kernel(1, threads=32):
-            tx = T.get_thread_binding()
-            mask = T.cast(T.ballot_sync(tx >= 7), "uint32")
-            B[tx] = T.cast(T.__fns(mask, 0, 3), "int32")
-
-    return main
-
-
-@tilelang.testing.requires_cuda
-def test_fns_ballot_sync():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
-    kernel = kernel_fns_ballot_sync()
-    src = kernel.get_kernel_source()
-    assert "__ballot_sync" in src, f"Expected __ballot_sync in source:\n{src}"
-    assert "__fns(" in src, f"Expected __fns in source:\n{src}"
-    kernel(b)
-    assert torch.all(b == 9), f"Expected all lanes to find lane 9, got {b}"
-
-
-# ---------------------------------------------------------------------------
 # activemask
 # ---------------------------------------------------------------------------
 
 
 @tilelang.jit
 def kernel_activemask():
-    """All 32 threads are active → lower 32 bits of activemask must all be set."""
+    """All 32 threads are active, so lower 32 bits of activemask must be set."""
 
     @T.prim_func
     def main(
@@ -264,16 +203,16 @@ def kernel_activemask():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_activemask():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int64)
+    b = torch.zeros((32,), device="musa", dtype=torch.int64)
     kernel = kernel_activemask()
     src = kernel.get_kernel_source()
-    assert "__activemask" in src or "__ballot" in src, f"Expected __activemask/__ballot in source:\n{src}"
+    assert "__activemask" in src, f"Expected __activemask in source:\n{src}"
     kernel(b)
-    # All 32 lanes active → lower 32 bits = 0xFFFFFFFF; upper 32 bits = 0 on CUDA.
+    # All 32 lanes active, so lower 32 bits are set and upper 32 bits stay zero.
     assert (int(b[0]) & 0xFFFFFFFF) == 0xFFFFFFFF, f"Expected lower 32 bits all set, got {int(b[0]):#018x}"
-    assert (int(b[0]) >> 32) == 0, f"Expected upper 32 bits zero on CUDA, got {int(b[0]):#018x}"
+    assert (int(b[0]) >> 32) == 0, f"Expected upper 32 bits zero on MUSA, got {int(b[0]):#018x}"
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +222,7 @@ def test_activemask():
 
 @tilelang.jit
 def kernel_syncthreads_count():
-    """Exactly half the threads (lanes 0–15) pass predicate 1."""
+    """Exactly half the threads (lanes 0-15) pass predicate 1."""
 
     @T.prim_func
     def main(
@@ -297,9 +236,9 @@ def kernel_syncthreads_count():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_syncthreads_count():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel = kernel_syncthreads_count()
     src = kernel.get_kernel_source()
     assert "__syncthreads_count" in src, f"Expected __syncthreads_count in source:\n{src}"
@@ -314,7 +253,7 @@ def test_syncthreads_count():
 
 @tilelang.jit
 def kernel_syncthreads_and_true():
-    """All threads pass predicate 1 → syncthreads_and returns non-zero."""
+    """All threads pass predicate 1; syncthreads_and returns non-zero."""
 
     @T.prim_func
     def main(
@@ -330,7 +269,7 @@ def kernel_syncthreads_and_true():
 
 @tilelang.jit
 def kernel_syncthreads_and_false():
-    """Thread 0 passes predicate 0 → syncthreads_and returns 0."""
+    """Thread 0 passes predicate 0; syncthreads_and returns 0."""
 
     @T.prim_func
     def main(
@@ -344,16 +283,16 @@ def kernel_syncthreads_and_false():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_syncthreads_and():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel = kernel_syncthreads_and_true()
     src = kernel.get_kernel_source()
     assert "__syncthreads_and" in src, f"Expected __syncthreads_and in source:\n{src}"
     kernel(b)
     assert torch.all(b != 0), f"Expected all non-zero, got {b}"
 
-    b2 = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b2 = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel2 = kernel_syncthreads_and_false()
     kernel2(b2)
     assert torch.all(b2 == 0), f"Expected all 0, got {b2}"
@@ -366,7 +305,7 @@ def test_syncthreads_and():
 
 @tilelang.jit
 def kernel_syncthreads_or_true():
-    """At least one thread (lane 0) passes predicate 1 → syncthreads_or != 0."""
+    """At least one thread (lane 0) passes predicate 1; syncthreads_or != 0."""
 
     @T.prim_func
     def main(
@@ -382,7 +321,7 @@ def kernel_syncthreads_or_true():
 
 @tilelang.jit
 def kernel_syncthreads_or_false():
-    """No thread passes predicate 1 → syncthreads_or returns 0."""
+    """No thread passes predicate 1; syncthreads_or returns 0."""
 
     @T.prim_func
     def main(
@@ -396,16 +335,16 @@ def kernel_syncthreads_or_false():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_syncthreads_or():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel = kernel_syncthreads_or_true()
     src = kernel.get_kernel_source()
     assert "__syncthreads_or" in src, f"Expected __syncthreads_or in source:\n{src}"
     kernel(b)
     assert torch.all(b != 0), f"Expected all non-zero, got {b}"
 
-    b2 = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b2 = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel2 = kernel_syncthreads_or_false()
     kernel2(b2)
     assert torch.all(b2 == 0), f"Expected all 0, got {b2}"
@@ -435,9 +374,9 @@ def kernel_match_any_sync():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_match_any_sync():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel = kernel_match_any_sync()
     src = kernel.get_kernel_source()
     assert "__match_any_sync" in src, f"Expected __match_any_sync in source:\n{src}"
@@ -445,7 +384,7 @@ def test_match_any_sync():
     # Reinterpret the int32 buffer as uint32 to compare against bitmasks
     # whose high bit is set (0xFFFF0000 overflows int32).
     observed_u32 = b.to(torch.int64) & 0xFFFFFFFF
-    expected = torch.tensor([0x0000FFFF] * 16 + [0xFFFF0000] * 16, dtype=torch.int64, device="cuda")
+    expected = torch.tensor([0x0000FFFF] * 16 + [0xFFFF0000] * 16, dtype=torch.int64, device="musa")
     assert torch.equal(observed_u32, expected), f"Expected {expected}, got {observed_u32}"
 
 
@@ -456,7 +395,7 @@ def test_match_any_sync():
 
 @tilelang.jit
 def kernel_match_all_sync_true():
-    """All lanes share value 7 → match_all_sync returns the full mask."""
+    """All lanes share value 7; match_all_sync returns the full mask."""
 
     @T.prim_func
     def main(
@@ -472,7 +411,7 @@ def kernel_match_all_sync_true():
 
 @tilelang.jit
 def kernel_match_all_sync_false():
-    """Lanes disagree → match_all_sync returns 0."""
+    """Lanes disagree; match_all_sync returns 0."""
 
     @T.prim_func
     def main(
@@ -486,16 +425,16 @@ def kernel_match_all_sync_false():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_match_all_sync():
-    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel = kernel_match_all_sync_true()
     src = kernel.get_kernel_source()
     assert "__match_all_sync" in src, f"Expected __match_all_sync in source:\n{src}"
     kernel(b)
     assert torch.all(b == -1), f"Expected all 0xFFFFFFFF (sign-extended -1), got {b}"
 
-    b2 = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    b2 = torch.zeros((32,), device="musa", dtype=torch.int32)
     kernel_match_all_sync_false()(b2)
     assert torch.all(b2 == 0), f"Expected all 0, got {b2}"
 

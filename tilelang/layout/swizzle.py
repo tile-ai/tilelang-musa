@@ -7,6 +7,7 @@ import tvm
 from tvm import tirx
 from tilelang import _ffi_api
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple
+from .layout import Layout
 
 
 def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tirx.Buffer, list[int], str]:
@@ -82,6 +83,113 @@ def make_wgmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k
     return _ffi_api.make_wgmma_swizzled_layout(buf, continuity, k_major)
 
 
+# for SQMMA Intrinsics (PH1)
+def make_sqmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
+    if isinstance(buffer, tirx.Buffer):
+        shape = list(buffer.shape)
+        if len(shape) < 2:
+            raise ValueError(f"make_sqmma_swizzled_layout requires at least 2D buffer, got shape={shape}")
+        stride = int(shape[-2])
+        continuous = int(shape[-1])
+        if continuity is None:
+            continuity = continuous
+        base = _ffi_api.make_sqmma_swizzled_layout(
+            stride,
+            continuous,
+            continuity,
+            int(tvm.DataType(buffer.dtype).bits),
+            k_major,
+        )
+        if len(shape) == 2:
+            return base
+        return base.expand(shape[:-2])
+
+    if isinstance(buffer, tirx.BufferRegion):
+        region_shape = [r.extent for r in buffer.region]
+        if len(region_shape) < 2:
+            raise ValueError(f"make_sqmma_swizzled_layout requires at least 2D region, got shape={region_shape}")
+        if len(region_shape) > 2 and any(int(dim) != 1 for dim in region_shape[:-2]):
+            raise ValueError(f"make_sqmma_swizzled_layout only supports BufferRegion with leading singleton dims, got shape={region_shape}")
+
+        m_dim = int(region_shape[-2])
+        n_dim = int(region_shape[-1])
+        if continuity is None:
+            continuity = n_dim
+        base = _ffi_api.make_sqmma_swizzled_layout(
+            m_dim,
+            n_dim,
+            continuity,
+            int(tvm.DataType(buffer.buffer.dtype).bits),
+            k_major,
+        )
+
+        target_shape = list(buffer.buffer.shape)
+        if len(target_shape) == 2:
+            return base
+
+        prefix_rank = len(target_shape) - 2
+
+        def forward_fn(*indices):
+            mapped = list(base.map_forward_index([indices[-2], indices[-1]]))
+            return list(indices[:prefix_rank]) + mapped
+
+        return Layout(target_shape, forward_fn)
+
+    # Fallback to generic behavior for other BufferLikeType wrappers.
+    _, shape, _ = _get_buffer_info(buffer)
+    stride, continuous = _get_stride_continuous(buffer)
+    element_size = _get_element_size(buffer)
+    if continuity is None:
+        continuity = continuous
+    base = _ffi_api.make_sqmma_swizzled_layout(
+        stride,
+        continuous,
+        continuity,
+        element_size,
+        k_major,
+    )
+    return base.reshape(shape)
+
+
+# no-swizzle layout with 1:1 index mapping and no dimension change.
+def make_no_swizzled_layout(buffer: tvm.tirx.Buffer):
+    if isinstance(buffer, tvm.tirx.Buffer):
+        target_shape = list(buffer.shape)
+
+        def forward_fn(*indices):
+            return list(indices)
+
+        return Layout(target_shape, forward_fn)
+
+    if isinstance(buffer, tvm.tirx.BufferRegion):
+        region_shape = [r.extent for r in buffer.region]
+        if len(region_shape) < 2:
+            raise ValueError(f"make_no_swizzled_layout requires at least 2D region, got shape={region_shape}")
+        if len(region_shape) > 2 and any(int(dim) != 1 for dim in region_shape[:-2]):
+            raise ValueError(
+                f"make_no_swizzled_layout only supports BufferRegion with leading singleton dimensions, got shape={region_shape}"
+            )
+
+        target_shape = list(buffer.buffer.shape)
+        if len(target_shape) < 2:
+            raise ValueError(f"make_no_swizzled_layout requires underlying buffer to be at least 2D, got shape={target_shape}")
+
+        m_dim, n_dim = region_shape[-2], region_shape[-1]
+        base_layout = Layout([m_dim, n_dim], lambda i, j: [i, j])
+        if len(target_shape) == 2:
+            return base_layout
+
+        prefix_rank = len(target_shape) - 2
+
+        def forward_fn(*indices):
+            mapped = list(base_layout.map_forward_index([indices[-2], indices[-1]]))
+            return list(indices[:prefix_rank]) + mapped
+
+        return Layout(target_shape, forward_fn)
+
+    raise ValueError(f"Unsupported buffer type for make_no_swizzled_layout: {type(buffer)}")
+
+
 # for TCGEN05MMA Intrinsics
 def make_tcgen05mma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
     buf, _, _ = _get_buffer_info(buffer)
@@ -126,18 +234,139 @@ def make_quarter_bank_swizzled_layout(buffer: BufferLikeType):
     return _ffi_api.make_quarter_bank_swizzled_layout(buf)
 
 
-def make_linear_layout(buffer_or_load_or_region: BufferLikeType):
+def make_linear_layout(buffer_or_load_or_region_or_shape: BufferLikeType | list[int] | tuple[int, ...]):
     """
     Create a row-major linear layout for any dimension.
 
     Args:
-        buffer_or_load_or_region: BufferLikeType
+        buffer_or_load_or_region_or_shape: BufferLikeType | list[int] | tuple[int, ...]
 
     Returns:
         Layout: A row-major linear layout
     """
-    _, shape, _ = _get_buffer_info(buffer_or_load_or_region)
+    if isinstance(buffer_or_load_or_region_or_shape, (list, tuple)):
+        shape = [int(dim) for dim in buffer_or_load_or_region_or_shape]
+        return _ffi_api.make_linear_layout(shape)
+
+    _, shape, _ = _get_buffer_info(buffer_or_load_or_region_or_shape)
     return _ffi_api.make_linear_layout(list(shape))
+
+
+def make_gemm_fragment_c_linear(block_m: int, block_n: int, block_size: int):
+    """Create the PH1 FMA fragment layout for C."""
+    return _ffi_api.make_gemm_fragment_c_linear(int(block_m), int(block_n), int(block_size))
+
+
+def make_ph_sqmma_fragment_c(
+    block_m: int,
+    block_n: int,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    inst_shape: tuple[int, int, int] | list[int],
+):
+    """Create PH1 SQMMA fragment layout for C."""
+    if len(inst_shape) != 3:
+        raise ValueError(f"inst_shape must be [M, N, K], got {inst_shape}")
+    return _ffi_api.make_ph_sqmma_fragment_c(
+        int(block_m),
+        int(block_n),
+        int(warp_m),
+        int(warp_n),
+        int(element_size),
+        [int(inst_shape[0]), int(inst_shape[1]), int(inst_shape[2])],
+    )
+
+
+def _normalize_ph1_wmma_inst_shape(inst_shape: tuple[int, int, int] | list[int]) -> list[int]:
+    if len(inst_shape) != 3:
+        raise ValueError(f"inst_shape must be [M, N, K], got {inst_shape}")
+    return [int(inst_shape[0]), int(inst_shape[1]), int(inst_shape[2])]
+
+
+def make_ph1_wmma_fragment_c(
+    block_m: int,
+    block_n: int,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    inst_shape: tuple[int, int, int] | list[int],
+):
+    """Create the PH1 WMMA accumulator fragment layout."""
+    return _ffi_api.make_ph1_wmma_fragment_c(
+        int(block_m),
+        int(block_n),
+        int(warp_m),
+        int(warp_n),
+        int(element_size),
+        _normalize_ph1_wmma_inst_shape(inst_shape),
+    )
+
+
+def make_ph1_wmma_fragment_a(
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    transposed: bool,
+    inst_shape: tuple[int, int, int] | list[int],
+):
+    """Create the PH1 WMMA register-fragment layout for operand A."""
+    return _ffi_api.make_ph1_wmma_fragment_a(
+        int(block_m),
+        int(block_n),
+        int(block_k),
+        int(warp_m),
+        int(warp_n),
+        int(element_size),
+        bool(transposed),
+        _normalize_ph1_wmma_inst_shape(inst_shape),
+    )
+
+
+def make_ph1_wmma_fragment_b(
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    warp_m: int,
+    warp_n: int,
+    element_size: int,
+    transposed: bool,
+    inst_shape: tuple[int, int, int] | list[int],
+):
+    """Create the PH1 WMMA register-fragment layout for operand B."""
+    return _ffi_api.make_ph1_wmma_fragment_b(
+        int(block_m),
+        int(block_n),
+        int(block_k),
+        int(warp_m),
+        int(warp_n),
+        int(element_size),
+        bool(transposed),
+        _normalize_ph1_wmma_inst_shape(inst_shape),
+    )
+
+
+def make_ph1_wmma_ab_layout(
+    shape: tuple[int, int] | list[int],
+    continuity: int,
+    element_size: int,
+    k_inner: bool,
+):
+    """Create the PH1 WMMA shared-memory layout for an A or B operand."""
+    if len(shape) < 2:
+        raise ValueError(f"PH1 WMMA shared layout expects at least 2 dimensions, got {shape}")
+    leading_shape = list(shape[:-2])
+    layout = _ffi_api.make_ph1_wmma_ab_layout(
+        int(shape[-2]),
+        int(shape[-1]),
+        int(continuity),
+        int(element_size),
+        bool(k_inner),
+    )
+    return layout.expand(leading_shape)
 
 
 def make_gemm_fragment_8x8():

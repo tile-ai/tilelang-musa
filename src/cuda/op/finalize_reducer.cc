@@ -19,6 +19,8 @@ namespace cuda {
 struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
   static int WarpSize(Target target) { return TargetCudaGetWarpSize(target); }
 
+  static bool UseSyncBarrier(Target, int) { return false; }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset,
@@ -27,7 +29,7 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetSupportsNamedBarrier(target)) {
+    if (TargetHasSMVersionGE(target, 90)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     } else {
       ss << ", tl::SyncThreadsBarrier";
@@ -43,7 +45,7 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetSupportsNamedBarrier(target)) {
+    if (TargetHasSMVersionGE(target, 90)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     }
     ss << ">::run";

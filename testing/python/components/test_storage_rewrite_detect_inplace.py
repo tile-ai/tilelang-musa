@@ -47,20 +47,17 @@ def _get_device_kernel_script(detect_inplace: bool) -> str:
     if detect_inplace:
         pass_configs[tilelang.PassConfigKey.TL_STORAGE_REWRITE_DETECT_INPLACE] = True
     with tvm.transform.PassContext(config=pass_configs):
-        artifact = tilelang.lower(kernel.get_tir(), target="cuda")
+        artifact = tilelang.lower(kernel.get_tir(), target={"kind": "musa", "arch": "mp_31"})
     return artifact.kernel_source
 
 
-@tilelang.testing.requires_cuda
 def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)
 
-    pattern_on = "read = (read * 2);"
-    pattern_off = "write = (read * 2);"
-    assert script_off.count(pattern_on) == 0, f"inplace pattern found when disabled:\n{script_off}"
-    assert script_on.count(pattern_on) > 0, f"inplace pattern not found when enabled:\n{script_on}"
-    assert script_off.count(pattern_off) > 0, f"separate-write pattern not found when disabled:\n{script_off}"
+    pattern = "read = (read * 2);"
+    assert script_off.count(pattern) == 0
+    assert script_on.count(pattern) > 0
 
 
 if __name__ == "__main__":

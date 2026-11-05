@@ -1,6 +1,7 @@
 import tilelang.language as T
 import tilelang.testing
 import tilelang
+import pytest
 import torch
 
 
@@ -30,8 +31,8 @@ def run_gemm_jit_kernel(M, N, K, block_M, block_N, block_K):
 
     matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="tvm_ffi")
 
-    A = torch.randn(M, K, dtype=torch.float16).cuda()
-    B = torch.randn(K, N, dtype=torch.float16).cuda()
+    A = torch.randn(M, K, dtype=torch.float16).musa()
+    B = torch.randn(K, N, dtype=torch.float16).musa()
 
     C = matmul_kernel(A, B)
 
@@ -39,7 +40,11 @@ def run_gemm_jit_kernel(M, N, K, block_M, block_N, block_K):
 
 
 def test_gemm_jit_kernel_zero_dim():
-    run_gemm_jit_kernel(512, 1024, 0, 128, 256, 32)
+    with pytest.raises(
+        ValueError,
+        match="T.copy tile extent is larger than the whole source buffer",
+    ):
+        run_gemm_jit_kernel(512, 1024, 0, 128, 256, 32)
 
 
 if __name__ == "__main__":

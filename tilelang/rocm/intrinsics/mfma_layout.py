@@ -128,61 +128,6 @@ def shared_16x64_to_local_64x16_layout_B(i, j):
     return thread_id, local
 
 
-def shared_32x32_to_local_64x16_layout_C(i, j):
-    # i=M_row, j=N_col. For v_mfma_i32_32x32x32_i8: tid%32=M_row, tid//32 selects N group.
-    tid_high = (j // 4) % 2  # 0 for j in {0-3,8-11,...}, 1 for j in {4-7,12-15,...}
-    thread_id = i + 32 * tid_high
-    k = j - 4 * tid_high
-    local_id = (k // 8) * 4 + k % 4
-    return thread_id, local_id
-
-
-def thread_id_shared_access_64x16_to_32x32_layout_C_n_m(thread_id, local_id):
-    # Returns (row=M, col=N) for v_mfma_i32_32x32x32_i8 output layout.
-    # tid%32 = M_row, (tid//32)*4 + lid%4 + (lid//4)*8 = N_col.
-    i = thread_id % 32
-    j = (thread_id // 32) * 4 + local_id % 4 + (local_id // 4) * 8
-    return i, j
-
-
-def thread_id_shared_access_64x16_to_32x32_layout_C_m_n(thread_id, local_id):
-    """Return (m, n) = (row, col) for the 32x32 MFMA output register layout.
-
-    For v_mfma_i32_32x32x32_i8 (gfx950), each wave-64 lane holds 16 output
-    i32 values.  The row (M-dimension) is indexed by ``thread_id % 32``
-    and the column (N-dimension) is given by the interleaved formula below.
-    This function returns ``(m_idx, n_idx)`` matching the ``(row, col)``
-    convention expected by ``stmatrix``.
-    """
-    m = thread_id % 32
-    n = (thread_id // 32) * 4 + local_id % 4 + (local_id // 4) * 8
-    return m, n
-
-
-def shared_32x32_to_local_64x16_layout_A(i, j):
-    thread_id = i + 32 * (j // 16)
-    local_id = j % 16
-    return thread_id, local_id
-
-
-def thread_id_shared_access_64x16_to_32x32_layout_A(thread_id, local_id):
-    i = thread_id % 32
-    j = (thread_id // 32) * 16 + local_id
-    return i, j
-
-
-def shared_32x32_to_local_64x16_layout_B(i, j):
-    thread_id = j + 32 * (i // 16)
-    local_id = i % 16
-    return thread_id, local_id
-
-
-def thread_id_shared_access_64x16_to_32x32_layout_B(thread_id, local_id):
-    i = (thread_id // 32) * 16 + local_id
-    j = thread_id % 32
-    return i, j
-
-
 def make_mfma_swizzle_layout(shared_buf, vecSize=8):
     dtype = shared_buf.dtype
     shape = shared_buf.shape

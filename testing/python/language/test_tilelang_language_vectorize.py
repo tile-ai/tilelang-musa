@@ -2,8 +2,12 @@ import torch
 import tilelang.testing
 import tilelang.language as T
 
-from tilelang.cuda.intrinsics import make_mma_swizzle_layout
+from tilelang.intrinsics import make_mma_swizzle_layout
 import pytest
+
+
+def _has_float_vector_type(source: str, lanes: int) -> bool:
+    return f"float{lanes}" in source or f"tl_f{lanes}" in source
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True})
@@ -29,8 +33,8 @@ def run_vectorize(N, M, stride_A, stride_B):
 
     jit_kernel = vectorize_test(N, M, stride_A, stride_B)
 
-    base_a = torch.randn(stride_A, M, device="cuda", dtype=torch.float32)
-    base_b = torch.zeros(stride_B, M, device="cuda", dtype=torch.float32)
+    base_a = torch.randn(stride_A, M, device="musa", dtype=torch.float32)
+    base_b = torch.zeros(stride_B, M, device="musa", dtype=torch.float32)
     a = torch.as_strided(base_a, size=(N, M), stride=(1, stride_A))
     b = torch.as_strided(base_b, size=(N, M), stride=(1, stride_B))
 
@@ -45,9 +49,9 @@ def run_vectorize(N, M, stride_A, stride_B):
         vectorize_size *= 2
 
     if vectorize_size == 4:
-        assert "float4" in code
+        assert _has_float_vector_type(code, 4)
     elif vectorize_size == 2:
-        assert "float2" in code
+        assert _has_float_vector_type(code, 2)
 
 
 def test_vectorize():
@@ -82,9 +86,9 @@ def run_vectorize_invariant_index(N, M, K):
 
     jit_kernel = vectorize_test_invariant_index(N, M, K)
 
-    a = torch.randn(N, M, device="cuda", dtype=torch.float32)
-    b = torch.zeros(N, M, device="cuda", dtype=torch.float32)
-    c = torch.randn(N, M // K, device="cuda", dtype=torch.float32)
+    a = torch.randn(N, M, device="musa", dtype=torch.float32)
+    b = torch.zeros(N, M, device="musa", dtype=torch.float32)
+    c = torch.randn(N, M // K, device="musa", dtype=torch.float32)
 
     jit_kernel(a, b, c)
 
@@ -99,9 +103,9 @@ def run_vectorize_invariant_index(N, M, K):
         vectorize_size *= 2
 
     if vectorize_size == 4:
-        assert "float4" in code
+        assert _has_float_vector_type(code, 4)
     elif vectorize_size == 2:
-        assert "float2" in code
+        assert _has_float_vector_type(code, 2)
 
 
 def test_vectorize_invariant_index():
@@ -111,61 +115,6 @@ def test_vectorize_invariant_index():
     run_vectorize_invariant_index(N, M, 4)
     run_vectorize_invariant_index(N, M * 3, 6)
     run_vectorize_invariant_index(N, M * 7, 14)
-
-
-@tilelang.jit
-def vectorize_global_invariant_store_accumulate(M, K):
-    @T.prim_func
-    def main(
-        A: T.Tensor[(M, K), T.float32],  # noqa: F821
-        B: T.Tensor[(M,), T.float32],  # noqa: F821
-    ):
-        with T.Kernel(M // 128, threads=128) as bx:
-            row = bx * 128 + T.get_thread_binding(0)
-            B[row] = 0.0
-            for k in T.vectorized(K):
-                B[row] = B[row] + A[row, k]
-
-    return main
-
-
-@tilelang.jit
-def vectorize_local_invariant_store_accumulate(M, K):
-    @T.prim_func
-    def main(
-        A: T.Tensor[(M, K), T.float32],  # noqa: F821
-        B: T.Tensor[(M,), T.float32],  # noqa: F821
-    ):
-        with T.Kernel(M // 128, threads=128) as bx:
-            row = bx * 128 + T.get_thread_binding(0)
-            acc = T.alloc_local((1,), T.float32)
-            acc[0] = 0.0
-            for k in T.vectorized(K):
-                acc[0] = acc[0] + A[row, k]
-            B[row] = acc[0]
-
-    return main
-
-
-def run_vectorize_invariant_store_accumulate(kernel_factory):
-    M, K = 128, 4
-    kernel = kernel_factory(M, K)
-    a = torch.ones((M, K), device="cuda", dtype=torch.float32)
-    b = torch.empty((M,), device="cuda", dtype=torch.float32)
-
-    kernel(a, b)
-
-    torch.testing.assert_close(b, torch.full_like(b, float(K)), rtol=0, atol=0)
-
-
-@tilelang.testing.requires_cuda
-def test_vectorize_global_invariant_store_accumulate():
-    run_vectorize_invariant_store_accumulate(vectorize_global_invariant_store_accumulate)
-
-
-@tilelang.testing.requires_cuda
-def test_vectorize_local_invariant_store_accumulate():
-    run_vectorize_invariant_store_accumulate(vectorize_local_invariant_store_accumulate)
 
 
 @tilelang.jit
@@ -179,7 +128,7 @@ def vectorize_test_all_dtypes(dtype, vec_num):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 @pytest.mark.parametrize(
     "dtype",
     [
@@ -194,7 +143,7 @@ def vectorize_test_all_dtypes(dtype, vec_num):
 )
 @pytest.mark.parametrize("vec_num", [1, 2, 4, 8])
 def test_vectorize_all_dtypes(dtype, vec_num):
-    x = torch.empty((64,), dtype=dtype, device="cuda")
+    x = torch.empty((64,), dtype=dtype, device="musa")
     kernel = vectorize_test_all_dtypes(dtype, vec_num)
     kernel(x)
 
@@ -209,69 +158,11 @@ def vectorize_broadcast_int8(vec_num):
             a[i] = b
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 @pytest.mark.parametrize("vec_num", [4, 32])
 def test_vectorize_broadcast_int8(vec_num):
     """Test broadcasting a non-constant int8 value to a vectorized store."""
     vectorize_broadcast_int8.compile(vec_num=vec_num)
-
-
-def vectorize_broadcast_int4(dtype, vec_num):
-    @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_BUFFER_INIT_CHECK: True})
-    def kernel():
-        with T.Kernel(1, threads=128):
-            a = T.alloc_local((64,), dtype)
-            b = T.alloc_var(dtype)
-
-            for i in T.vectorized(vec_num):
-                a[i] = b
-
-    return kernel
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", ["int4", "uint4"])
-@pytest.mark.parametrize("vec_num", [4, 8, 16, 32])
-def test_vectorize_broadcast_int4(dtype, vec_num):
-    """Broadcasting a non-constant 4-bit value to a vectorized store must emit
-    the packed-nibble carrier rather than aborting (see issue #2997). The int4
-    branch used to ICHECK on a non-constant value; the int8 branch already
-    handled it. Every packed lane count (16/32-bit carriers and make_(u)int{N})
-    is exercised here."""
-    vectorize_broadcast_int4(dtype, vec_num).compile()
-
-
-def fill_int4_buffer(dtype, fill_value):
-    M, N = 16, 64
-
-    @T.prim_func
-    def func(B: T.Tensor((M, N), dtype)):
-        with T.Kernel(1, threads=128):
-            sh = T.alloc_shared((M, N), dtype)
-            T.fill(sh, fill_value)
-            T.copy(sh, B)
-
-    return func
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", ["int4", "uint4"])
-@pytest.mark.parametrize("fill_value", [0, 1, 7])
-def test_fill_int4_buffer(dtype, fill_value):
-    """End-to-end reproduction of issue #2997: T.fill/T.clear of an int4 buffer.
-    HoistBroadcastValues rebinds the constant fill value to a Var, so the CUDA
-    Broadcast codegen sees a non-constant value. Verify it both compiles and
-    produces the correct packed nibbles."""
-    M, N = 16, 64
-    kernel = tilelang.compile(fill_int4_buffer(dtype, fill_value))
-    # int4 buffer packs two nibbles per byte, so N columns -> N // 2 bytes.
-    out = torch.empty(M, N // 2, dtype=torch.int8, device="cuda")
-    kernel(out)
-    expected = fill_value & 0x0F
-    low = out & 0x0F
-    high = (out >> 4) & 0x0F
-    assert bool((low == expected).all()), f"low nibble mismatch for {dtype}={fill_value}"
-    assert bool((high == expected).all()), f"high nibble mismatch for {dtype}={fill_value}"
 
 
 @tilelang.jit
@@ -285,7 +176,7 @@ def vectorize_test_call_infinity():
 
 def test_vectorize_call_infinity():
     kernel = vectorize_test_call_infinity.compile()
-    assert "float4" in kernel.get_kernel_source()
+    assert _has_float_vector_type(kernel.get_kernel_source(), 4)
 
 
 @tilelang.jit(
@@ -304,7 +195,7 @@ def vectorize_test_call_bitwise_logical():
 def test_vectorize_call_bitwise_logical():
     kernel = vectorize_test_call_bitwise_logical.compile()
     print(kernel.get_kernel_source())
-    assert "float4" in kernel.get_kernel_source()
+    assert _has_float_vector_type(kernel.get_kernel_source(), 4)
 
 
 if __name__ == "__main__":

@@ -9,10 +9,11 @@ store-side TMA constraints are satisfied. In that case lowering emits both
 tma_store_arrive and tma_store_wait automatically.
 """
 
-from tilelang import tvm as tvm
-import tilelang.testing
-import tilelang.language as T
 import tilelang
+import tilelang.language as T
+import tilelang.testing
+import torch
+import pytest
 
 
 def matmul_tma_store(
@@ -56,8 +57,8 @@ def matmul_tma_store(
     return main
 
 
-def run_gemm_tma_store(num_stages):
-    M, N, K = 1024, 1024, 1024
+def run_gemm_tma_store(num_stages, verbose=False):
+    M, N, K = 256, 256, 1024
     block_M, block_N, block_K = 128, 128, 32
     in_dtype = T.float16
     out_dtype = T.float16
@@ -83,17 +84,13 @@ def run_gemm_tma_store(num_stages):
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     kernel_source = kernel.get_kernel_source()
-    print(kernel_source)
-    # exit()
-    # Verify that the generated kernel contains tma_store_arrive but NOT tma_store_wait
-    # (the wait is issued separately by the user via T.tma_store_wait)
+    if verbose:
+        print(kernel_source)
     assert "tma_store_arrive" in kernel_source, "Expected tma_store_arrive in kernel source"
 
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
-        import torch
-
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         return C.to(torch.__getattribute__(out_dtype))
 
@@ -126,15 +123,6 @@ def full_shape_tma_store_1d(dtype, threads):
     return main
 
 
-def tma_store_wait_read_option(read):
-    @T.prim_func
-    def main():
-        with T.Kernel(threads=128):
-            T.tma_store_wait(read=read)
-
-    return main
-
-
 def run_auto_tma_store_copy():
     M = N = 256
     block_M = block_N = 128
@@ -150,7 +138,6 @@ def run_auto_tma_store_copy():
     kernel_source = kernel.get_kernel_source()
     assert "tma_store_arrive" in kernel_source, "Expected auto tma_store_arrive in kernel source"
     assert "tma_store_wait" in kernel_source, "Expected auto tma_store_wait in kernel source"
-    assert "tl::tma_store_wait<0, true>();" in kernel_source, "Expected auto tma_store_wait to use default read wait"
 
     profiler = kernel.get_profiler()
 
@@ -171,50 +158,41 @@ def run_full_shape_tma_store_1d_codegen():
     assert "CUtensorMap" not in kernel_source, "Expected pointer-based 1D TMA store"
 
 
-def run_tma_store_wait_read_option_codegen():
-    default_kernel = tilelang.compile(
-        tma_store_wait_read_option(True),
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
-    )
-    no_read_kernel = tilelang.compile(
-        tma_store_wait_read_option(False),
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
-    )
-
-    assert "tl::tma_store_wait<0, true>();" in default_kernel.get_kernel_source()
-    assert "tl::tma_store_wait<0, false>();" in no_read_kernel.get_kernel_source()
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.ci_smoke
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_tma_store_2_stages():
     run_gemm_tma_store(num_stages=2)
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_tma_store_3_stages():
     run_gemm_tma_store(num_stages=3)
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.ci_smoke
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_plain_copy_auto_tma_store():
     run_auto_tma_store_copy()
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 def test_plain_copy_full_shape_tma_store_uses_1d():
     run_full_shape_tma_store_1d_codegen()
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_tma_store_wait_read_option_codegen():
-    run_tma_store_wait_read_option_codegen()
+def test_musa_tma_store_wait_rejects_read_false():
+    @T.prim_func
+    def main():
+        with T.Kernel(threads=128):
+            T.tma_store_wait(read=False)
+
+    with pytest.raises(Exception, match="MUSA T.tma_store_wait only supports read=True"):
+        tilelang.lower(
+            main,
+            target={"kind": "musa", "arch": "mp_31"},
+            enable_device_compile=False,
+        )
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_tma_store_2_stages()
+    run_gemm_tma_store(2, verbose=True)

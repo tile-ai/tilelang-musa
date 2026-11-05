@@ -30,7 +30,7 @@ def tl_gemm(
     M, N, K = T.const("M, N, K")
 
     group_size = 128
-    block_M = 64
+    block_M = 128
     block_K = 128
 
     A_shape = (M, K)

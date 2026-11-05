@@ -20,19 +20,63 @@ __all__ = [
 import cutlass
 from cutlass import cute
 from cutlass._mlir.extras import types as T
-from cutlass._mlir.dialects import llvm
-from cutlass.experimental import primitives as prims
+from cutlass._mlir.dialects import nvvm, llvm
+from cutlass._mlir.dialects._nvvm_enum_gen import (
+    AtomicOpKind,
+    MemOrderKind,
+    MemScopeKind,
+)
 
 # Type alias for numeric values
 Numeric = cutlass.Float32 | cutlass.Float16 | cutlass.Int32 | cutlass.Int64 | int | float
 
 
-def _atomic_ptr(ptr):
-    return ptr.llvm_ptr if hasattr(ptr, "llvm_ptr") else ptr
+def _memory_order_to_llvm_load(memory_order: int):
+    """Convert TileLang memory order ID to LLVM atomic ordering for loads.
+
+    TileLang memory order mapping:
+        0: relaxed   -> monotonic
+        1: consume   -> acquire (consume is deprecated, use acquire)
+        2: acquire   -> acquire
+        3: release   -> acquire (release invalid for load)
+        4: acq_rel   -> acquire (acq_rel for load = acquire)
+        5: seq_cst   -> acquire (NVPTX llvm.load doesn't support seq_cst)
+
+    Note: NVPTX backend only supports monotonic/acquire for loads.
+    """
+    mapping = {
+        0: llvm.AtomicOrdering.monotonic,
+        1: llvm.AtomicOrdering.acquire,
+        2: llvm.AtomicOrdering.acquire,
+        3: llvm.AtomicOrdering.acquire,  # release invalid for load
+        4: llvm.AtomicOrdering.acquire,  # acq_rel -> acquire for load
+        5: llvm.AtomicOrdering.acquire,  # seq_cst -> acquire (NVPTX limitation)
+    }
+    return mapping.get(memory_order, llvm.AtomicOrdering.monotonic)
 
 
-def _fence_sc_gpu(*, loc=None, ip=None) -> None:
-    prims.inline_ptx("fence.sc.gpu;", loc=loc, ip=ip)
+def _memory_order_to_llvm_store(memory_order: int):
+    """Convert TileLang memory order ID to LLVM atomic ordering for stores.
+
+    TileLang memory order mapping:
+        0: relaxed   -> monotonic
+        1: consume   -> release (consume invalid for store)
+        2: acquire   -> release (acquire invalid for store)
+        3: release   -> release
+        4: acq_rel   -> release (acq_rel for store = release)
+        5: seq_cst   -> release (NVPTX llvm.store doesn't support seq_cst)
+
+    Note: NVPTX backend only supports monotonic/release for stores.
+    """
+    mapping = {
+        0: llvm.AtomicOrdering.monotonic,
+        1: llvm.AtomicOrdering.release,  # consume invalid for store
+        2: llvm.AtomicOrdering.release,  # acquire invalid for store
+        3: llvm.AtomicOrdering.release,
+        4: llvm.AtomicOrdering.release,  # acq_rel -> release for store
+        5: llvm.AtomicOrdering.release,  # seq_cst -> release (NVPTX limitation)
+    }
+    return mapping.get(memory_order, llvm.AtomicOrdering.monotonic)
 
 
 # =============================================================================
@@ -47,12 +91,13 @@ def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
     Returns the old value before addition (atomicrmw semantics).
     """
     if ptr.dtype == cutlass.Float32:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.ADD,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
+        ret = nvvm.atomicrmw(
+            T.f32(),
+            AtomicOpKind.FADD,
+            ptr.llvm_ptr,
+            ptr.dtype(value).ir_value(loc=loc, ip=ip),
+            mem_order=MemOrderKind.RELAXED,
+            syncscope=MemScopeKind.GPU,
             loc=loc,
             ip=ip,
         )
@@ -78,13 +123,26 @@ def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
         # Bitcast i16 -> f16 for return
         result = llvm.bitcast(T.f16(), res_i16, loc=loc, ip=ip)
         return cutlass.Float16(result)
-    elif ptr.dtype == cutlass.Int32 or ptr.dtype == cutlass.Int64:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.ADD,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
+    elif ptr.dtype == cutlass.Int32:
+        ret = nvvm.atomicrmw(
+            T.i32(),
+            AtomicOpKind.ADD,
+            ptr.llvm_ptr,
+            ptr.dtype(value).ir_value(loc=loc, ip=ip),
+            mem_order=MemOrderKind.RELAXED,
+            syncscope=MemScopeKind.GPU,
+            loc=loc,
+            ip=ip,
+        )
+        return ptr.dtype(ret)
+    elif ptr.dtype == cutlass.Int64:
+        ret = nvvm.atomicrmw(
+            T.i64(),
+            AtomicOpKind.ADD,
+            ptr.llvm_ptr,
+            ptr.dtype(value).ir_value(loc=loc, ip=ip),
+            mem_order=MemOrderKind.RELAXED,
+            syncscope=MemScopeKind.GPU,
             loc=loc,
             ip=ip,
         )
@@ -96,7 +154,7 @@ def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
 def AtomicAddRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
     """Perform atomic addition and return the previous value.
 
-    This is the same as AtomicAdd since prims.atomicrmw always returns old value.
+    This is the same as AtomicAdd since nvvm.atomicrmw always returns old value.
     """
     return AtomicAdd(ptr, value, loc=loc, ip=ip)
 
@@ -224,16 +282,17 @@ def AtomicAddx4(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
 def AtomicMax(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
     """Perform atomic maximum operation.
 
-    For integers, uses prims.atomicrmw with MAX.
+    For integers, uses nvvm.atomicrmw with MAX.
     For floats, uses CAS loop since PTX doesn't have atomic max for float32.
     """
     if ptr.dtype == cutlass.Int32:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.MAX,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
+        ret = nvvm.atomicrmw(
+            T.i32(),
+            AtomicOpKind.MAX,
+            ptr.llvm_ptr,
+            ptr.dtype(value).ir_value(loc=loc, ip=ip),
+            mem_order=MemOrderKind.RELAXED,
+            syncscope=MemScopeKind.GPU,
             loc=loc,
             ip=ip,
         )
@@ -278,12 +337,13 @@ def AtomicMax(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
         )
         return cutlass.Float32(result)
     elif ptr.dtype == cutlass.Int64:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.MAX,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
+        ret = nvvm.atomicrmw(
+            T.i64(),
+            AtomicOpKind.MAX,
+            ptr.llvm_ptr,
+            ptr.dtype(value).ir_value(loc=loc, ip=ip),
+            mem_order=MemOrderKind.RELAXED,
+            syncscope=MemScopeKind.GPU,
             loc=loc,
             ip=ip,
         )
@@ -305,16 +365,17 @@ def AtomicMaxRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
 def AtomicMin(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
     """Perform atomic minimum operation.
 
-    For integers, uses prims.atomicrmw with MIN.
+    For integers, uses nvvm.atomicrmw with MIN.
     For floats, uses CAS loop since PTX doesn't have atomic min for float32.
     """
     if ptr.dtype == cutlass.Int32:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.MIN,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
+        ret = nvvm.atomicrmw(
+            T.i32(),
+            AtomicOpKind.MIN,
+            ptr.llvm_ptr,
+            ptr.dtype(value).ir_value(loc=loc, ip=ip),
+            mem_order=MemOrderKind.RELAXED,
+            syncscope=MemScopeKind.GPU,
             loc=loc,
             ip=ip,
         )
@@ -354,12 +415,13 @@ def AtomicMin(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
         )
         return cutlass.Float32(result)
     elif ptr.dtype == cutlass.Int64:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.MIN,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
+        ret = nvvm.atomicrmw(
+            T.i64(),
+            AtomicOpKind.MIN,
+            ptr.llvm_ptr,
+            ptr.dtype(value).ir_value(loc=loc, ip=ip),
+            mem_order=MemOrderKind.RELAXED,
+            syncscope=MemScopeKind.GPU,
             loc=loc,
             ip=ip,
         )
@@ -378,23 +440,24 @@ def AtomicMinRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
 # =============================================================================
 
 
-def _get_load_ordering(memory_order: int) -> prims.MemOrder:
-    """Get primitive memory ordering for load.
+def _get_ptx_load_ordering(memory_order: int) -> str:
+    """Get PTX memory ordering modifier for load.
 
     TileLang memory order:
-        0: relaxed -> relaxed.gpu
-        1: consume -> acquire.gpu (consume deprecated)
-        2: acquire -> acquire.gpu
-        3: release -> acquire.gpu (invalid for load)
-        4: acq_rel -> acquire.gpu (load part)
-        5: seq_cst -> fence.sc.gpu + relaxed.gpu
+        0: relaxed -> .relaxed.gpu
+        1: consume -> .acquire.gpu (consume deprecated)
+        2: acquire -> .acquire.gpu
+        3: release -> .acquire.gpu (invalid for load)
+        4: acq_rel -> .acquire.gpu (load part)
+        5: seq_cst -> fence.sc + .relaxed.gpu
     """
+    # For seq_cst, we need fence before load - handled separately
     if memory_order == 5:
-        return prims.MemOrder.RELAXED
+        return "relaxed.gpu"
     elif memory_order in (1, 2, 3, 4):
-        return prims.MemOrder.ACQUIRE
+        return "acquire.gpu"
     else:  # 0 or default
-        return prims.MemOrder.RELAXED
+        return "relaxed.gpu"
 
 
 def AtomicLoad(ptr: cute.Pointer, memory_order: int, *, loc=None, ip=None):
@@ -407,40 +470,62 @@ def AtomicLoad(ptr: cute.Pointer, memory_order: int, *, loc=None, ip=None):
     Returns:
         The loaded value
 
-    NVVM mapping:
-        relaxed: relaxed.gpu
-        acquire: acquire.gpu
-        seq_cst: fence.sc.gpu + relaxed.gpu
+    PTX mapping (per NVIDIA ABI):
+        relaxed: ld.relaxed.<scope>
+        acquire: ld.acquire.<scope>
+        seq_cst: fence.sc.<scope>; ld.relaxed.<scope>
     """
-    if memory_order == 5:
-        _fence_sc_gpu(loc=loc, ip=ip)
+    ordering = _get_ptx_load_ordering(memory_order)
+    is_seq_cst = memory_order == 5
 
     if ptr.dtype == cutlass.Int32:
-        result = prims.load_ext(
-            _atomic_ptr(ptr),
-            dtype=cutlass.Int32,
-            order=_get_load_ordering(memory_order),
-            scope=prims.MemScope.GPU,
+        if is_seq_cst:
+            # seq_cst requires fence before relaxed load
+            asm_str = "fence.sc.gpu; ld.relaxed.gpu.s32 $0, [$1];"
+        else:
+            asm_str = f"ld.{ordering}.s32 $0, [$1];"
+        result = llvm.inline_asm(
+            T.i32(),
+            [ptr.llvm_ptr],
+            asm_str,
+            "=r,l",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
             loc=loc,
             ip=ip,
         )
         return cutlass.Int32(result)
     elif ptr.dtype == cutlass.Float32:
-        result = prims.load_ext(
-            _atomic_ptr(ptr),
-            dtype=cutlass.Float32,
-            order=_get_load_ordering(memory_order),
-            scope=prims.MemScope.GPU,
+        if is_seq_cst:
+            asm_str = "fence.sc.gpu; ld.relaxed.gpu.f32 $0, [$1];"
+        else:
+            asm_str = f"ld.{ordering}.f32 $0, [$1];"
+        result = llvm.inline_asm(
+            T.f32(),
+            [ptr.llvm_ptr],
+            asm_str,
+            "=f,l",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
             loc=loc,
             ip=ip,
         )
         return cutlass.Float32(result)
     elif ptr.dtype == cutlass.Int64:
-        result = prims.load_ext(
-            _atomic_ptr(ptr),
-            dtype=cutlass.Int64,
-            order=_get_load_ordering(memory_order),
-            scope=prims.MemScope.GPU,
+        if is_seq_cst:
+            asm_str = "fence.sc.gpu; ld.relaxed.gpu.s64 $0, [$1];"
+        else:
+            asm_str = f"ld.{ordering}.s64 $0, [$1];"
+        result = llvm.inline_asm(
+            T.i64(),
+            [ptr.llvm_ptr],
+            asm_str,
+            "=l,l",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
             loc=loc,
             ip=ip,
         )
@@ -454,23 +539,24 @@ def AtomicLoad(ptr: cute.Pointer, memory_order: int, *, loc=None, ip=None):
 # =============================================================================
 
 
-def _get_store_ordering(memory_order: int) -> prims.MemOrder:
-    """Get primitive memory ordering for store.
+def _get_ptx_store_ordering(memory_order: int) -> str:
+    """Get PTX memory ordering modifier for store.
 
     TileLang memory order:
-        0: relaxed -> relaxed.gpu
-        1: consume -> release.gpu (invalid for store)
-        2: acquire -> release.gpu (invalid for store)
-        3: release -> release.gpu
-        4: acq_rel -> release.gpu (store part)
-        5: seq_cst -> fence.sc.gpu + relaxed.gpu
+        0: relaxed -> .relaxed.gpu
+        1: consume -> .release.gpu (invalid for store)
+        2: acquire -> .release.gpu (invalid for store)
+        3: release -> .release.gpu
+        4: acq_rel -> .release.gpu (store part)
+        5: seq_cst -> fence.sc + .relaxed.gpu
     """
+    # For seq_cst, we need fence before store - handled separately
     if memory_order == 5:
-        return prims.MemOrder.RELAXED
+        return "relaxed.gpu"
     elif memory_order in (1, 2, 3, 4):
-        return prims.MemOrder.RELEASE
+        return "release.gpu"
     else:  # 0 or default
-        return prims.MemOrder.RELAXED
+        return "relaxed.gpu"
 
 
 def AtomicStore(ptr: cute.Pointer, value: Numeric, memory_order: int, *, loc=None, ip=None):
@@ -481,38 +567,62 @@ def AtomicStore(ptr: cute.Pointer, value: Numeric, memory_order: int, *, loc=Non
         value: Value to store
         memory_order: TileLang memory order ID (0=relaxed, 3=release, 5=seq_cst, etc.)
 
-    NVVM mapping:
-        relaxed: relaxed.gpu
-        release: release.gpu
-        seq_cst: fence.sc.gpu + relaxed.gpu
+    PTX mapping (per NVIDIA ABI):
+        relaxed: st.relaxed.<scope>
+        release: st.release.<scope>
+        seq_cst: fence.sc.<scope>; st.relaxed.<scope>
     """
-    if memory_order == 5:
-        _fence_sc_gpu(loc=loc, ip=ip)
+    ordering = _get_ptx_store_ordering(memory_order)
+    is_seq_cst = memory_order == 5
 
     if ptr.dtype == cutlass.Int32:
-        prims.store_ext(
-            cutlass.Int32(value).ir_value(loc=loc, ip=ip),
-            _atomic_ptr(ptr),
-            order=_get_store_ordering(memory_order),
-            scope=prims.MemScope.GPU,
+        val_ir = cutlass.Int32(value).ir_value(loc=loc, ip=ip)
+        if is_seq_cst:
+            asm_str = "fence.sc.gpu; st.relaxed.gpu.s32 [$0], $1;"
+        else:
+            asm_str = f"st.{ordering}.s32 [$0], $1;"
+        llvm.inline_asm(
+            None,
+            [ptr.llvm_ptr, val_ir],
+            asm_str,
+            "l,r",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
             loc=loc,
             ip=ip,
         )
     elif ptr.dtype == cutlass.Float32:
-        prims.store_ext(
-            cutlass.Float32(value).ir_value(loc=loc, ip=ip),
-            _atomic_ptr(ptr),
-            order=_get_store_ordering(memory_order),
-            scope=prims.MemScope.GPU,
+        val_ir = cutlass.Float32(value).ir_value(loc=loc, ip=ip)
+        if is_seq_cst:
+            asm_str = "fence.sc.gpu; st.relaxed.gpu.f32 [$0], $1;"
+        else:
+            asm_str = f"st.{ordering}.f32 [$0], $1;"
+        llvm.inline_asm(
+            None,
+            [ptr.llvm_ptr, val_ir],
+            asm_str,
+            "l,f",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
             loc=loc,
             ip=ip,
         )
     elif ptr.dtype == cutlass.Int64:
-        prims.store_ext(
-            cutlass.Int64(value).ir_value(loc=loc, ip=ip),
-            _atomic_ptr(ptr),
-            order=_get_store_ordering(memory_order),
-            scope=prims.MemScope.GPU,
+        val_ir = cutlass.Int64(value).ir_value(loc=loc, ip=ip)
+        if is_seq_cst:
+            asm_str = "fence.sc.gpu; st.relaxed.gpu.s64 [$0], $1;"
+        else:
+            asm_str = f"st.{ordering}.s64 [$0], $1;"
+        llvm.inline_asm(
+            None,
+            [ptr.llvm_ptr, val_ir],
+            asm_str,
+            "l,l",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
             loc=loc,
             ip=ip,
         )

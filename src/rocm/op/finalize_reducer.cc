@@ -5,7 +5,7 @@
 
 #include "backend/common/op/finalize_reducer.h"
 
-#include "rocm/target_utils.h"
+#include "backend/common/target_utils.h"
 
 #include <sstream>
 
@@ -17,7 +17,9 @@ using namespace tirx;
 namespace rocm {
 
 struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
-  static int WarpSize(Target target) { return TargetRocmGetWarpSize(target); }
+  static int WarpSize(Target) { return 64; }
+
+  static bool UseSyncBarrier(Target, int) { return false; }
 
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,

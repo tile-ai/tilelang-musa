@@ -16,8 +16,6 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "span_utils.h"
-
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -35,7 +33,9 @@
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/gemm.h"
+#include "op/gemm_py.h"
 #include "op/operator.h"
+#include "op/region.h"
 #include "op/utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
@@ -334,24 +334,12 @@ private:
     return Call(call->dtype, call->op, call->args, annotations, call->span);
   }
 
-  // Ops that auto-emit a paired arrive+wait on an explicit (user-allocated)
-  // mbarrier: sync gemm with an mbar (isTcgen05_ marks the explicit-async
-  // T.tcgen05_gemm op, which never waits) and copies with an explicit
-  // "barrier". The paired wait assumes the slot flips once per op invocation,
-  // so the parity is the op's logical iteration parity. Pipeline-managed TMA
-  // copies (is_tma_copy) carry their ring parity in explicit waits, and
-  // compiler-generated copy/im2col barriers are allocated per emitted site,
-  // so LowerTileOp derives their phase from that site's enclosing loop.
   bool IsMbarPhaseConsumer(const Call &call) const {
     auto tile_op = ParseOperator(call);
-    if (const auto *gemm = tile_op.as<GemmNode>()) {
-      return gemm->mbar_.defined() && !gemm->isTcgen05_;
-    }
-    if (const auto *copy = tile_op.as<CopyNode>()) {
-      return !GetIsTmaCopy(*copy) &&
-             copy->annotations.Get("barrier").has_value();
-    }
-    return false;
+    return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
+                                 tile_op.as<Im2ColOpNode>() != nullptr ||
+                                 tile_op.as<GemmNode>() != nullptr ||
+                                 tile_op.as<GemmPyNode>() != nullptr);
   }
 
   PrimExpr phase_expr_;
@@ -485,9 +473,7 @@ SBlock MakeBlock(const Stmt &body,
   }
   if (!block.defined()) {
     block = SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                   /*name_hint=*/"", /*body*/ body, /*init=*/std::nullopt,
-                   /*alloc_buffers=*/{}, /*match_buffers=*/{},
-                   /*annotations=*/{}, /*span=*/body->span);
+                   /*name_hint=*/"", /*body*/ body);
   }
   Array<Array<BufferRegion>> access =
       GetSBlockReadWriteRegion(block, buffer_data_to_buffer);
@@ -1147,7 +1133,7 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
-    if (call->op.same_as(region()) && call->args.size() >= 2) {
+    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         size_t num_extents = call->args.size() - 2;
         if (load->indices.size() == num_extents + 1) {
@@ -1299,11 +1285,15 @@ private:
   using ScalarBindingMap =
       std::unordered_map<Var, size_t, ObjectPtrHash, ObjectPtrEqual>;
 
+  static const BindNode *GetScalarBindingMarker(const SBlock &block) {
+    return block->body.as<BindNode>();
+  }
+
   void CollectScalarBindings() {
     scalar_bindings_.clear();
     scalar_binding_map_.clear();
     for (const SBlock &block : scalar_binding_blocks_) {
-      if (const auto *bind = block->body.as<BindNode>()) {
+      if (const auto *bind = GetScalarBindingMarker(block)) {
         if (!scalar_binding_map_.count(bind->var)) {
           scalar_binding_map_.emplace(bind->var, scalar_bindings_.size());
           scalar_bindings_.push_back({bind->var, bind->value, bind->span});
@@ -1381,14 +1371,17 @@ private:
     return binding_indices;
   }
 
-  Stmt RewriteScalarBindingForAccess(size_t binding_index,
-                                     const PrimExpr &access_index) {
+  Stmt WrapScalarBindingForAccess(size_t binding_index,
+                                  const PrimExpr &access_index, Stmt body) {
     const ScalarBinding &binding = scalar_bindings_[binding_index];
-    Stmt bind = Bind(binding.var, binding.value, binding.span);
-    bind = PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
-                                pipeline_loop_, max_stage_ != 1)(bind);
-    bind = Substitute(bind, {{pipeline_loop_->loop_var, access_index}});
-    return bind;
+    Stmt marker = Bind(binding.var, binding.value, binding.span);
+    marker = PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
+                                  pipeline_loop_, max_stage_ != 1)(marker);
+    marker = Substitute(marker, {{pipeline_loop_->loop_var, access_index}});
+    const auto *bind = marker.as<BindNode>();
+    ICHECK(bind) << "InjectSoftwarePipeline: expected scalar binding marker to "
+                    "remain a Bind";
+    return SeqStmt({Bind(bind->var, bind->value, bind->span), std::move(body)});
   }
 
   SBlock ReplayScalarBindings(SBlock block, const PrimExpr &access_index) {
@@ -1397,16 +1390,14 @@ private:
       return block;
     }
 
-    Array<Stmt> seq;
-    for (size_t binding_index : binding_indices) {
-      seq.push_back(RewriteScalarBindingForAccess(binding_index, access_index));
-    }
-    for (const Stmt &stmt : FlattenTopLevelSeq(block->body)) {
-      seq.push_back(stmt);
+    Stmt body = block->body;
+    for (auto it = binding_indices.rbegin(); it != binding_indices.rend();
+         ++it) {
+      body = WrapScalarBindingForAccess(*it, access_index, std::move(body));
     }
 
     SBlockNode *n = block.CopyOnWrite();
-    n->body = SeqStmt(seq);
+    n->body = body;
     return MakeBlock(SBlockRealize({}, Bool(true), block),
                      buffer_data_to_buffer_);
   }
@@ -1548,9 +1539,37 @@ private:
    * \param num_versions The number of versions to keep.
    * \return The resized buffer.
    */
+  int64_t PH1GemmABStageStrideElems(const Buffer &buffer) {
+    if (!target_.defined() || !TargetIsPH1(target_.value()) ||
+        (buffer->data->name_hint != "A_shared" &&
+         buffer->data->name_hint != "B_shared") ||
+        (buffer.scope() != "shared" && buffer.scope() != "shared.dyn") ||
+        buffer->shape.size() != 2) {
+      return 0;
+    }
+    const auto *h = buffer->shape[0].as<IntImmNode>();
+    const auto *w = buffer->shape[1].as<IntImmNode>();
+    if (!h || !w || h->value * w->value >= 4096) {
+      return 0;
+    }
+    constexpr int kStageAlignBytes = 4096;
+    int dtype_bytes = buffer->dtype.bytes();
+    int64_t tile_bytes = h->value * w->value * dtype_bytes;
+    int64_t padded_bytes =
+        ((tile_bytes + kStageAlignBytes - 1) / kStageAlignBytes) *
+        kStageAlignBytes;
+    return padded_bytes / dtype_bytes;
+  }
+
   Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
     ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
+    if (int64_t stage_stride_elems = PH1GemmABStageStrideElems(buffer)) {
+      new_buffer->strides = {Integer(stage_stride_elems),
+                             Integer(buffer->shape[1].as<IntImmNode>()->value),
+                             Integer(1)};
+      return Buffer(new_buffer);
+    }
     if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
       PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
@@ -1754,6 +1773,25 @@ private:
 
     const PipelineRewriter *rewriter_;
   };
+
+  Optional<PrimExpr>
+  ComputePipelineMbarPhaseExpr(const PrimExpr &normalized_access_index,
+                               const Optional<Integer> &pipeline_num_stages) {
+    if (!pipeline_num_stages) {
+      return Optional<PrimExpr>();
+    }
+    PrimExpr parity_expr;
+    if (pipeline_num_stages.value().IntValue() <= 1) {
+      parity_expr =
+          FloorMod(normalized_access_index, IntImm(DataType::Int(32), 2));
+    } else {
+      PrimExpr ns =
+          IntImm(DataType::Int(32), pipeline_num_stages.value().IntValue());
+      parity_expr = FloorMod(FloorDiv(normalized_access_index, ns),
+                             IntImm(DataType::Int(32), 2));
+    }
+    return analyzer_.Simplify(parity_expr);
+  }
 
   static bool IsAsyncCommitQueueScope(const AttrStmtNode *attr) {
     return attr && attr->attr_key == s_tir::attr::async_commit_queue_scope;
@@ -2828,11 +2866,6 @@ private:
     PrimExpr extent = end - start;
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
-    // Written against the original loop var; the per-block Substitute below
-    // specializes it into each op's logical iteration parity.
-    PrimExpr mbar_phase = analyzer_.Simplify(
-        FloorMod(pipeline_loop_->loop_var - pipeline_loop_->min,
-                 make_const(pipeline_loop_->loop_var.dtype(), 2)));
     auto make_nop = []() {
       return SBlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
@@ -2898,11 +2931,9 @@ private:
             pipeline_loop_->min <= skewed_loop_var,
             (skewed_loop_var < pipeline_loop_->min + pipeline_loop_->extent));
 
-      SBlock annotated_block =
-          Downcast<SBlock>(AnnotateTileOpMbarPhase(block, mbar_phase));
-      SBlock new_block = Downcast<SBlock>(PipelineBodyRewriter(
-          buffer_data_to_buffer_, buffer_remap_, pipeline_loop_,
-          max_stage_ != 1)(annotated_block));
+      SBlock new_block = Downcast<SBlock>(
+          PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
+                               pipeline_loop_, max_stage_ != 1)(block));
 
       PrimExpr delta = start - pipeline_loop_->min;
       PrimExpr normalized_access_index =
@@ -2926,6 +2957,8 @@ private:
       new_block = ReplayScalarBindings(new_block, normalized_access_index);
 
       Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
+      Optional<PrimExpr> pipeline_mbar_phase = ComputePipelineMbarPhaseExpr(
+          normalized_access_index, pipeline_num_stages);
 
       bool is_async = pipeline_anno.async;
       if (is_async) {
@@ -2973,6 +3006,11 @@ private:
         }
         rewritten_stmt = AnnotateSimtProducer(rewritten_stmt, target_);
       }
+      if (pipeline_mbar_phase) {
+        rewritten_stmt = AnnotateTileOpMbarPhase(rewritten_stmt,
+                                                 pipeline_mbar_phase.value());
+      }
+
       new_stmts.push_back({stage, inbound, new_block->reads, new_block->writes,
                            normalized_access_index, is_async, rewritten_stmt});
 
@@ -3030,8 +3068,7 @@ private:
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
-                     std::move(new_loop), std::nullopt, preserved_annotations,
-                     std::nullopt, pipeline_loop_->span);
+                     std::move(new_loop), std::nullopt, preserved_annotations);
     }
     Stmt result = SBlockRealize({}, Bool(true),
                                 MakeBlock(new_loop, buffer_data_to_buffer_));
@@ -3102,8 +3139,7 @@ private:
       int order = stmt_info.order;
       ICHECK(!used_orders.count(order))
           << "ValueError: Two statements in the software pipeline cannot have "
-             "the same order"
-          << SpanHintSuffix({block->body->span, block->span});
+             "the same order";
       used_orders.insert(order);
     }
 
@@ -3120,14 +3156,12 @@ private:
         ICHECK_LE(src_info.stage, dst_info.stage)
             << "ValueError: statement " << dst << " in stage " << dst_info.stage
             << " cannot depends on statement " << src << " in a later stage "
-            << src_info.stage
-            << SpanHintSuffix({dst->body->span, src->body->span});
+            << src_info.stage;
         if (src_info.stage == dst_info.stage) {
           ICHECK_LT(src_info.order, dst_info.order)
               << "ValueError: two statements with buffer "
                  "access dependency in the same stage of the "
-                 "software pipeline cannot be reordered"
-              << SpanHintSuffix({dst->body->span, src->body->span});
+                 "software pipeline cannot be reordered";
         }
       }
     }
@@ -3160,13 +3194,11 @@ private:
             << "ValueError: scheduled scalar Bind '" << var
             << "' is used from a different pipeline stage. Scalar Bind "
                "statements that cannot be replayed must be scheduled in the "
-               "same stage as their consumers."
-            << SpanHintSuffix(consumer->body->span);
+               "same stage as their consumers.";
         ICHECK_LT(producer_info.order, consumer_info.order)
             << "ValueError: scheduled scalar Bind '" << var
             << "' must be ordered before every consumer in the same pipeline "
-               "stage."
-            << SpanHintSuffix(consumer->body->span);
+               "stage.";
       }
     }
   }
@@ -3415,30 +3447,20 @@ private:
         }
       }
     }
-    BufferSet pipeline_write_buffers =
-        CollectPipelineWriteBuffers(original_order);
+    BufferSet pipeline_write_buffers;
+    if (!replayable_bind_mask.defined()) {
+      pipeline_write_buffers = CollectPipelineWriteBuffers(original_order);
+    }
     Array<SBlock> scalar_binding_blocks;
     Array<SBlock> scheduled_order;
     std::vector<char> is_replayable_bind;
     is_replayable_bind.reserve(original_order.size());
     for (size_t i = 0; i < original_order.size(); ++i) {
       const SBlock &block = original_order[i];
-      const bool semantically_replayable =
-          IsReplayableScalarBindBlock(block, pipeline_write_buffers);
-      bool replayable = semantically_replayable;
-      if (replayable_bind_mask.defined()) {
-        replayable = !is_zero(replayable_bind_mask.value()[i]);
-        if (replayable && !semantically_replayable) {
-          const auto *bind = block->body.as<BindNode>();
-          ICHECK(bind != nullptr);
-          LOG(FATAL) << "PrimFunc " << global_symbol_ << " marks scalar Bind '"
-                     << bind->var << "' as replayable via "
-                     << kPipelineReplayableScalarBinds
-                     << ", but the Bind has an unsupported type, has side "
-                        "effects, or reads a buffer written by the pipeline "
-                        "and cannot be replayed safely";
-        }
-      }
+      bool replayable =
+          replayable_bind_mask.defined()
+              ? !is_zero(replayable_bind_mask.value()[i])
+              : IsReplayableScalarBindBlock(block, pipeline_write_buffers);
       is_replayable_bind.push_back(replayable ? 1 : 0);
       if (replayable) {
         scalar_binding_blocks.push_back(block);

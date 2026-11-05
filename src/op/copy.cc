@@ -8,7 +8,6 @@
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
-#include "span_utils.h"
 #include "support/check.h"
 #include "utils.h"
 #include <tvm/ir/cast.h>
@@ -21,7 +20,6 @@
 
 #include <limits>
 #include <sstream>
-#include <unordered_set>
 #include <vector>
 
 namespace tvm {
@@ -43,19 +41,12 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
     if (IsLocalBuffer(op.src) && !IsLocalBuffer(op.dst)) {
       // A conflict write only occurs when multiple threads write to the same
       // global address. If any dst_range dimension's min depends on the thread
-      // index, each thread targets a distinct location and there is no
-      // conflict. The thread index is an expression: collect the variables it
-      // uses by identity (the real threadIdx.x Var on GPU; none when it is a
-      // constant, e.g. 0 on CPU).
-      std::unordered_set<const VarNode *> thread_index_vars;
-      tirx::UsesVar(lower_args.thread_index, [&](const VarNode *v) {
-        thread_index_vars.insert(v);
-        return false;
-      });
+      // variable, each thread targets a distinct location and there is no
+      // conflict.
       bool dst_depends_on_thread = false;
       for (const auto &range : op.dst_range) {
         if (tirx::UsesVar(range->min, [&](const VarNode *v) {
-              return thread_index_vars.count(v) != 0;
+              return v == lower_args.thread_var.get();
             })) {
           dst_depends_on_thread = true;
           break;
@@ -78,42 +69,20 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
                          lower_args.thread_bounds,
                          lower_args.layout_map,
                          analyzer,
+                         false,
                          lower_args.buffer_remap,
                          {}},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(
-      par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-      /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+      par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
+      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
+      /*parallel_loop=*/true, /*should_vectorize=*/true,
+      par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 namespace {
-
-TileOperator ApplyCopyBlockAnnotations(TileOperator tile_op,
-                                       BlockAnnotations block_annotations) {
-  Copy copy = Downcast<Copy>(tile_op);
-
-  // Safe because this handler is invoked immediately after TLOpBuilder creates
-  // a fresh CopyNode, before the node escapes ParseOperator.
-  auto *node = const_cast<CopyNode *>(copy.operator->());
-  ICHECK(node != nullptr);
-
-  node->src_oob_safe_value = PrimExpr();
-  auto safe_value_map_obj = block_annotations.Get(attr::kSafeValueMap);
-  if (!safe_value_map_obj) {
-    return copy;
-  }
-
-  auto safe_value_map =
-      Downcast<Map<Var, PrimExpr>>(safe_value_map_obj.value());
-  auto it = safe_value_map.find(node->src->data);
-  if (it != safe_value_map.end()) {
-    node->src_oob_safe_value = (*it).second;
-  }
-  return copy;
-}
 
 std::vector<CopyImpl> &CopyImplRegistry() {
   static std::vector<CopyImpl> registry;
@@ -253,15 +222,17 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
                          lower_args.thread_bounds,
                          lower_args.layout_map,
                          analyzer,
+                         false,
                          lower_args.buffer_remap,
                          {}},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
   return LowerParallelLoop(
-      par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-      /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+      par_op->GetRoot(), loop_layout, lower_args.thread_var, analyzer,
+      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_var),
+      /*parallel_loop=*/true, /*should_vectorize=*/true,
+      par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 bool RegisterDefaultIm2Col() {
@@ -307,15 +278,6 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->SetAccessRegions({src_access, dst_access});
   // Copy annotations from the Call node
   node->annotations = annotations;
-  if (auto dst_block = node->annotations.Get("dst_block")) {
-    if (auto int_imm = dst_block->as<IntImmNode>()) {
-      if (int_imm->value != -1) {
-        node->dst_block = Integer(int_imm->value);
-      }
-    } else {
-      node->dst_block = Downcast<PrimExpr>(dst_block.value());
-    }
-  }
   data_ = std::move(node);
 }
 
@@ -390,7 +352,7 @@ Array<IterVar> CopyNode::MakeIterVars() const {
             << ", extent=" << base_ext << "\n";
         oss << "src_ranges[" << src_dim << "]: min=" << src_range[src_dim]->min
             << ", extent=" << src_ext << "\n";
-        LOG(FATAL) << oss.str() << SpanHintSuffix({dst->span, src->span});
+        LOG(FATAL) << oss.str();
       }
       ++base_dim;
       ++src_dim;
@@ -478,14 +440,14 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
 }
 
 // Constructs a SIMT-style nested loop that implements the copy.
-For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
+For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer,
+                           bool disable_safe_copy_predication) const {
   if (IsFP4UnpackLoad(src, dst)) {
     LOG(FATAL) << "SIMT copy from packed global float4_e2m1fn to unpacked "
                << "shared float4_e2m1_unpacked is not supported; use "
                << "T.tma_copy() for FP4 unpack loads (src=" << src->name
                << ", dst=" << dst->name << ").";
   }
-
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
 
@@ -504,21 +466,18 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
-  PrimExpr src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
-  PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
+  PrimExpr src_predicate;
+  PrimExpr dst_predicate;
+  if (!disable_safe_copy_predication) {
+    src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
+    dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
+  }
 
   PrimExpr value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
     value = Cast(dst->dtype, value);
-  if (src_predicate.defined()) {
-    PrimExpr safe_value = make_zero(src->dtype);
-    if (src_oob_safe_value.defined()) {
-      safe_value = src_oob_safe_value.value();
-    }
-    if (safe_value.dtype() != dst->dtype)
-      safe_value = Cast(dst->dtype, safe_value);
-    value = if_then_else(src_predicate, value, analyzer->Simplify(safe_value));
-  }
+  if (src_predicate.defined())
+    value = if_then_else(src_predicate, value, make_zero(dst->dtype));
 
   Stmt body = BufferStore(dst, value, dst_indices);
   if (dst_predicate.defined())
@@ -563,6 +522,7 @@ LayoutMap CopyNode::InferSIMTLayout(const LayoutInferArgs &layout_args,
   }
   return par_op_->InferLayout(layout_args, level);
 }
+
 // Lowers the copy operation by dispatching to the selected target
 // implementation.
 Stmt CopyNode::Lower(const LowerArgs &lower_args,
@@ -571,8 +531,8 @@ Stmt CopyNode::Lower(const LowerArgs &lower_args,
 }
 
 // Constructs an Im2ColOp node from call arguments.
-// args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding.
-// The CUDA-only eviction_policy hint rides in the annotations map.
+// args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
+// eviction_policy
 Im2ColOp::Im2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<Im2ColOpNode> node = make_object<Im2ColOpNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
@@ -588,11 +548,7 @@ Im2ColOp::Im2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->stride_ = args[5].as<IntImm>().value()->value;
   node->dilation_ = args[6].as<IntImm>().value()->value;
   node->padding_ = args[7].as<IntImm>().value()->value;
-  if (auto val = annotations.Get("eviction_policy")) {
-    const auto *int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "eviction_policy annotation must be IntImmNode";
-    node->eviction_policy_ = int_val->value;
-  }
+  node->eviction_policy_ = args[8].as<IntImm>().value()->value;
   node->annotations_ = annotations;
   data_ = std::move(node);
 }
@@ -610,12 +566,10 @@ Stmt Im2ColOpNode::Lower(const LowerArgs &lower_args,
 
 // Register the Copy operation with TVM's TIR system
 // This makes the copy operation available for use in TVM programs
-// - Takes 2 inputs (src_buffer, dst_buffer); options ride in annotations.
+// - Takes 5 inputs: src_buffer, dst_buffer, and annotation-driven options.
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
-    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
-                                            ApplyCopyBlockAnnotations)
-    .set_num_inputs(2)
+    .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -629,9 +583,7 @@ TVM_REGISTER_OP("tl.tileop.async_copy")
                                        IntImm(DataType::Int(32), 1));
                                return Copy(args, ann);
                              })
-    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
-                                            ApplyCopyBlockAnnotations)
-    .set_num_inputs(2)
+    .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -647,9 +599,7 @@ TVM_REGISTER_OP("tl.tileop.tma_copy")
                                        IntImm(DataType::Int(32), 1));
                                return Copy(args, ann);
                              })
-    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
-                                            ApplyCopyBlockAnnotations)
-    .set_num_inputs(2)
+    .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -662,11 +612,11 @@ LayoutMap Im2ColOpNode::InferLayout(const LayoutInferArgs &layout_args,
 // Register the Im2Col operation with TVM's TIR system
 // This operation performs im2col transformation for 2D convolutions using a
 // target-specific lowering.
-// - Takes 8 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride,
-// dilation, padding; the CUDA eviction_policy hint rides in annotations
+// - Takes 9 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride,
+// dilation, padding, eviction_policy
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Im2ColOp, im2col)
-    .set_num_inputs(8)
+    .set_num_inputs(9)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -679,7 +629,7 @@ TVM_REGISTER_OP("tl.tileop.c2d_im2col")
                                 Map<String, ObjectRef> annotations) {
                                return Im2ColOp(args, annotations);
                              })
-    .set_num_inputs(8)
+    .set_num_inputs(9)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

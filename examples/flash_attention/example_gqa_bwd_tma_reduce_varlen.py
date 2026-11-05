@@ -128,11 +128,8 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
 
             for i in T.Parallel(block_M):
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-                # NOTE(varlen): explicitly write 0 to padding positions; otherwise
-                # `lse` is auto-allocated via `out_idx` (torch.empty) and may
-                # contain NaN/Inf at padding rows, which later contaminates the
-                # backward pass through `T.exp2(... - lse)` and `0 * NaN = NaN`.
-                lse[bz, by, bx * block_M + i] = logsum[i] if bx * block_M + i < q_current_seqlen else T.cast(0, accum_dtype)
+                if bx * block_M + i < q_current_seqlen:
+                    lse[bz, by, bx * block_M + i] = logsum[i]
 
     return flash_fwd
 
@@ -181,11 +178,8 @@ def flashattn_bwd_preprocess(batch, heads, total_q, N_CTX, max_seq_len, dim_v):
             T.reduce_sum(acc, delta, 1)
 
             for i in T.Parallel(blk):
-                # NOTE(varlen): same reason as `lse` above -- `Delta` is
-                # auto-allocated as `torch.empty` and may carry NaN/Inf into the
-                # backward kernel's `(dsT - delta)` term, eventually poisoning
-                # `dK` via the GEMM that accumulates over the padded columns.
-                Delta[bz, bx, by * blk + i] = delta[i] if by * blk + i < q_current_seqlen else T.cast(0, accum_dtype)
+                if by * blk + i < q_current_seqlen:
+                    Delta[bz, bx, by * blk + i] = delta[i]
 
     return flash_bwd_prep
 

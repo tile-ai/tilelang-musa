@@ -18,11 +18,11 @@
 #include <utility>
 #include <vector>
 
-#include "cuda/op/builtin.h"
 #include "layout/layout.h"
 #include "multi_version_buffer_rewriter.h"
 #include "op/builtin.h"
 #include "op/operator.h"
+#include "op/region.h"
 #include "op/utils.h"
 #include "transform/common/pipeline_utils.h"
 
@@ -380,10 +380,10 @@ private:
 
       // Supplement with tile-op analysis.
       // GetSBlockAccessRegion misses buffer references that are encoded as
-      // tl.region Call args or as plain BufferLoad args whose
+      // tl.tileop.region Call args or as plain BufferLoad args whose
       // semantic role (read vs write) is only known to the tile-op.
       // Let the tile-op report its own access regions, and fall back to
-      // decoding tl.region args for any ops that still do not expose them.
+      // RegionOp scanning for any ops that still do not expose them.
       if (auto *eval = stmt.as<EvaluateNode>()) {
         if (auto *call = eval->value.as<CallNode>()) {
           auto tile_op = ParseOperator(GetRef<Call>(call));
@@ -395,13 +395,21 @@ private:
               stmt_writes.insert(stmt_writes.end(), access.writes.begin(),
                                  access.writes.end());
             } else {
-              // Fallback: decode tl.region-encoded args.
+              // Fallback: scan RegionOp-encoded args.
               for (const auto &arg : call->args) {
                 if (auto *region_call = arg.as<CallNode>()) {
-                  if (region_call->op.same_as(region())) {
-                    AppendAccessRegionByMask(
-                        NormalizeToAccessRegion(arg, kAccessReadWrite),
-                        &stmt_reads, &stmt_writes);
+                  if (region_call->op.same_as(RegionOp::Get())) {
+                    auto region_op = ParseOperator(GetRef<Call>(region_call));
+                    if (auto *rn = region_op.as<RegionOpNode>()) {
+                      int mask = rn->GetAccessMask();
+                      auto br = BufferRegion(rn->GetBuffer(), rn->GetRanges());
+                      if (mask & 1) { // read
+                        stmt_reads.push_back(br);
+                      }
+                      if (mask & 2) { // write
+                        stmt_writes.push_back(br);
+                      }
+                    }
                   }
                 }
               }
@@ -488,17 +496,13 @@ private:
     if (buffer.scope() == "shared.barrier") {
       // Barrier buffers: expand first dimension to keep 1D shape.
       // (1,) -> (num_versions,) so lower_shared_barrier.cc still works.
-      DataType shape_dtype = new_buffer->shape[0].dtype();
-      new_buffer->shape.Set(0, make_const(shape_dtype, num_versions) *
-                                   new_buffer->shape[0]);
+      new_buffer->shape.Set(0, PrimExpr(num_versions) * new_buffer->shape[0]);
     } else {
       new_buffer->shape.insert(new_buffer->shape.begin(),
                                PrimExpr(num_versions));
       if (!new_buffer->strides.empty()) {
         ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
-        DataType stride_dtype = new_buffer->shape[1].dtype();
-        PrimExpr stride_0 = tvm::cast(stride_dtype, new_buffer->strides[0]) *
-                            new_buffer->shape[1];
+        PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
         new_buffer->strides.insert(new_buffer->strides.begin(), stride_0);
       }
     }
@@ -714,26 +718,18 @@ private:
     EnsureVersionedBuffers(SelectVersionedBuffers(op->body, num_stages),
                            num_stages);
 
-    DataType pipeline_iter_dtype = op->loop_var.dtype();
-    PrimExpr linear_index =
-        tvm::cast(pipeline_iter_dtype, loop_stack_[0].first);
+    PrimExpr linear_index = loop_stack_[0].first;
     for (size_t i = 1; i < loop_stack_.size(); ++i) {
-      PrimExpr extent = tvm::cast(pipeline_iter_dtype, loop_stack_[i].second);
-      PrimExpr loop_var = tvm::cast(pipeline_iter_dtype, loop_stack_[i].first);
-      linear_index = linear_index * extent + loop_var;
+      linear_index =
+          linear_index * loop_stack_[i].second + loop_stack_[i].first;
     }
     PrimExpr old_version_index = version_index_;
     PrimExpr old_parity_cycle = parity_cycle_;
     Var old_pipeline_loop_var = pipeline_loop_var_;
     PrimExpr old_pipeline_loop_min = pipeline_loop_min_;
-    PrimExpr stages = make_const(linear_index.dtype(), num_stages);
-    PrimExpr stage_index =
-        tvm::cast(DataType::Int(32), FloorMod(linear_index, stages));
-    version_index_ = Call(DataType::Int(32), mvb_stage_index(), {stage_index});
+    version_index_ = FloorMod(linear_index, num_stages);
     // Parity cycles every num_stages iterations for mbarrier phase tracking.
-    PrimExpr two = make_const(linear_index.dtype(), 2);
-    parity_cycle_ = tvm::cast(DataType::Int(32),
-                              FloorMod(FloorDiv(linear_index, stages), two));
+    parity_cycle_ = FloorMod(FloorDiv(linear_index, num_stages), 2);
     // Store the pipelined loop variable and its min value so we can compute
     // the initial-phase offset of each mbarrier_wait_parity expression.
     pipeline_loop_var_ = op->loop_var;
@@ -764,10 +760,7 @@ private:
     n->buffer = new_buffer;
     if (old_buffer.scope() == "shared.barrier") {
       // Barrier: offset into expanded 1D array
-      DataType index_dtype = n->indices[0].dtype();
-      PrimExpr version = tvm::cast(index_dtype, version_index);
-      PrimExpr shape = tvm::cast(index_dtype, old_buffer->shape[0]);
-      n->indices.Set(0, version * shape + n->indices[0]);
+      n->indices.Set(0, version_index * old_buffer->shape[0] + n->indices[0]);
     } else {
       n->indices.insert(n->indices.begin(), version_index);
     }
@@ -788,10 +781,7 @@ private:
     auto *n = store.CopyOnWrite();
     n->buffer = new_buffer;
     if (old_buffer.scope() == "shared.barrier") {
-      DataType index_dtype = n->indices[0].dtype();
-      PrimExpr version = tvm::cast(index_dtype, version_index);
-      PrimExpr shape = tvm::cast(index_dtype, old_buffer->shape[0]);
-      n->indices.Set(0, version * shape + n->indices[0]);
+      n->indices.Set(0, version_index * old_buffer->shape[0] + n->indices[0]);
     } else {
       n->indices.insert(n->indices.begin(), version_index);
     }
@@ -803,19 +793,19 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
-    // Rewrite tl.region Calls for versioned buffers.
+    // Rewrite tl.tileop.region Calls for versioned buffers.
     // The region encoding is:
     //   region(BufferLoad(buf, [min_0, ..., min_N]), access_mask, ext_0, ...,
     //   ext_N)
     // After the recursive visit, VisitExpr_(BufferLoadNode*) prepends a
     // version_index to the BufferLoad indices, yielding [version_index,
     // min_0, ..., min_N].  We must also insert a matching extent (1) for the
-    // new leading dimension so that the region's ndim == indices.size()
+    // new leading dimension so that RegionOp's ndim == indices.size()
     // invariant is preserved.
     //
     // Detection: if the BufferLoad has more indices than the number of extent
     // args (args.size() - 2), a version index was prepended.
-    if (call->op.same_as(region()) && call->args.size() >= 2) {
+    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         size_t num_extents =
             call->args.size() - 2; // args = [load, mask, ext...]
@@ -857,15 +847,11 @@ private:
             init_orig = analyzer.Simplify(tirx::Substitute(init_orig, subst));
             init_cycle = analyzer.Simplify(tirx::Substitute(init_cycle, subst));
           }
-          DataType offset_dtype = init_orig.dtype();
-          PrimExpr init_delta = init_orig - tvm::cast(offset_dtype, init_cycle);
-          PrimExpr offset = analyzer.Simplify(
-              FloorMod(init_delta, make_const(init_delta.dtype(), 2)));
+          PrimExpr offset =
+              analyzer.Simplify(FloorMod(init_orig - init_cycle, 2));
           if (const int64_t *imm = as_const_int(offset)) {
             if (*imm % 2 != 0) {
-              PrimExpr one = make_const(parity_cycle.dtype(), 1);
-              PrimExpr two = make_const(parity_cycle.dtype(), 2);
-              new_parity = FloorMod(parity_cycle + one, two);
+              new_parity = FloorMod(parity_cycle + 1, 2);
             }
           }
           Array<PrimExpr> new_args = call->args;
@@ -879,12 +865,12 @@ private:
 
   PrimExpr RewriteBufferAccess(const Call &call,
                                const std::vector<int> &arg_indices) {
-    auto product = [](const Array<PrimExpr> &input, DataType dtype) {
-      PrimExpr result = make_const(dtype, 1);
-      for (const PrimExpr &expr : input) {
-        result = result * tvm::cast(dtype, expr);
-      }
-      return result;
+    auto product = [](const Array<PrimExpr> &input) {
+      return foldl(
+          [](PrimExpr a, PrimExpr b, Span span) {
+            return mul(std::move(a), std::move(b), std::move(span));
+          },
+          make_const(DataType::Int(32), 1), input);
     };
     Array<PrimExpr> new_args = call->args;
     for (int i : arg_indices) {
@@ -901,12 +887,11 @@ private:
         const PrimExpr &old_index = call->args[i + 1];
         PrimExpr offset;
         if (new_buffer->strides.empty()) {
-          offset = product(buffer->shape, old_index.dtype());
+          offset = product(buffer->shape);
         } else {
-          offset = tvm::cast(old_index.dtype(), new_buffer->strides[0]);
+          offset = new_buffer->strides[0];
         }
-        PrimExpr typed_version = tvm::cast(old_index.dtype(), version_index);
-        PrimExpr new_index = old_index + typed_version * offset;
+        PrimExpr new_index = old_index + version_index * offset;
         new_args.Set(i + 1, new_index);
       }
     }

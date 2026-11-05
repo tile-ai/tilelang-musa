@@ -1,7 +1,7 @@
 /*!
  * \file inject_assumes.cc
  * \brief Inject assumes on buffer's shape boundary check. Also convert
- * user-authored assumes to optimizer and runtime-check AttrNodes.
+ * existing assumes to AttrNodes.
  */
 
 #include "common/assume.h"
@@ -119,10 +119,10 @@ private:
       auto analyzer = arith::Analyzer{};
       for (const auto &e : items) {
         auto simplified =
-            analyzer.Simplify(GE(e.expr, make_zero(e.expr->dtype)));
+            analyzer.Simplify(GT(e.expr, make_zero(e.expr->dtype)));
         std::stringstream ss;
-        ss << "Buffer shape should be greater than or equal to 0: shape `"
-           << e.expr << "` from buffer ";
+        ss << "Buffer shape should be greater than 0: shape `" << e.expr
+           << "` from buffer ";
         for (size_t i = 0; i < e.buffers.size(); i++) {
           if (i)
             ss << ", ";
@@ -173,12 +173,14 @@ private:
       //    Stmt1
       //    Stmt2
       //    T.assume(cond2)
-      // Each user-authored assume is converted into two nested attributes:
-      // the outer runtime-check marker is consumed by MakePackedAPI, while the
-      // inner tilelang_assume remains available to optimization passes. Buffer
-      // shape/stride assumptions created by AssumeCreator intentionally do not
-      // receive the runtime-check marker because nullable buffers bind missing
-      // symbolic shapes to zero.
+      // This SeqStmt will be converted to:
+      //    With(attr::tilelang_assume, cond1) {
+      //      Stmt1
+      //      Stmt2
+      //    }
+      //    With(attr::tilelang_assume, cond2) {
+      //      ...
+      //    }
       if (auto e = GetAssumeExprInEvaluateForm(stmt)) {
         groups.push_back(AssumeGroup{*e, {}});
       } else {
@@ -191,12 +193,9 @@ private:
         Stmt body = g.stmts.size() == 1 ? g.stmts[0] : SeqStmt(g.stmts);
         std::stringstream ss;
         ss << "Assume: " << *(g.e);
-        StringImm message(ss.str());
-        body = AttrStmt(*g.e, tirx::attr::tilelang_assume, message,
-                        std::move(body));
-        body = AttrStmt(*g.e, tl::attr::kAssumeRequiresRuntimeCheck, message,
-                        std::move(body));
-        groups[i - 1].stmts.push_back(std::move(body));
+        AttrStmt attr = AttrStmt(*g.e, tirx::attr::tilelang_assume,
+                                 StringImm(ss.str()), body);
+        groups[i - 1].stmts.push_back(attr);
       } else {
         ICHECK(i == 0) << "only the first group can have no assume";
       }

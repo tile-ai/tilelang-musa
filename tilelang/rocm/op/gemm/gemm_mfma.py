@@ -69,9 +69,10 @@ class GemmMFMA(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
+        thread_var: tirx.Var,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
+        del mbar_phase_expr
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MFMA)
         warp_row_tiles = int(self.M // m_warp)
@@ -87,7 +88,7 @@ class GemmMFMA(GemmBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
-            thread_var=thread_index,
+            thread_var=thread_var,
             k_pack=self.k_pack,
             target=target,
         )

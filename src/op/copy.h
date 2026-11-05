@@ -11,6 +11,8 @@
 #include "parallel.h"
 #include "support/check.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <utility>
 
 namespace tvm {
@@ -31,22 +33,16 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
-  Optional<PrimExpr> dst_block;      // Destination block index for cluster copy
-  // Annotated source OOB fallback value resolved from the enclosing block.
-  Optional<PrimExpr> src_oob_safe_value;
   Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
   // Common SIMT annotation keys:
   //   - "coalesced_width": IntImm, width for coalesced memory access.
-  //   - "dst_block": PrimExpr, destination CTA rank for cluster copy.
   //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
   //     layout hint applied to the outermost generated parallel loop of this
   //     copy's SIMT loop nest.
 
   mutable ParallelOp par_op_; // Optional associated parallelization operator
 
-  // Non-final so dialects can extend the copy with typed backend state
-  // (e.g. AscendCopyNode in src/ascend/op/copy.h).
-  TVM_FFI_DECLARE_OBJECT_INFO("tl.Copy", CopyNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Copy", CopyNode, TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = reflection;
@@ -55,8 +51,6 @@ public:
         .def_ro("dst", &CopyNode::dst)
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
-        .def_ro("dst_block", &CopyNode::dst_block)
-        .def_ro("src_oob_safe_value", &CopyNode::src_oob_safe_value)
         .def_ro("annotations", &CopyNode::annotations);
   }
 
@@ -84,8 +78,11 @@ public:
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
+   * \param disable_safe_copy_predication Whether to omit automatic src/dst
+   *        safety predicates for this SIMT copy loop.
    */
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
+  For MakeSIMTLoop(arith::Analyzer *analyzer,
+                   bool disable_safe_copy_predication = false) const;
 
   /*!
    * \brief Create iterator variables for multi-dimensional copy loops.
@@ -184,7 +181,7 @@ public:
   int padding_;  // Padding amount
   int dilation_; // Dilation factor
   int kernel_;   // Kernel size
-  int eviction_policy_ = 0;            // Cache eviction policy (annotation)
+  int eviction_policy_;                // Cache eviction policy
   PrimExpr nhw_step_;                  // Step size in NHW dimensions
   PrimExpr c_step_;                    // Step size in channel dimension
   Map<String, ObjectRef> annotations_; // Annotations from Call node

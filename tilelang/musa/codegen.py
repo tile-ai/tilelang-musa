@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from tilelang.backend.device_codegen import DeviceCodegen, global_func_device_codegen
-
-
-_build_musa = global_func_device_codegen("target.build.musa")
-
-
-DEVICE_CODEGEN = DeviceCodegen(
+from tilelang.backend.device_codegen import DeviceCodegen, global_func_device_codegen, register_device_codegen
+register_device_codegen(
     "musa",
-    build=_build_musa,
-    build_without_compile=_build_musa,
+    DeviceCodegen(
+        "musa",
+        build=global_func_device_codegen("target.build.tilelang_musa"),
+        build_without_compile=global_func_device_codegen("target.build.tilelang_musa_without_compile"),
+    ),
+    override=True,
 )

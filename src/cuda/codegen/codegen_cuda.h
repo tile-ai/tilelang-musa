@@ -15,12 +15,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "backend/common/codegen/codegen_c_line_directives.h"
+#include "target/source/codegen_c.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangCUDA final : public CodeGenCWithLineDirectives {
+class CodeGenTileLangCUDA final : public CodeGenC {
 public:
   CodeGenTileLangCUDA();
   std::string Finish();
@@ -33,9 +33,8 @@ public:
                          std::ostream &os) final; // NOLINT(*)
   void PrintVecBinaryOp(const std::string &op, DataType t, PrimExpr lhs,
                         PrimExpr rhs,
-                        std::ostream &os) final;                // NOLINT(*)
-  void PrintType(DataType t, std::ostream &os) final;           // NOLINT(*)
-  void PrintVecConstructor(DataType t, std::ostream &os) final; // NOLINT(*)
+                        std::ostream &os) final;      // NOLINT(*)
+  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
   void PrintVecElemLoad(const std::string &vec, DataType t, int i,
                         std::ostream &os) final; // NOLINT(*)
   void PrintVecElemStore(const std::string &vec, DataType t, int i,
@@ -58,14 +57,11 @@ public:
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final;
   void VisitExpr_(const MinNode *op, std::ostream &os) final;
   void VisitExpr_(const MaxNode *op, std::ostream &os) final;
-  void VisitExpr_(const NotNode *op, std::ostream &os) final;
-  void VisitStmt_(const AssertStmtNode *op) final;
   void VisitStmt_(const EvaluateNode *op) final;
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
   void VisitStmt_(const BufferStoreNode *op) final;
-  void VisitExpr_(const SelectNode *op, std::ostream &os) final;
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const GlobalVar &gvar, const PrimFunc &f);
@@ -85,15 +81,6 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
-  // Emit a vector op of dtype t as lanes/2 packed x2 calls (tl::mul2,
-  // tl::fma2, ...). All args must already have dtype t; requires
-  // CanEmitPackedX2Math(t).
-  void EmitPackedX2Call(const std::string &tl_func, DataType t,
-                        const std::vector<PrimExpr> &args, std::ostream &os);
-  // Emit a vector op of dtype t as one scalar call per lane.
-  void EmitPerLaneScalarCall(const std::string &func_name, DataType t,
-                             const std::vector<PrimExpr> &args,
-                             std::ostream &os);
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
@@ -104,12 +91,6 @@ private:
   // Global curand state
   std::string curand_random_generator_state;
   std::string curand_random_generator_state_type;
-  // Function-scope curand state declarations: tl.rng_init call node -> var
-  // name. States are declared at kernel top (see AddFunction) because
-  // sync-insertion passes may split the block containing rng_init across
-  // __syncthreads(), which would put a call-site declaration out of scope
-  // for later rng_rand / rng_rand_float uses.
-  std::unordered_map<const CallNode *, std::string> rng_state_name_map_;
 
   // whether enable fp16
   bool enable_fp16_{false};
@@ -129,22 +110,10 @@ private:
   bool enable_warp_shuffle_{false};
   // whether need math_constants.h
   bool need_math_constants_h_{false};
-  // whether need tl CUDA math helpers
-  bool need_math_h_{false};
-  // whether need tl copy helpers
-  bool need_copy_h_{false};
-  // whether need tl SM90 TMA copy helpers
-  bool need_copy_sm90_h_{false};
-  // whether need tl SM100 TMA/tensor-memory copy helpers
-  bool need_copy_sm100_h_{false};
-  // whether need tl mbarrier helpers
-  bool need_barrier_h_{false};
   // whether need mma.h
   bool need_mma_h_{false};
   // whether need tl mma instruction header
   bool need_mma_instruction_h_{false};
-  // whether need tl block-scaled MMA instruction header
-  bool need_mma_block_scale_instruction_h_{false};
   // whether need tl wgmma instruction header
   bool need_wgmma_instruction_h_{false};
   // whether need tl tcgen05mma instruction header
@@ -157,10 +126,6 @@ private:
   bool need_wgmma_sp_instruction_h_{false};
   // whether need tcgen_05 common header
   bool need_tcgen05_common_h_{false};
-  // whether need tl runtime intrinsic helpers
-  bool need_intrin_h_{false};
-  // whether need tl atomic helpers
-  bool need_atomic_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
   // whether need cooperative_groups.h
@@ -190,9 +155,8 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
-  // Physical backing variable name for each packed local FP4 buffer.
-  std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
-      fp4_packed_buffers_;
+  // ffi::Map from VarNode to packed buffer variable name for fp4 packed storage
+  std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,

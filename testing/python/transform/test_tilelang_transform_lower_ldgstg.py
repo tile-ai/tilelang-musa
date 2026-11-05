@@ -41,7 +41,6 @@ def _check_has_intrinsic(mod, intrinsic_name):
     return found[0]
 
 
-@tilelang.testing.requires_cuda
 def test_lower_ldg32_default_off():
     """Test that non-predicated ldg/stg lowering is OFF by default."""
 
@@ -59,7 +58,6 @@ def test_lower_ldg32_default_off():
     assert not _check_has_intrinsic(mod, "stg32"), "Non-predicated stg should be OFF by default"
 
 
-@tilelang.testing.requires_cuda
 def test_lower_ldg32_enabled():
     """Test that ldg32/stg32 works when enabled."""
 
@@ -76,7 +74,6 @@ def test_lower_ldg32_enabled():
     assert _check_has_intrinsic(mod, "stg32"), "Expected stg32 when enabled"
 
 
-@tilelang.testing.requires_cuda
 def test_lower_ldg64_enabled():
     """Test that ldg64/stg64 works when enabled."""
 
@@ -94,7 +91,6 @@ def test_lower_ldg64_enabled():
     assert _check_has_intrinsic(mod, "stg64"), "Expected stg64 when enabled"
 
 
-@tilelang.testing.requires_cuda
 def test_lower_ldg128_enabled():
     """Test that ldg128/stg128 works when enabled."""
 
@@ -112,7 +108,6 @@ def test_lower_ldg128_enabled():
     assert _check_has_intrinsic(mod, "stg128"), "Expected stg128 when enabled"
 
 
-@tilelang.testing.requires_cuda
 def test_lower_ldg256_enabled():
     """Test that ldg256/stg256 works when enabled."""
 
@@ -130,7 +125,6 @@ def test_lower_ldg256_enabled():
     assert _check_has_intrinsic(mod, "stg256"), "Expected stg256 when enabled"
 
 
-@tilelang.testing.requires_cuda
 def test_lower_ldg32_predicated():
     """Test predicated ldg32 for single element load."""
 
@@ -147,7 +141,6 @@ def test_lower_ldg32_predicated():
     assert _check_has_intrinsic(mod, "ldg32"), "Expected predicated ldg32"
 
 
-@tilelang.testing.requires_cuda
 def test_lower_stg32_predicated():
     """Test predicated stg32 for single element store."""
 
@@ -165,7 +158,6 @@ def test_lower_stg32_predicated():
     assert _check_has_intrinsic(mod, "stg32"), "Expected predicated stg32"
 
 
-@tilelang.testing.requires_cuda
 def test_lower_ldg128_predicated():
     """Test predicated ldg128 for vectorized load."""
 
@@ -183,7 +175,6 @@ def test_lower_ldg128_predicated():
     assert _check_has_intrinsic(mod, "ldg128"), "Expected predicated ldg128"
 
 
-@tilelang.testing.requires_cuda
 def test_lower_stg128_predicated():
     """Test predicated stg128 for vectorized store."""
 
@@ -202,7 +193,6 @@ def test_lower_stg128_predicated():
     assert _check_has_intrinsic(mod, "stg128"), "Expected predicated stg128"
 
 
-@tilelang.testing.requires_cuda
 def test_predicated_store_with_load():
     """Test that when a predicated store contains a load, the load also gets predicated.
 
@@ -227,7 +217,6 @@ def test_predicated_store_with_load():
     assert _check_has_intrinsic(mod, "stg128"), "Expected predicated stg128"
 
 
-@tilelang.testing.requires_cuda
 def test_predicated_store_with_shared_load_keeps_explicit_guard():
     """Do not hoist shared-memory loads out of a predicated global store."""
 
@@ -255,7 +244,6 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
     assert not _check_has_intrinsic(mod, "stg128"), "Predicated stg128 would evaluate the shared load before the predicate"
 
 
-@tilelang.testing.requires_cuda
 def test_predicated_disabled():
     """Test that predicated lowering can be disabled."""
 
@@ -274,7 +262,6 @@ def test_predicated_disabled():
     # This just verifies the configuration works
 
 
-@tilelang.testing.requires_cuda
 def test_non_cuda_target_skip():
     """Test that the pass is skipped for non-CUDA targets."""
 
@@ -297,6 +284,40 @@ def test_non_cuda_target_skip():
     # The load should NOT be lowered to ldg because target is not CUDA
     assert not _check_has_intrinsic(mod, "ldg"), "Non-CUDA targets should NOT use ldg intrinsics"
     assert not _check_has_intrinsic(mod, "stg"), "Non-CUDA targets should NOT use stg intrinsics"
+
+
+def test_force_async_copy_scope_skip():
+    """force_async_copy scopes are consumed by async-copy lowering, not LDGSTG."""
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+        with T.attr(0, "tl.force_async_copy", 1):
+            for i in T.thread_binding(32, "threadIdx.x"):
+                for j in T.vectorized(4):
+                    B[i * 4 + j] = A[i * 4 + j]
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = _apply_passes(mod, enable_non_predicated=True)
+
+    assert not _check_has_intrinsic(mod, "ldg")
+    assert not _check_has_intrinsic(mod, "stg")
+
+
+def test_source_robust_desc_scope_skip():
+    """source_robust_desc scopes must preserve loads for robust async-copy lowering."""
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+        with T.attr(A.data, "tl.source_robust_desc", T.int32(1)):
+            for i in T.thread_binding(32, "threadIdx.x"):
+                for j in T.vectorized(4):
+                    B[i * 4 + j] = A[i * 4 + j]
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = _apply_passes(mod, enable_non_predicated=True)
+
+    assert not _check_has_intrinsic(mod, "ldg")
+    assert not _check_has_intrinsic(mod, "stg")
 
 
 @tilelang.testing.requires_cuda

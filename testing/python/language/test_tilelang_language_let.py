@@ -1,22 +1,30 @@
+import tilelang
 import tilelang.testing
-from tilelang import tvm as tvm
 from tilelang import language as T
 
 
-@tilelang.jit
-def test_kernel(
-    A: T.Tensor((16, 16), dtype=T.float32),
-):
-    for _blockIdx in T.thread_binding(1, thread="blockIdx.x"):
-        for _threadIdx in T.thread_binding(128, thread="threadIdx.x"):
-            b = A[0, 0:4]
-            A[0, 4:8] = b
+def _has_float4_variable(source: str, name: str) -> bool:
+    return f"float4 {name}" in source or f"tl_f4 {name}" in source
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
+def let_vectorize_load():
+    @T.prim_func
+    def main(A_ptr: T.handle):
+        A = T.match_buffer(A_ptr, (16, 16), dtype=T.float32, align=16)
+
+        for _blockIdx in T.thread_binding(1, thread="blockIdx.x"):
+            for _threadIdx in T.thread_binding(128, thread="threadIdx.x"):
+                b = A[0, 0:4]
+                A[0, 4:8] = b
+
+    return main
+
+
 def test_let_vectorize_load():
-    kernel_source = test_kernel.get_kernel_source()
-    assert "float4 b" in kernel_source
+    program = let_vectorize_load()
+    kernel = tilelang.compile(program, target="musa")
+    assert _has_float4_variable(kernel.get_kernel_source(), "b")
 
 
 @tilelang.jit

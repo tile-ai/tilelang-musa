@@ -1,5 +1,5 @@
 import tilelang
-import tilelang.cpu.language as T
+import tilelang.language as T
 
 
 def test_cpu_kernel_source_generation_with_while() -> None:

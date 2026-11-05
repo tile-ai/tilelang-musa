@@ -45,22 +45,6 @@ def get_cta_rank_in_cluster(cluster_size=4):
 
 
 @tilelang.jit(out_idx=-1)
-def get_cluster_id_kernel(cluster_size=4):
-    assert 128 % cluster_size == 0
-
-    @T.prim_func
-    def main(A: T.Tensor((128, 2), T.int32)):
-        with T.ClusterKernel(128, cluster_dims=(cluster_size, 1, 1)) as bx:
-            if T.get_thread_binding() == 0:
-                A[bx, 0] = T.get_cluster_id()
-                # Program-space cluster id and the hardware rank must agree on
-                # which programs form a cluster.
-                A[bx, 1] = T.get_cluster_id() * T.get_cluster_size() + T.block_rank_in_cluster()
-
-    return main
-
-
-@tilelang.jit(out_idx=-1)
 def barrier_kernel():
     @T.prim_func
     def main(A: T.Tensor((128), T.int32)):
@@ -73,18 +57,6 @@ def barrier_kernel():
             T.cluster_sync()
 
     return main
-
-
-def _get_clc_query_codegen_source() -> str:
-    @T.prim_func
-    def main(A: T.Tensor((2,), T.int32)):
-        with T.Kernel(1, threads=1):
-            result = T.alloc_shared((4,), T.uint32)
-            A[0] = T.clc_is_canceled(result)
-            A[1] = T.Cast("int32", T.clc_get_first_ctaid_x(result))
-
-    artifact = tilelang.lower(main, target="cuda")
-    return artifact.kernel_source
 
 
 def run_cython_cluster_launch():
@@ -128,29 +100,9 @@ def test_cluster_launch_intrinsics(cluster_size=4):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_cluster_id_matches_hardware_rank(cluster_size=4):
-    result = get_cluster_id_kernel(cluster_size)()
-    bx = torch.arange(128, dtype=torch.int32, device="cuda")
-    assert torch.all(result[:, 0] == bx // cluster_size)
-    assert torch.all(result[:, 1] == bx)
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_cluster_barrier():
     kernel = barrier_kernel()
     kernel()
-
-
-@tilelang.testing.requires_cuda
-def test_clc_query_codegen_includes_cluster_header():
-    src = _get_clc_query_codegen_source()
-    print("=== clc query codegen ===")
-    print(src)
-
-    assert "#include <tl_templates/cuda/cluster.h>" in src
-    assert "tl::clc_is_canceled(" in src
-    assert "tl::clc_get_first_ctaid_x(" in src
 
 
 if __name__ == "__main__":

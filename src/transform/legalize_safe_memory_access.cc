@@ -7,7 +7,6 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
-#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
@@ -40,61 +39,6 @@ int GetConstAccessMask(const PrimExpr &expr) {
 bool AccessMaskMayUse(const PrimExpr &expr, int required_mask) {
   return (GetConstAccessMask(expr) & required_mask) != 0;
 }
-
-// Extract a scalar lane from vector expressions used in bounds predicates.
-// This intentionally expands Ramp/Broadcast/Shuffle by structure instead of
-// using Shuffle::ExtractElement, because the arithmetic prover handles the
-// resulting scalar integer expressions more reliably.
-struct VectorLaneScalarizer : public ExprMutator {
-  explicit VectorLaneScalarizer(int lane) : lane_(lane) {}
-
-private:
-  int lane_;
-
-  PrimExpr VisitExpr_(const RampNode *op) final {
-    PrimExpr base = VisitExpr(op->base);
-    PrimExpr stride = VisitExpr(op->stride);
-    return base + stride * IntImm(stride.dtype(), lane_);
-  }
-
-  PrimExpr VisitExpr_(const BroadcastNode *op) final {
-    return VisitExpr(op->value);
-  }
-
-  PrimExpr VisitExpr_(const ShuffleNode *op) final {
-    ICHECK_LT(lane_, op->indices.size());
-    const int64_t *idx = as_const_int(op->indices[lane_]);
-    ICHECK(idx)
-        << "Vector condition scalarization requires constant Shuffle indices: "
-        << GetRef<Shuffle>(op);
-    int64_t src_lane = *idx;
-    for (const PrimExpr &vec : op->vectors) {
-      ICHECK(!vec.dtype().is_scalable_vector());
-      int lanes = vec.dtype().lanes();
-      if (src_lane < lanes) {
-        if (vec.dtype().is_scalar()) {
-          ICHECK_EQ(src_lane, 0);
-          return VisitExpr(vec);
-        }
-        return VectorLaneScalarizer(static_cast<int>(src_lane))(vec);
-      }
-      src_lane -= lanes;
-    }
-    ICHECK(false) << "Shuffle index out of range: " << GetRef<Shuffle>(op);
-    return PrimExpr();
-  }
-
-  PrimExpr VisitExpr_(const CastNode *op) final {
-    PrimExpr value = VisitExpr(op->value);
-    DataType dtype =
-        op->dtype.is_fixed_length_vector() ? op->dtype.element_of() : op->dtype;
-    if (value.dtype() == dtype) {
-      return value;
-    } else {
-      return Cast(dtype, value);
-    }
-  }
-};
 
 // SafeMemChecker for a BufferLoad/BufferStore node:
 // 1. Identify BufferLoad and BufferStore nodes.
@@ -177,40 +121,6 @@ struct SafeMemChecker : public StmtExprVisitor {
     return scope == "global";
   }
 
-  // Helper function to store a bounds predicate as scalar Bool(1) conditions.
-  void PushCondition(const PrimExpr &cond) {
-    if (cond.dtype().is_scalar()) {
-      ICHECK(cond.dtype() == DataType::Bool(1))
-          << "condition is not a boolean: " << cond;
-      PushScalarCondition(cond);
-      return;
-    }
-    PrimExpr simplified = analyzer_->Simplify(cond);
-    ICHECK(simplified.dtype().is_fixed_length_vector() &&
-           simplified.dtype().is_bool())
-        << "condition is not a fixed-length boolean vector: " << simplified;
-    int lanes = simplified.dtype().lanes();
-    for (int lane = 0; lane < lanes; lane++) {
-      PrimExpr scalar =
-          analyzer_->Simplify(VectorLaneScalarizer(lane)(simplified));
-      ICHECK(scalar.dtype() == DataType::Bool(1))
-          << "scalarized condition is not a boolean: " << scalar;
-      PushScalarCondition(scalar);
-    }
-  }
-
-  // Keep only predicates that still need a runtime guard.
-  void PushScalarCondition(const PrimExpr &cond) {
-    try {
-      if (analyzer_->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
-        return;
-      }
-    } catch (const std::exception &) {
-      // Keep the runtime guard if proving fails.
-    }
-    _conditions.push_back(cond);
-  }
-
   // Check each index against the buffer shape dimensions
   void CheckBufferIndices(const Buffer &buffer, const Array<PrimExpr> &indices,
                           bool is_load, bool throw_warning) {
@@ -285,7 +195,7 @@ struct SafeMemChecker : public StmtExprVisitor {
                        << "; Buffer name: " << buffer->name;
         }
         if (IsGlobalBuffer(buffer)) {
-          PushCondition(upper_bound_cond);
+          _conditions.push_back(upper_bound_cond);
         }
       }
       // Check if index >= 0 can be proven.
@@ -312,7 +222,7 @@ struct SafeMemChecker : public StmtExprVisitor {
                        << "; Buffer name: " << buffer->name;
         }
         if (IsGlobalBuffer(buffer)) {
-          PushCondition(lower_bound_cond);
+          _conditions.push_back(lower_bound_cond);
         }
       }
     }
@@ -403,15 +313,6 @@ private:
     }
 
     PrimExpr safe_value = GetSafeValue(fallback_ptr->base_load->buffer);
-    // Cast preserves the lane count, so vector-returning atomics need their
-    // scalar buffer fallback broadcast before any element-type conversion.
-    if (safe_value.dtype().lanes() != call.dtype().lanes()) {
-      ICHECK(safe_value.dtype().is_scalar() &&
-             call.dtype().is_fixed_length_vector())
-          << "Cannot adapt safe value " << safe_value << " with dtype "
-          << safe_value.dtype() << " to atomic return dtype " << call.dtype();
-      safe_value = Broadcast(safe_value, call.dtype().lanes());
-    }
     if (safe_value.dtype() != call.dtype()) {
       safe_value = Cast(call.dtype(), safe_value);
     }
@@ -447,17 +348,14 @@ private:
     }
 
     // For loading, we can always use safe value if the access is out of
-    // bounds. Flattening reverses the evaluation order of the legacy nested
-    // guards, so only do it when every condition is pure and total.
-    PrimExpr safe_value = GetSafeValue(load->buffer);
-    if (CanFlattenConditions(conditions)) {
-      return if_then_else(CombineConditions(conditions), load, safe_value);
+    // bounds
+    PrimExpr value = load;
+    for (auto cond : conditions) {
+      ICHECK(cond.dtype() == DataType::Bool(1))
+          << "condition is not a boolean: " << cond;
+      value = if_then_else(cond, value, GetSafeValue(load->buffer));
     }
-    PrimExpr guarded = load;
-    for (const PrimExpr &condition : conditions) {
-      guarded = if_then_else(condition, guarded, safe_value);
-    }
-    return guarded;
+    return value;
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -487,15 +385,11 @@ private:
     }
 
     // If a store is out of bounds, we skip the corresponding stmt directly.
-    if (CanFlattenConditions(conditions)) {
-      return IfThenElse(CombineConditions(conditions), store, Stmt(),
-                        store->span);
+    Stmt store_with_conditions = store;
+    for (auto cond : conditions) {
+      store_with_conditions = IfThenElse(cond, store_with_conditions);
     }
-    Stmt guarded = store;
-    for (const PrimExpr &condition : conditions) {
-      guarded = IfThenElse(condition, guarded, Stmt(), store->span);
-    }
-    return guarded;
+    return store_with_conditions;
   }
 
   // Recursively check Load/Store in the call arguments.
@@ -513,8 +407,7 @@ private:
   // Check if the call is an atomic operation
   bool IsAtomicOp(const Op &op) {
     return op == atomic_add_elem_op() || op == atomic_add_ret_elem_op() ||
-           op == atomic_addx2_elem_op() || op == atomic_addx2_ret_elem_op() ||
-           op == atomic_addx4_elem_op() || op == atomic_addx4_ret_elem_op() ||
+           op == atomic_addx2_elem_op() || op == atomic_addx4_elem_op() ||
            op == atomic_load_elem_op() || op == atomic_store_elem_op() ||
            op == atomic_max_elem_op() || op == atomic_max_ret_elem_op() ||
            op == atomic_min_elem_op() || op == atomic_min_ret_elem_op();
@@ -630,63 +523,12 @@ private:
     return src_info.base_load->buffer;
   }
 
-  bool CanFlattenConditions(const Array<PrimExpr> &conditions) {
-    for (const PrimExpr &condition : conditions) {
-      ICHECK(condition.dtype() == DataType::Bool(1))
-          << "Safe-memory condition must be a scalar boolean, but got "
-          << condition.dtype() << ": " << condition;
-
-      if (SideEffect(condition) > CallEffectKind::kPure) {
-        return false;
-      }
-
-      bool is_total = true;
-      PostOrderVisit(condition, [&](const ObjectRef &node) {
-        if (node.as<CallNode>() || node.as<BufferLoadNode>() ||
-            node.as<ProducerLoadNode>() || node.as<DivNode>() ||
-            node.as<ModNode>() || node.as<FloorDivNode>() ||
-            node.as<FloorModNode>()) {
-          is_total = false;
-        }
-      });
-      if (!is_total) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  PrimExpr CombineConditionsFrom(const Array<PrimExpr> &conditions, size_t i) {
-    if (i == conditions.size()) {
-      return PrimExpr();
-    }
-
-    PrimExpr condition = conditions[i];
-    bool implied = false;
-    try {
-      implied =
-          analyzer_->CanProve(condition, arith::ProofStrength::kSymbolicBound);
-    } catch (const std::exception &) {
-      // Keep the runtime guard if proving fails.
-    }
-    if (implied) {
-      return CombineConditionsFrom(conditions, i + 1);
-    }
-
-    With<arith::ConstraintContext> constraint(analyzer_, condition);
-    PrimExpr rest = CombineConditionsFrom(conditions, i + 1);
-    return rest.defined() ? tirx::And(condition, rest) : condition;
-  }
-
   PrimExpr CombineConditions(const Array<PrimExpr> &conditions) {
     ICHECK(!conditions.empty());
-    for (const PrimExpr &condition : conditions) {
-      ICHECK(condition.dtype() == DataType::Bool(1))
-          << "Safe-memory condition must be a scalar boolean, but got "
-          << condition.dtype() << ": " << condition;
+    PrimExpr combined = conditions[0];
+    for (size_t i = 1; i < conditions.size(); ++i) {
+      combined = tirx::And(combined, conditions[i]);
     }
-    PrimExpr combined = CombineConditionsFrom(conditions, 0);
-    ICHECK(combined.defined());
     return analyzer_->Simplify(combined);
   }
 
@@ -736,7 +578,7 @@ private:
 
     Stmt else_case = BufferStore(dst_info.base_load->buffer, safe_value,
                                  dst_info.base_load->indices);
-    return IfThenElse(combined, evaluate, else_case, evaluate->span);
+    return IfThenElse(combined, evaluate, else_case);
   }
 
   Stmt WrapEvaluateWithConditions(const Evaluate &evaluate,
@@ -746,8 +588,7 @@ private:
     }
     Stmt evaluate_with_conditions = evaluate;
     for (auto cond : conditions) {
-      evaluate_with_conditions =
-          IfThenElse(cond, evaluate_with_conditions, Stmt(), evaluate->span);
+      evaluate_with_conditions = IfThenElse(cond, evaluate_with_conditions);
     }
     return evaluate_with_conditions;
   }

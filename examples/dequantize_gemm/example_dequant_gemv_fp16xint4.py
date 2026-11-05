@@ -3,7 +3,7 @@ from tilelang import language as T
 from typing import Optional, Callable, Any
 import torch
 from tilelang import DataType
-from quantize import (
+from tilelang.quantize import (
     _tir_packed_int_to_int_convert,
 )
 
@@ -58,7 +58,7 @@ def dequantize_gemv(
     if fast_decoding is True:
         # Lazy import to decrease the startup time
         # as intrin registry may take a while to load
-        from quantize import get_lop3_intrin_group
+        from tilelang.quantize import get_lop3_intrin_group
 
         lop3_intrin_info = get_lop3_intrin_group(
             out_dtype=in_dtype,
@@ -199,7 +199,7 @@ def main() -> None:
     C = torch.zeros(M, N, dtype=getattr(torch, accum_dtype)).cuda()
 
     if fast_decoding:
-        from quantize.utils import interleave_weight
+        from tilelang.quantize.utils import interleave_weight
 
         qB = interleave_weight(qB, num_bits, in_dtype)
     kernel(A, qB, C)
@@ -261,7 +261,7 @@ def run_regression_perf():
     C = torch.zeros(M, N, dtype=getattr(torch, accum_dtype)).cuda()
 
     if fast_decoding:
-        from quantize.utils import interleave_weight
+        from tilelang.quantize.utils import interleave_weight
 
         qB = interleave_weight(qB, num_bits, in_dtype)
     kernel(A, qB, C)

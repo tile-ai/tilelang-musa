@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 /*!
  * \file merge_shared_memory_allocations.cc
  * \brief Each GPU kernel is allowed to have only one dynamic or static shared
@@ -15,6 +34,7 @@
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -24,12 +44,12 @@
 #include <unordered_set>
 #include <utility>
 
-#include "common/storage_size.h"
-#include "cuda/op/builtin.h"
+#include "../op/builtin.h"
+#include "../op/gemm.h"
+#include "backend/common/target_utils.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>
-#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -52,26 +72,6 @@ static bool IsStaticSharedMemory(Var buffer_var) {
       runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
   return storage_scope.rank == runtime::StorageRank::kShared &&
          storage_scope.tag.empty();
-}
-
-// Scalar packed NVFP4 stores two logical elements per byte, and its buffer
-// shapes are expressed in logical elements.  Storage sizing is handled by the
-// shared GetBufferStorageSizeBytes helper; the byte-offset -> logical-index
-// conversion below is the remaining NVFP4-specific piece of this pass.
-static bool IsPackedScalarFp4(DataType dtype) {
-  return dtype.is_float4_e2m1fn() && dtype.is_scalar();
-}
-
-static PrimExpr SharedByteOffsetToLogicalIndexOffset(PrimExpr byte_offset,
-                                                     DataType dtype) {
-  // buffer_byte_offsets_ stores byte offsets into the merged uint8 arena, but
-  // the non-alias rewrite still indexes the original typed buffer. Convert the
-  // byte offset back to that buffer's logical element index.  Packed scalar
-  // NVFP4 has two logical elements per byte.
-  if (IsPackedScalarFp4(dtype)) {
-    return byte_offset * make_const(byte_offset.dtype(), 2);
-  }
-  return indexdiv(byte_offset, dtype.bytes() * dtype.lanes());
 }
 
 /*!
@@ -351,7 +351,7 @@ private:
 
   // Wrapper function to determine if the shared memory allocation for a
   // variable is appropriate.
-  bool IsAppropriateSharedMemory(const Var &var) {
+  bool IsAppropriateSharedMemory(const Var &var) const {
     return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
   }
   // Whether do dynamic analysis.
@@ -396,28 +396,32 @@ private:
       return;
     auto scope = GetPtrStorageScope(GetRef<Var>(op));
     if (scope == "shared" || scope == "shared.dyn") {
-      // An explicit requirement recorded at lowering time is exact; keep it.
+      // Explicit requirements from lowering are exact and take precedence over
+      // the backend fallback below.
       if (explicit_alignment_map_->count(op))
         return;
-      // TMA bulk-copy and MMA-descriptor operands have stricter shared-memory
-      // alignment than ordinary shared accesses, and the exact requirement
-      // depends on the operand's swizzle mode (up to 1024B for 128B swizzle).
-      // Buffers without an explicit kSmemAlignmentMap entry get the worst
-      // case: a misaligned base is not a launch error but silent data
-      // corruption, so never under-align here.
+      auto target = Target::Current();
+      ICHECK(target.defined()) << "Target is not defined";
+      int alignment = TargetIsHopper(target) ? 1024 : 16;
+      if (swizzle_cycle_) {
+        alignment = swizzle_cycle_;
+      }
       int &slot = shmem_alignment_map_[op];
-      slot = std::max(slot, 1024);
+      slot = std::max(slot, alignment);
     }
   }
 
   void VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
+    if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
+        op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
         op->op.same_as(tl::initialize_wgmma_descriptor()) ||
         op->op.same_as(tl::initialize_tcgen05_descriptor())) {
       // These intrinsics introduce stricter SMEM alignment requirements; mark
       // the subtree.
       under_alignment_scope_ = true;
+      setSwizzleCycle_(op);
       StmtExprVisitor::VisitExpr_(op);
+      clearSwizzleCycle_();
       under_alignment_scope_ = false;
     } else {
       StmtExprVisitor::VisitExpr_(op);
@@ -440,6 +444,15 @@ private:
   }
 
   bool under_alignment_scope_{false};
+  int swizzle_cycle_{0};
+
+  void setSwizzleCycle_(const CallNode *op) {
+    if (TargetIsPH1(Target::Current()) && op->op.same_as(tl::tl_gemm())) {
+      swizzle_cycle_ = 4096;
+    }
+  }
+
+  void clearSwizzleCycle_() { swizzle_cycle_ = 0; }
 
   const std::unordered_map<const VarNode *, int> *explicit_alignment_map_{
       nullptr};
@@ -479,6 +492,7 @@ public:
     finder(stmt);
     shmem_alignment_map_ =
         SharedMemoryAlignmentPlanner::Plan(stmt, explicit_alignments);
+    CollectPH1SQMMAOperandPairs(stmt);
     if (disable_reuse) {
       this->PlanSequentialLayout();
     } else {
@@ -505,44 +519,6 @@ public:
   }
 
 private:
-  std::vector<Stmt> MakeAliasBindings() const {
-    struct AliasInfo {
-      const VarNode *var{nullptr};
-      PrimExpr byte_offset;
-    };
-
-    std::vector<AliasInfo> aliases;
-    aliases.reserve(buffer_byte_offsets_.size());
-    for (const auto &pair : buffer_byte_offsets_) {
-      if (shmem_allocs_.count(pair.first) == 0) {
-        continue;
-      }
-      aliases.push_back(AliasInfo{pair.first, pair.second});
-    }
-
-    std::sort(aliases.begin(), aliases.end(),
-              [](const AliasInfo &lhs, const AliasInfo &rhs) {
-                const auto *lhs_offset = lhs.byte_offset.as<IntImmNode>();
-                const auto *rhs_offset = rhs.byte_offset.as<IntImmNode>();
-                if (lhs_offset != nullptr && rhs_offset != nullptr &&
-                    lhs_offset->value != rhs_offset->value) {
-                  return lhs_offset->value < rhs_offset->value;
-                }
-                return lhs.var->name_hint < rhs.var->name_hint;
-              });
-
-    std::vector<Stmt> bindings;
-    bindings.reserve(aliases.size());
-    for (const AliasInfo &alias : aliases) {
-      Var buffer_var = GetRef<Var>(alias.var);
-      PrimExpr alias_ptr =
-          Call(DataType::Handle(), builtin::handle_add_byte_offset(),
-               {merged_buf_var_, alias.byte_offset});
-      bindings.push_back(tirx::Bind(buffer_var, alias_ptr));
-    }
-    return bindings;
-  }
-
   /*!
    * \brief Lay out all shared memory buffers sequentially without any reuse.
    * Each buffer gets its own dedicated region in the merged allocation.
@@ -572,7 +548,25 @@ private:
 
     for (const VarNode *var : sorted_vars) {
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
+      int64_t bytes_per_elem = static_cast<int64_t>(
+          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
+
+      DataType size_dtype = DataType::Int(32);
+      if (!alloc->buffer->shape.empty()) {
+        size_dtype = alloc->buffer->shape[0].dtype();
+      }
+      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
+        size_dtype = DataType::Int(32);
+      }
+
+      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
+      for (const PrimExpr &extent : alloc->buffer->shape) {
+        PrimExpr e = extent;
+        if (e.dtype() != size_dtype) {
+          e = cast(size_dtype, e);
+        }
+        size_expr = size_expr * e;
+      }
 
       int alignment = align_bytes_;
       auto align_it = shmem_alignment_map_.find(var);
@@ -593,6 +587,52 @@ private:
     merged_alloc_size_ = AlignPrimExpr(total_size, align_bytes_);
   }
 
+  Stmt MakeAliasBindings(Stmt body) const {
+    struct AliasInfo {
+      const VarNode *var{nullptr};
+      PrimExpr byte_offset;
+    };
+
+    std::vector<AliasInfo> aliases;
+    aliases.reserve(buffer_byte_offsets_.size());
+    for (const auto &pair : buffer_byte_offsets_) {
+      if (shmem_allocs_.count(pair.first) == 0) {
+        continue;
+      }
+      aliases.push_back(AliasInfo{pair.first, pair.second});
+    }
+
+    std::sort(aliases.begin(), aliases.end(),
+              [](const AliasInfo &lhs, const AliasInfo &rhs) {
+                const auto *lhs_offset = lhs.byte_offset.as<IntImmNode>();
+                const auto *rhs_offset = rhs.byte_offset.as<IntImmNode>();
+                if (lhs_offset != nullptr && rhs_offset != nullptr &&
+                    lhs_offset->value != rhs_offset->value) {
+                  return lhs_offset->value < rhs_offset->value;
+                }
+                return lhs.var->name_hint < rhs.var->name_hint;
+              });
+
+    if (aliases.empty()) {
+      return body;
+    }
+
+    Array<Stmt> seq;
+    for (const AliasInfo &alias : aliases) {
+      Var buffer_var = tvm::ffi::GetRef<Var>(alias.var);
+      PrimExpr alias_ptr =
+          Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+               {merged_buf_var_, alias.byte_offset});
+      seq.push_back(Bind(buffer_var, alias_ptr));
+    }
+    if (const auto *body_seq = body.as<SeqStmtNode>()) {
+      seq.insert(seq.end(), body_seq->seq.begin(), body_seq->seq.end());
+    } else {
+      seq.push_back(body);
+    }
+    return SeqStmt(seq);
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent && !allocated_) {
       // Allocate one dynamic shared memory allocation at the beginning of
@@ -611,8 +651,9 @@ private:
           auto alloc_it = shmem_allocs_.find(buffer_var_node);
           if (alloc_it != shmem_allocs_.end()) {
             const AllocBufferNode *alloc = alloc_it->second;
-            PrimExpr buffer_size_bytes =
-                GetBufferStorageSizeBytes(alloc->buffer);
+            PrimExpr buffer_size_bytes = alloc->buffer->shape[0] *
+                                         alloc->buffer->dtype.bytes() *
+                                         alloc->buffer->dtype.lanes();
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
                        << " (Type: " << alloc->buffer->dtype << ")"
                        << ", Start Offset: " << byte_offset
@@ -629,17 +670,19 @@ private:
       }
 
       allocated_ = true;
+      Stmt visited_body = StmtExprMutator::VisitStmt(op->body);
+      if (preserve_aliases_) {
+        visited_body = MakeAliasBindings(std::move(visited_body));
+      }
       Buffer merged_buf(merged_buf_var_, DataType::UInt(8),
                         {merged_alloc_size_}, {}, PrimExpr(),
                         merged_buf_var_->name_hint, 0, 0, kDefault);
-      Array<Stmt> seq;
-      seq.push_back(AllocBuffer(merged_buf));
-      if (preserve_aliases_) {
-        for (const Stmt &alias_binding : MakeAliasBindings()) {
-          seq.push_back(alias_binding);
-        }
+      Array<Stmt> seq{AllocBuffer(merged_buf)};
+      if (const auto *body_seq = visited_body.as<SeqStmtNode>()) {
+        seq.insert(seq.end(), body_seq->seq.begin(), body_seq->seq.end());
+      } else {
+        seq.push_back(visited_body);
       }
-      seq.push_back(StmtExprMutator::VisitStmt(op->body));
       Stmt new_body = SeqStmt(seq);
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);
     }
@@ -795,7 +838,7 @@ private:
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
-    return SharedByteOffsetToLogicalIndexOffset(it->second, dtype);
+    return indexdiv(it->second, dtype.bytes() * dtype.lanes());
   }
 
   bool HasBufferOffset(const Var &buffer_var) {
@@ -809,7 +852,7 @@ private:
 
   // Wrapper function to determine if the shared memory allocation for a
   // variable is appropriate.
-  bool IsAppropriateSharedMemory(const Var &var) {
+  bool IsAppropriateSharedMemory(const Var &var) const {
     return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
   }
 
@@ -826,6 +869,7 @@ private:
     int alignment{0};                        // required byte alignment.
     int start{0}; // first statement index touching the buf.
     int end{0};   // one-past-last statement index.
+    int priority{1};
     DataType size_dtype{DataType::Int(32)};
   };
 
@@ -835,6 +879,7 @@ private:
     int end{0};
     size_t size_bytes{0};
     int alignment{0};
+    int priority{1};
     const VarNode *var{nullptr};
   };
 
@@ -988,6 +1033,9 @@ private:
                 if (lhs.start != rhs.start) {
                   return lhs.start < rhs.start;
                 }
+                if (lhs.priority != rhs.priority) {
+                  return lhs.priority < rhs.priority;
+                }
                 if (lhs.size_bytes != rhs.size_bytes) {
                   return lhs.size_bytes > rhs.size_bytes;
                 }
@@ -1058,6 +1106,142 @@ private:
     // variables we kill
     std::vector<const VarNode *> kill;
   };
+
+  void PlanAlignment(const Stmt &stmt) {
+    DLOG(INFO) << "PlanAlignment";
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(tl::tl_gemm()) ||
+            call->op.same_as(tl::tl_gemm_sp())) {
+          DLOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: "
+                     << call->op;
+        }
+      }
+    });
+  }
+
+  bool IsPH1SQMMAEnabled() const {
+    auto target = Target::Current();
+    if (!target.defined() || !TargetIsPH1(target)) {
+      return false;
+    }
+    auto pass_ctx = tvm::transform::PassContext::Current();
+    return !pass_ctx->GetConfig<Bool>(kDisableSQMMA, Bool(false)).value();
+  }
+
+  void CollectPH1SQMMAOperandPairs(const Stmt &stmt) {
+    ph1_sqmma_b_operands_.clear();
+    ph1_sqmma_operand_pairs_.clear();
+    if (!IsPH1SQMMAEnabled()) {
+      return;
+    }
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      if (call->op.same_as(tl::tl_gemm())) {
+        CollectLoweredPH1SQMMAOperandPair(call);
+        return;
+      }
+      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      if (!tile_op.defined()) {
+        return;
+      }
+      const auto *gemm = tile_op.as<GemmNode>();
+      if (gemm == nullptr || !IsAppropriateSharedMemory(gemm->a_->data) ||
+          !IsAppropriateSharedMemory(gemm->b_->data)) {
+        return;
+      }
+      const VarNode *a_var = gemm->a_->data.get();
+      const VarNode *b_var = gemm->b_->data.get();
+      ph1_sqmma_b_operands_.insert(b_var);
+      ph1_sqmma_operand_pairs_.push_back({a_var, b_var});
+    });
+  }
+
+  static std::string Trim(const std::string &value) {
+    size_t begin = value.find_first_not_of(" \t");
+    if (begin == std::string::npos) {
+      return "";
+    }
+    size_t end = value.find_last_not_of(" \t");
+    return value.substr(begin, end - begin + 1);
+  }
+
+  static bool IsLoweredPH1SQMMAGemmSS(const std::string &callee) {
+    constexpr const char *prefix = "tl::gemm_ss<";
+    if (callee.rfind(prefix, 0) != 0 || callee.back() != '>') {
+      return false;
+    }
+    std::string args = callee.substr(std::strlen(prefix),
+                                     callee.size() - std::strlen(prefix) - 1);
+    std::vector<std::string> fields;
+    std::stringstream ss(args);
+    std::string field;
+    while (std::getline(ss, field, ',')) {
+      fields.push_back(Trim(field));
+    }
+    // use_sqmma is the 13th template argument:
+    // M,N,K,num_warp_m,num_warp_n,transA,transB,clear,lda,ldb,offsetA,offsetB,use_sqmma
+    return fields.size() > 12 && fields[12] == "true";
+  }
+
+  const VarNode *ExtractAccessPtrBuffer(const PrimExpr &expr) const {
+    const auto *call = expr.as<CallNode>();
+    if (call == nullptr || !call->op.same_as(builtin::tvm_access_ptr()) ||
+        call->args.size() < 2) {
+      return nullptr;
+    }
+    const auto *var = call->args[1].as<VarNode>();
+    if (var == nullptr ||
+        !IsAppropriateSharedMemory(tvm::ffi::GetRef<Var>(var))) {
+      return nullptr;
+    }
+    return var;
+  }
+
+  void CollectLoweredPH1SQMMAOperandPair(const CallNode *call) {
+    if (call->args.size() < 3) {
+      return;
+    }
+    const auto *callee = call->args[0].as<StringImmNode>();
+    if (callee == nullptr || !IsLoweredPH1SQMMAGemmSS(callee->value)) {
+      return;
+    }
+    const VarNode *a_var = ExtractAccessPtrBuffer(call->args[1]);
+    const VarNode *b_var = ExtractAccessPtrBuffer(call->args[2]);
+    if (a_var == nullptr || b_var == nullptr) {
+      return;
+    }
+    ph1_sqmma_b_operands_.insert(b_var);
+    ph1_sqmma_operand_pairs_.push_back({a_var, b_var});
+  }
+
+  void ApplyPH1SQMMAOperandPriority(std::vector<BufInfo> *buf_infos) const {
+    if (ph1_sqmma_operand_pairs_.empty()) {
+      return;
+    }
+    std::unordered_map<const VarNode *, size_t> index_by_var;
+    for (size_t i = 0; i < buf_infos->size(); ++i) {
+      index_by_var[(*buf_infos)[i].var] = i;
+      if (ph1_sqmma_b_operands_.count((*buf_infos)[i].var)) {
+        (*buf_infos)[i].priority = 0;
+      }
+    }
+
+    for (const auto &[a_var, b_var] : ph1_sqmma_operand_pairs_) {
+      auto a_it = index_by_var.find(a_var);
+      auto b_it = index_by_var.find(b_var);
+      if (a_it == index_by_var.end() || b_it == index_by_var.end()) {
+        continue;
+      }
+      BufInfo &a_info = (*buf_infos)[a_it->second];
+      BufInfo &b_info = (*buf_infos)[b_it->second];
+      b_info.start = std::min(b_info.start, a_info.start);
+      b_info.end = std::max(b_info.end, a_info.start + 1);
+    }
+  }
 
   /*!
    * \brief Liveness analysis to find gen and kill point of each variable.
@@ -1166,17 +1350,6 @@ private:
       }
     }
 
-    // Pending kill insertions are deferred until after the per-event loop
-    // below: ``event_map_[last_stmt_at_level].kill.push_back(...)`` may
-    // target the very same vector we are currently iterating, in which case
-    // the push_back can reallocate the underlying storage and invalidate
-    // ``it``. MSVC's debug iterator verification catches this on the next
-    // ``it != event.kill.end()`` check ("vector iterators incompatible");
-    // release builds silently dereference freed memory. Buffering the
-    // push-backs and applying them later removes the aliasing entirely.
-    std::vector<std::pair<const Object *, const VarNode *>>
-        pending_kill_inserts;
-
     for (auto &event_pair : event_map_) {
       const Object *stmt = event_pair.first;
       EventEntry &event = event_pair.second;
@@ -1237,22 +1410,13 @@ private:
             }
           }
           if (last_stmt_at_level) {
-            // Defer: pushing into event.kill (the vector ``it`` iterates) or
-            // into any other event.kill while the outer ``event_map_`` range
-            // loop is live can invalidate iterators / dangling references.
-            pending_kill_inserts.emplace_back(last_stmt_at_level, buffer);
+            event_map_[last_stmt_at_level].kill.push_back(buffer);
             visited_buffers.insert(buffer);
           }
         } else {
           ++it;
         }
       }
-    }
-
-    // Apply deferred kill insertions now that no iterator into ``event_map_``
-    // / ``event.kill`` is live.
-    for (const auto &insert : pending_kill_inserts) {
-      event_map_[insert.first].kill.push_back(insert.second);
     }
 
     std::vector<const Object *> stmt_keys;
@@ -1389,24 +1553,44 @@ private:
       }
 
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
-      info.size_dtype = size_expr.dtype();
+      int64_t bytes_per_elem = static_cast<int64_t>(
+          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
+      DataType size_dtype = DataType::Int(32);
+      if (!alloc->buffer->shape.empty()) {
+        size_dtype = alloc->buffer->shape[0].dtype();
+      }
+      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
+        size_dtype = DataType::Int(32);
+      }
+
+      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
+      for (const PrimExpr &extent : alloc->buffer->shape) {
+        PrimExpr e = extent;
+        if (e.dtype() != size_dtype) {
+          e = cast(size_dtype, e);
+        }
+        size_expr = size_expr * e;
+      }
+      info.size_dtype = size_dtype;
       info.size_expr = size_expr;
 
       auto const_size = GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
       if (const_size.has_value()) {
-        info.const_size_bytes = GetBufferStorageSizeBytes(
-            static_cast<int64_t>(const_size.value()), alloc->buffer->dtype);
+        info.const_size_bytes = const_size.value() * bytes_per_elem;
       }
 
       buf_infos.push_back(std::move(info));
     }
+
+    ApplyPH1SQMMAOperandPriority(&buf_infos);
 
     // Stable order so the later passes have deterministic behaviour.
     std::sort(buf_infos.begin(), buf_infos.end(),
               [](const BufInfo &a, const BufInfo &b) {
                 if (a.start != b.start)
                   return a.start < b.start;
+                if (a.priority != b.priority)
+                  return a.priority < b.priority;
                 if (a.end != b.end)
                   return a.end < b.end;
                 return a.name < b.name;
@@ -1425,6 +1609,7 @@ private:
       interval.size_bytes = static_cast<size_t>(
           std::max<int64_t>(0, info.const_size_bytes.value()));
       interval.alignment = info.alignment;
+      interval.priority = info.priority;
       interval.var = info.var;
       intervals.push_back(interval);
     }
@@ -1567,6 +1752,9 @@ private:
   std::unordered_map<const Object *, EventEntry> event_map_;
   // The mapping of buffer bytes alignment
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
+  std::unordered_set<const VarNode *> ph1_sqmma_b_operands_;
+  std::vector<std::pair<const VarNode *, const VarNode *>>
+      ph1_sqmma_operand_pairs_;
   // Whether to preserve original buffer vars as handle aliases of the merged
   // allocation. Some backends, such as WebGPU, cannot print handle-valued Bind
   // nodes and use the direct merged-buffer rewrite path instead.

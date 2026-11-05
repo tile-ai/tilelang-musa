@@ -19,26 +19,10 @@
 
 #ifdef __CUDACC_RTC__
 
-// Disable problematic CUDA standard library headers in NVRTC environment.
-// Vector types (float4, uchar, etc.) are built-in to NVRTC and don't need
-// these headers. CCCL renamed the include guard between releases:
-//   * libcudacxx (CUDA <=12): _LIBCUDACXX___TUPLE_VECTOR_TYPES_H
-//   * CCCL (CUDA 13+):        _CUDA_STD___TUPLE_VECTOR_TYPES_H  (header now
-//                             lives at
-//                             cccl/cuda/std/__tuple_dir/vector_types.h)
-// Define both so the inclusion is suppressed regardless of toolkit version.
-#define _LIBCUDACXX___TUPLE_VECTOR_TYPES_H
-#define _CUDA_STD___TUPLE_VECTOR_TYPES_H
-
-// CUDA 13+ CCCL ships ``cuda/std/__tuple_dir/structured_bindings.h`` which
-// forward-declares ``std::tuple_size<class _Tp>`` / ``std::tuple_element<...>``
-// using a single-type parameter. Cutlass's ``cute/container/tuple.hpp``
-// independently forward-declares the same names with variadic packs under
-// ``__CUDACC_RTC__``, producing an ODR template-parameter mismatch. By
-// predefining CCCL's include guard before any cute header is parsed, CCCL's
-// header becomes a no-op and cute's variadic declarations win — cute is what
-// the kernel templates rely on under NVRTC.
-#define _CUDA_STD___TUPLE_STRUCTURED_BINDINGS_H
+// Disable problematic CUDA standard library headers in NVRTC environment
+// Vector types (float4, uchar, etc.) are built-in to NVRTC and don't need these
+// headers
+#define _LIBCUDACXX___TUPLE_VECTOR_TYPES_H // Prevent vector_types.h inclusion
 
 using int8_t = signed char;
 using uint8_t = unsigned char;
@@ -87,33 +71,6 @@ template <class T> struct is_same<T, T> : true_type {};
 
 template <class T, class U>
 inline constexpr bool is_same_v = is_same<T, U>::value;
-
-template <class T> struct is_integral : false_type {};
-
-template <> struct is_integral<bool> : true_type {};
-template <> struct is_integral<char> : true_type {};
-template <> struct is_integral<signed char> : true_type {};
-template <> struct is_integral<unsigned char> : true_type {};
-template <> struct is_integral<wchar_t> : true_type {};
-template <> struct is_integral<char16_t> : true_type {};
-template <> struct is_integral<char32_t> : true_type {};
-#ifdef __cpp_char8_t
-template <> struct is_integral<char8_t> : true_type {};
-#endif
-template <> struct is_integral<short> : true_type {};
-template <> struct is_integral<unsigned short> : true_type {};
-template <> struct is_integral<int> : true_type {};
-template <> struct is_integral<unsigned int> : true_type {};
-template <> struct is_integral<long> : true_type {};
-template <> struct is_integral<unsigned long> : true_type {};
-template <> struct is_integral<long long> : true_type {};
-template <> struct is_integral<unsigned long long> : true_type {};
-
-template <class T> struct is_integral<const T> : is_integral<T> {};
-template <class T> struct is_integral<volatile T> : is_integral<T> {};
-template <class T> struct is_integral<const volatile T> : is_integral<T> {};
-
-template <class T> inline constexpr bool is_integral_v = is_integral<T>::value;
 
 template <class T> struct is_void : false_type {};
 

@@ -6,11 +6,10 @@
 #include "op/gemm.h"
 #include "support/check.h"
 
-#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
+#include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
-#include "span_utils.h"
 
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -69,11 +68,12 @@ bool CheckWGMMA(const GemmSPNode &op) {
 
 // TODO @botbw: support tcgen5mma.sp for sparse inputs when it's available
 bool AllowTcgen5Mma(const GemmSPNode &op, Target target) {
-  bool scope_ok = (IsSharedBuffer(op.A) || IsTmemBuffer(op.A)) &&
-                  IsSharedBuffer(op.B) && IsTmemBuffer(op.C);
+  bool scope_ok = (IsSharedBuffer(op.A) || op.A.scope() == "shared.tmem") &&
+                  IsSharedBuffer(op.B) && op.C.scope() == "shared.tmem";
   if (!TargetIsSm100(target) || !scope_ok)
     return false;
-  DataType ab_dtype = IsTmemBuffer(op.A) ? op.B->dtype : op.A->dtype;
+  DataType ab_dtype =
+      (op.A.scope() == "shared.tmem") ? op.B->dtype : op.A->dtype;
   return GetTCGEN5MMAMeta(op.M, op.N, op.K, ab_dtype, op.C->dtype).first;
 }
 
@@ -94,22 +94,18 @@ void FatalWgmmaUnavailable(const GemmSPNode &op, Target target) {
              << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
              << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
              << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
-             << ", K=" << op.K << "."
-             << SpanHintSuffix({op.A->span, op.B->span, op.C->span});
+             << ", K=" << op.K << ".";
 }
 
 void FatalTcgen5Unavailable(const GemmSPNode &op, Target target) {
-  LOG(FATAL) << "T.tcgen05_gemm_sp() requires Blackwell TCGEN5MMA sparse "
-                "lowering, but sparse TCGEN5MMA lowering is not yet available. "
-                "Got target="
-             << target << ", A(scope=" << op.A.scope()
-             << ", dtype=" << op.A->dtype << "), E(scope=" << op.E.scope()
-             << ", dtype=" << op.E->dtype << "), B(scope=" << op.B.scope()
-             << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
-             << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
-             << ", K=" << op.K << "."
-             << SpanHintSuffix(
-                    {op.A->span, op.E->span, op.B->span, op.C->span});
+  LOG(FATAL) << "tcgen5";
+  //   LOG(FATAL) << "T.tcgen05_gemm() requires Blackwell TCGEN5MMA lowering, "
+  //                 "but constraints were not satisfied. Got target="
+  //              << target << ", A(scope=" << op.A.scope()
+  //              << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
+  //              << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
+  //              << ", dtype=" << op.C->dtype << "), M=" << op.M
+  //              << ", N=" << op.N << ", K=" << op.K << ".";
 }
 
 std::pair<int, int>

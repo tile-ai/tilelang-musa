@@ -14,14 +14,6 @@
 
 #include "layout.h"
 
-#if defined(_MSC_VER)
-#define TILELANG_COMPILER_UNREACHABLE() __assume(0)
-#elif defined(__GNUC__) || defined(__clang__)
-#define TILELANG_COMPILER_UNREACHABLE() __builtin_unreachable()
-#else
-#define TILELANG_COMPILER_UNREACHABLE() ((void)0)
-#endif
-
 namespace tvm {
 namespace tl {
 
@@ -33,12 +25,39 @@ IterVar MakeIterVar(std::string name, PrimExpr dom) {
   return IterVar(Range(0, dom), var, IterVarType::kDataPar);
 }
 
-Fragment makeGemmFragment8x4() {
+Fragment MakeGemmFragment4x8() {
+  IterVar i = MakeIterVar("i", 4);
+  IterVar j = MakeIterVar("j", 8);
+  IterVar rep = MakeIterVar("rep", 1);
+  PrimExpr forward_thread = FloorDiv(j->var, 1) + 8 * i;
+  PrimExpr index = FloorMod(j->var, 1);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment MakeGemmFragment8x4() {
   IterVar i = MakeIterVar("i", 8);
   IterVar j = MakeIterVar("j", 4);
   IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(j->var, 1) + 4 * i;
   PrimExpr index = FloorMod(j->var, 1);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment MakeGemmFragment2x16() {
+  IterVar i = MakeIterVar("i", 2);
+  IterVar j = MakeIterVar("j", 16);
+  IterVar rep = MakeIterVar("rep", 1);
+  PrimExpr forward_thread = FloorDiv(j->var, 1) + 16 * i;
+  PrimExpr index = FloorMod(j->var, 1);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment MakeGemmFragment4x16() {
+  IterVar i = MakeIterVar("i", 4);
+  IterVar j = MakeIterVar("j", 16);
+  IterVar rep = MakeIterVar("rep", 1);
+  PrimExpr forward_thread = FloorDiv(j->var, 2) + 8 * i;
+  PrimExpr index = FloorMod(j->var, 2);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
@@ -51,12 +70,30 @@ Fragment MakeGemmFragment8x8() {
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragment8x16() {
+Fragment MakeGemmFragment8x16() {
   IterVar i = MakeIterVar("i", 8);
   IterVar j = MakeIterVar("j", 16);
   IterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(j->var, 4) + 4 * i;
   PrimExpr index = FloorMod(j->var, 4);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment MakeGemmFragment8x4Transposed() {
+  IterVar i = MakeIterVar("i", 8);
+  IterVar j = MakeIterVar("j", 4);
+  IterVar rep = MakeIterVar("rep", 1);
+  PrimExpr forward_thread = FloorDiv(i->var, 1) + 8 * j;
+  PrimExpr index = FloorMod(i->var, 1);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment MakeGemmFragment8x16Transposed() {
+  IterVar i = MakeIterVar("i", 16);
+  IterVar j = MakeIterVar("j", 8);
+  IterVar rep = MakeIterVar("rep", 1);
+  PrimExpr forward_thread = FloorDiv(i->var, 4) + 4 * j;
+  PrimExpr index = FloorMod(i->var, 4);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
@@ -74,7 +111,7 @@ From https://github.com/RadeonOpenCompute/amd_matrix_instruction_calculator
 ./matrix_calculator.py --architecture cdna1 --instruction v_mfma_f32_16x16x16f16
 --detail-instruction
 */
-Fragment makeGemmFragmentAB16x16CDNA(const int k_pack) {
+Fragment MakeGemmFragmentAB16x16CDNA(const int k_pack) {
   IterVar i = MakeIterVar("i", 16);
   IterVar j = MakeIterVar("j", 16 * k_pack);
   IterVar rep = MakeIterVar("rep", 1);
@@ -83,7 +120,7 @@ Fragment makeGemmFragmentAB16x16CDNA(const int k_pack) {
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragmentAB16x16CDNATransposed(const int k_pack) {
+Fragment MakeGemmFragmentAB16x16CDNATransposed(const int k_pack) {
   IterVar i = MakeIterVar("i", 16 * k_pack);
   IterVar j = MakeIterVar("j", 16);
   IterVar rep = MakeIterVar("rep", 1);
@@ -92,7 +129,7 @@ Fragment makeGemmFragmentAB16x16CDNATransposed(const int k_pack) {
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragmentAB16x32CDNA(const int k_pack) {
+Fragment MakeGemmFragmentAB16x32CDNA(const int k_pack) {
   IterVar i = MakeIterVar("i", 16);
   IterVar j = MakeIterVar("j", 32 * k_pack);
   IterVar rep = MakeIterVar("rep", 1);
@@ -101,7 +138,7 @@ Fragment makeGemmFragmentAB16x32CDNA(const int k_pack) {
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragmentAB16x32CDNATransposed(const int k_pack) {
+Fragment MakeGemmFragmentAB16x32CDNATransposed(const int k_pack) {
   IterVar i = MakeIterVar("i", 32 * k_pack);
   IterVar j = MakeIterVar("j", 16);
   IterVar rep = MakeIterVar("rep", 1);
@@ -110,7 +147,7 @@ Fragment makeGemmFragmentAB16x32CDNATransposed(const int k_pack) {
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragmentC16x16CDNA() {
+Fragment MakeGemmFragmentC16x16CDNA() {
   IterVar i = MakeIterVar("i", 16);
   IterVar j = MakeIterVar("j", 16);
   IterVar rep = MakeIterVar("rep", 1);
@@ -119,7 +156,7 @@ Fragment makeGemmFragmentC16x16CDNA() {
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragmentC_F64(const int block_m, const int block_n,
+Fragment MakeGemmFragmentC_F64(const int block_m, const int block_n,
                                const int warp_m, const int warp_n) {
   ICHECK(block_m % warp_m == 0);
   ICHECK(block_n % warp_n == 0);
@@ -137,7 +174,7 @@ Fragment MakeGemmFragmentC(const int block_m, const int block_n,
                            const int warp_m, const int warp_n,
                            const int element_size) {
   if (element_size == 64)
-    return makeGemmFragmentC_F64(block_m, block_n, warp_m, warp_n);
+    return MakeGemmFragmentC_F64(block_m, block_n, warp_m, warp_n);
   ICHECK(block_m % warp_m == 0);
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
@@ -180,7 +217,7 @@ Fragment MakeGemmFragmentCCDNA(const int block_m, const int block_n,
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
   ICHECK(warp_n % 16 == 0) << "warp_n=" << warp_n;
-  auto base_layout = makeGemmFragmentC16x16CDNA()->Repeat({1, 1}, false);
+  auto base_layout = MakeGemmFragmentC16x16CDNA()->Repeat({1, 1}, false);
   auto warp_layout =
       base_layout->Repeat({warp_m / 16, warp_n / 16}, false, true);
   auto block_layout =
@@ -199,6 +236,426 @@ Fragment MakeGemmFragmentCHopper(const int block_m, const int block_n,
   auto block_layout = warp_layout->Repeat({block_m / warp_m, block_n / warp_n},
                                           true, false); // 16*Y x N (Y warp)
   return block_layout->Repeat({warp_m / 16, 1}, false, false);
+}
+
+Fragment MakePHSqmmaFragmentC(const int block_m, const int block_n,
+                              const int warp_m, const int warp_n,
+                              const int element_size,
+                              const std::array<int, 3> &inst_shape) {
+  int warp_tile_m = block_m / warp_m;
+  int warp_tile_n = block_n / warp_n;
+  int inst_m = inst_shape[0];
+  int inst_n = inst_shape[1];
+
+  auto base_layout = MakeGemmFragment4x8()->Repeat({4, 1}, true, false);
+  auto inst_layout =
+      base_layout->Repeat({inst_m / 16, inst_n / 8}, false, true);
+  auto squad_layout = inst_layout->Repeat(
+      {warp_tile_m * 4 / inst_m, warp_tile_n / inst_n}, false, false);
+  auto block_layout = squad_layout->Repeat({warp_m / 4, warp_n}, true, false);
+  return block_layout;
+}
+
+Fragment MakePH1WmmaCLayout(const int block_m, const int block_n,
+                            const int warp_m, const int warp_n,
+                            const int element_size,
+                            const std::array<int, 3> &inst_shape) {
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  const int inst_m = inst_shape[0];
+  const int inst_n = inst_shape[1];
+
+  auto base_layout = MakeGemmFragment4x8();
+  auto inst_layout = base_layout->Repeat({inst_m / 4, inst_n / 8}, false, true);
+  auto warp_layout = inst_layout->Repeat({warp_m, warp_n}, true, false);
+  auto block_layout = warp_layout->Repeat(
+      {block_m / warp_m / inst_m, block_n / warp_n / inst_n}, false, false);
+  return block_layout;
+}
+
+Fragment MakePH1WmmaFragmentA(const int block_m, const int block_n,
+                              const int block_k, const int warp_m,
+                              const int warp_n, const int element_size,
+                              bool transposed,
+                              const std::array<int, 3> &inst_shape) {
+  const int inst_m = inst_shape[0];
+  const int inst_k = inst_shape[2];
+  const int num_reg = 32 / element_size;
+  IterVar i = MakeIterVar("i", 1);
+  IterVar j = MakeIterVar("j", 1);
+  IterVar rep = MakeIterVar("rep", 1);
+  auto base_layout = Fragment({i, j}, {Integer(0)}, Integer(0), rep);
+  if (transposed) {
+    auto reg_layout = base_layout->Repeat({1, num_reg}, false, true);
+    auto tile_layout =
+        reg_layout->Repeat({4 * num_reg, 8 / num_reg}, true, true);
+    auto inst_layout =
+        tile_layout->Repeat({inst_k / num_reg / 4, inst_m / 8}, false, true);
+    auto warp_layout =
+        inst_layout->Repeat({1, warp_m}, true, false)->Replicate(warp_n);
+    auto block_layout = warp_layout->Repeat(
+        {block_k / inst_k, block_m / warp_m / inst_m}, false, true);
+    return block_layout;
+  } else {
+    auto reg_layout = base_layout->Repeat({1, num_reg}, false, true);
+    auto tile_layout = reg_layout->Repeat({8, 4}, true, true);
+    auto inst_layout =
+        tile_layout->Repeat({inst_m / 8, inst_k / num_reg / 4}, false, true);
+    auto warp_layout =
+        inst_layout->Repeat({warp_m, 1}, true, false)->Replicate(warp_n);
+    auto block_layout = warp_layout->Repeat(
+        {block_m / warp_m / inst_m, block_k / inst_k}, false, false);
+    return block_layout;
+  }
+}
+
+Fragment MakePH1WmmaFragmentB(const int block_m, const int block_n,
+                              const int block_k, const int warp_m,
+                              const int warp_n, const int element_size,
+                              bool transposed,
+                              const std::array<int, 3> &inst_shape) {
+  const int inst_n = inst_shape[1];
+  const int inst_k = inst_shape[2];
+  const int num_reg = 32 / element_size;
+  IterVar i = MakeIterVar("i", 1);
+  IterVar j = MakeIterVar("j", 1);
+  IterVar rep = MakeIterVar("rep", 1);
+  auto base_layout = Fragment({i, j}, {Integer(0)}, Integer(0), rep);
+  if (transposed) {
+    auto reg_layout = base_layout->Repeat({num_reg, 1}, false, true);
+    auto tile_layout =
+        reg_layout->Repeat({8 / num_reg, 4 * num_reg}, true, false);
+    auto inst_layout =
+        tile_layout->Repeat({inst_n / 8, inst_k / num_reg / 4}, false, false);
+    auto warp_layout =
+        inst_layout->Replicate(warp_m)->Repeat({warp_n, 1}, true, false);
+    auto block_layout = warp_layout->Repeat(
+        {block_n / warp_n / inst_n, block_k / inst_k}, false, false);
+    return block_layout;
+  } else {
+    auto reg_layout = base_layout->Repeat({num_reg, 1}, false, true);
+    auto tile_layout = reg_layout->Repeat({4, 8}, true, false);
+    auto inst_layout =
+        tile_layout->Repeat({inst_k / num_reg / 4, inst_n / 8}, false, false);
+    auto warp_layout =
+        inst_layout->Replicate(warp_m)->Repeat({1, warp_n}, true, false);
+    auto block_layout = warp_layout->Repeat(
+        {block_k / inst_k, block_n / warp_n / inst_n}, false, true);
+    return block_layout;
+  }
+}
+
+Layout MakePH1WmmaABLayout(int mat_stride, int mat_continuous, int continuity,
+                           int element_size, bool k_inner) {
+  // Keep a dedicated PH1 WMMA hook even though we currently stage A/B with a
+  // plain row-major shared-memory layout. This lets us tighten it back to a
+  // WMMA-specific swizzle later without touching call sites.
+  static_cast<void>(continuity);
+  static_cast<void>(element_size);
+  static_cast<void>(k_inner);
+  return MakeLinearLayout(
+      Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
+}
+
+Fragment MakeGemmQY2FragmentC(const int block_m, const int block_n,
+                              const int warp_m, const int warp_n,
+                              const int element_size) {
+  if (element_size == 64) {
+    ICHECK(false) << "Not supported";
+  }
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_m % 32 == 0) << "warp_m=" << warp_m;
+  ICHECK(warp_n % 32 == 0) << "warp_n=" << warp_n;
+  auto base_layout = MakeGemmFragment4x8()->Repeat({2, 2}, true);
+  auto warp_8x32_layout = base_layout->Repeat({1, 2}, false, false);
+  auto warp_32x32_layout = warp_8x32_layout->Repeat({4, 1}, false, false);
+  auto warp_layout = warp_32x32_layout->Repeat(
+      {block_m / warp_m, block_n / warp_n}, true, false);
+  auto block_layout =
+      warp_layout->Repeat({warp_m / 32, warp_n / 32}, false, false);
+  return block_layout;
+}
+
+Fragment MakeGemmQY2WmmaCLayout(const int block_m, const int block_n,
+                                const int warp_m, const int warp_n,
+                                const int element_size,
+                                const std::array<int, 3> &inst_shape) {
+  if (element_size == 64) {
+    ICHECK(false) << "Not supported";
+  }
+  const int inst_m = inst_shape[0];
+  const int inst_n = inst_shape[1];
+  const int inst_k = inst_shape[2];
+  ICHECK(inst_m > 0 && inst_n > 0 && inst_k > 0);
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_m % inst_m == 0) << "warp_m=" << warp_m;
+  ICHECK(warp_n % inst_n == 0) << "warp_n=" << warp_n;
+  ICHECK(inst_m % 4 == 0) << "inst_m=" << inst_m;
+  ICHECK(inst_n % 8 == 0) << "inst_n=" << inst_n;
+  auto base_layout = MakeGemmFragment4x8();
+  auto inst_layout = base_layout->Repeat({inst_m / 4, inst_n / 8}, false, true);
+  auto warp_layout =
+      inst_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
+  auto block_layout =
+      warp_layout->Repeat({warp_m / inst_m, warp_n / inst_n}, false, false);
+  return block_layout;
+}
+
+Fragment MakeGemmQY2WmmaFragmentA(const int block_m, const int block_n,
+                                  const int block_k, const int warp_m,
+                                  const int warp_n, const int element_size,
+                                  bool transposed,
+                                  const std::array<int, 3> &inst_shape) {
+  const int inst_m = inst_shape[0];
+  const int inst_k = inst_shape[2];
+  ICHECK(inst_m > 0 && inst_k > 0);
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_m % inst_m == 0) << "warp_m=" << warp_m;
+  ICHECK(block_k % inst_k == 0) << "block_k=" << block_k;
+  ICHECK(inst_m % 8 == 0) << "inst_m=" << inst_m;
+  ICHECK(inst_k % 8 == 0) << "inst_k=" << inst_k;
+  ICHECK(element_size == 16) << "unsupported element bitwidth=" << element_size;
+
+  if (element_size == 16) {
+    if (transposed) {
+      auto base_layout =
+          MakeGemmFragment8x8()->Repeat({inst_k / 8, inst_m / 8}, false, true);
+      auto warp_layout = base_layout->Repeat({1, block_m / warp_m}, true, false)
+                             ->Replicate(block_n / warp_n);
+      auto block_layout =
+          warp_layout->Repeat({block_k / inst_k, warp_m / inst_m}, false, true);
+      return block_layout;
+    }
+    auto base_layout =
+        MakeGemmFragment8x8()->Repeat({inst_m / 8, inst_k / 8}, false, true);
+    auto warp_layout = base_layout->Repeat({block_m / warp_m, 1}, true, false)
+                           ->Replicate(block_n / warp_n);
+    auto block_layout =
+        warp_layout->Repeat({warp_m / inst_m, block_k / inst_k}, false, false);
+    return block_layout;
+  }
+
+  ICHECK(false) << "QY2 WMMA A layout currently supports fp16 only";
+  return Fragment();
+}
+
+Fragment MakeGemmQY2WmmaFragmentB(const int block_m, const int block_n,
+                                  const int block_k, const int warp_m,
+                                  const int warp_n, const int element_size,
+                                  bool transposed,
+                                  const std::array<int, 3> &inst_shape) {
+  const int inst_n = inst_shape[1];
+  const int inst_k = inst_shape[2];
+  ICHECK(inst_n > 0 && inst_k > 0);
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_n % inst_n == 0) << "warp_n=" << warp_n;
+  ICHECK(block_k % inst_k == 0) << "block_k=" << block_k;
+  ICHECK(inst_n % 8 == 0) << "inst_n=" << inst_n;
+  ICHECK(inst_k % 8 == 0) << "inst_k=" << inst_k;
+  ICHECK(element_size == 16) << "unsupported element bitwidth=" << element_size;
+
+  if (element_size == 16) {
+    if (transposed) {
+      auto base_layout =
+          MakeGemmFragment8x8()->Repeat({inst_n / 8, inst_k / 8}, false, true);
+      auto warp_layout = base_layout->Replicate(block_m / warp_m)
+                             ->Repeat({block_n / warp_n, 1}, true, true);
+      auto block_layout = warp_layout->Repeat(
+          {warp_n / inst_n, block_k / inst_k}, false, false);
+      return block_layout;
+    }
+    auto base_layout =
+        MakeGemmFragment8x8()->Repeat({inst_k / 8, inst_n / 8}, false, true);
+    auto warp_layout = base_layout->Replicate(block_m / warp_m)
+                           ->Repeat({1, block_n / warp_n}, true, true);
+    auto block_layout =
+        warp_layout->Repeat({block_k / inst_k, warp_n / inst_n}, false, true);
+    return block_layout;
+  }
+
+  ICHECK(false) << "QY2 WMMA B layout currently supports fp16 only";
+  return Fragment();
+}
+
+Fragment MakeGemmFragmentCLinear(const int block_m, const int block_n,
+                                 const int block_size) {
+  IterVar i = MakeIterVar("i", block_m);
+  IterVar j = MakeIterVar("j", block_n);
+  IterVar rep = MakeIterVar("rep", 1);
+  PrimExpr linear = i->var * block_n + j->var;
+  PrimExpr forward_thread = FloorMod(linear, block_size);
+  PrimExpr index = FloorDiv(linear, block_size);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment MakeGemmQY2FragmentARow(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size) {
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_m % 32 == 0);
+  ICHECK(block_k % 16 == 0);
+  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
+      << "unsupported element bitwidth=" << element_size;
+
+  if (element_size == 8) {
+    auto base_layout = MakeGemmFragment8x16()->Repeat({2, 2}, true, false);
+    auto warp_32x32_layout = base_layout->Repeat({2, 1}, false, false);
+    auto warp_layout =
+        warp_32x32_layout->Repeat({block_m / warp_m, 1}, true, false)
+            ->Replicate(block_n / warp_n);
+    auto block_layout =
+        warp_layout->Repeat({warp_m / 32, block_k / 32}, false, false);
+    return block_layout;
+  } else if (element_size == 16) {
+    auto base_layout = MakeGemmFragment8x8()->Repeat({2, 2}, true, false);
+    auto warp_32x16_layout = base_layout->Repeat({2, 1}, false, false);
+    auto warp_layout =
+        warp_32x16_layout->Repeat({block_m / warp_m, 1}, true, false)
+            ->Replicate(block_n / warp_n);
+    auto block_layout =
+        warp_layout->Repeat({warp_m / 32, block_k / 16}, false, false);
+    return block_layout;
+  } else if (element_size == 32) {
+    auto base_layout = MakeGemmFragment8x4()->Repeat({2, 2}, true, false);
+    auto warp_32x8_layout = base_layout->Repeat({2, 1}, false, false);
+    auto warp_layout =
+        warp_32x8_layout->Repeat({block_m / warp_m, 1}, true, false)
+            ->Replicate(block_n / warp_n);
+    auto block_layout =
+        warp_layout->Repeat({warp_m / 32, block_k / 8}, false, false);
+    return block_layout;
+  } else {
+    ICHECK(0);
+    return Fragment();
+  }
+}
+
+Fragment MakeGemmQY2FragmentACol(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size) {
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_m % 32 == 0);
+  ICHECK(block_k % 16 == 0);
+  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
+      << "unsupported element bitwidth=" << element_size;
+
+  if (element_size == 8) {
+    auto base_layout = MakeGemmFragment8x16()->Repeat({4, 1}, true, false);
+    auto warp_16x32_layout = base_layout->Repeat({1, 2}, false, false);
+    auto warp_layout =
+        warp_16x32_layout->Repeat({1, block_m / warp_m}, true, false)
+            ->Replicate(block_n / warp_n);
+    auto block_layout =
+        warp_layout->Repeat({block_k / 32, warp_m / 32}, false, true);
+    return block_layout;
+  } else if (element_size == 16) {
+    auto base_layout = MakeGemmFragment4x16()->Repeat({4, 1}, true, false);
+    auto warp_16x32_layout = base_layout->Repeat({1, 2}, false, false);
+    auto warp_layout =
+        warp_16x32_layout->Repeat({1, block_m / warp_m}, true, false)
+            ->Replicate(block_n / warp_n);
+    auto block_layout =
+        warp_layout->Repeat({block_k / 16, warp_m / 32}, false, true);
+    return block_layout;
+  } else if (element_size == 32) {
+    auto base_layout = MakeGemmFragment2x16()->Repeat({4, 1}, true, false);
+    auto warp_16x32_layout = base_layout->Repeat({1, 2}, false, false);
+    auto warp_layout =
+        warp_16x32_layout->Repeat({1, block_m / warp_m}, true, false)
+            ->Replicate(block_n / warp_n);
+    auto block_layout =
+        warp_layout->Repeat({block_k / 8, warp_m / 32}, false, true);
+    return block_layout;
+  } else {
+    ICHECK(0);
+    return Fragment();
+  }
+}
+
+Fragment MakeGemmQY2FragmentBRow(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size) {
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_n % 32 == 0);
+  ICHECK(block_k % 16 == 0);
+  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
+      << "unsupported element bitwidth=" << element_size;
+
+  if (element_size == 8) {
+    auto base_layout = MakeGemmFragment8x16()->Repeat({2, 2}, true, false);
+    auto warp_32x32_layout = base_layout->Repeat({2, 1}, false, false);
+    auto warp_layout = warp_32x32_layout->Replicate(block_m / warp_m)
+                           ->Repeat({block_n / warp_n, 1}, true, true);
+    auto block_layout =
+        warp_layout->Repeat({warp_n / 32, block_k / 32}, false, false);
+    return block_layout;
+  } else if (element_size == 16) {
+    auto base_layout = MakeGemmFragment8x8()->Repeat({2, 2}, true, false);
+    auto warp_32x16_layout = base_layout->Repeat({2, 1}, false, false);
+    auto warp_layout = warp_32x16_layout->Replicate(block_m / warp_m)
+                           ->Repeat({block_n / warp_n, 1}, true, true);
+    auto block_layout =
+        warp_layout->Repeat({warp_n / 32, block_k / 16}, false, false);
+    return block_layout;
+  } else if (element_size == 32) {
+    auto base_layout = MakeGemmFragment8x4()->Repeat({2, 2}, true, false);
+    auto warp_32x8_layout = base_layout->Repeat({2, 1}, false, false);
+    auto warp_layout = warp_32x8_layout->Replicate(block_m / warp_m)
+                           ->Repeat({block_n / warp_n, 1}, true, true);
+    auto block_layout =
+        warp_layout->Repeat({warp_n / 32, block_k / 8}, false, false);
+    return block_layout;
+  } else {
+    ICHECK(0);
+    return Fragment();
+  }
+}
+
+Fragment MakeGemmQY2FragmentBCol(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size) {
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_n % 32 == 0);
+  ICHECK(block_k % 16 == 0);
+  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
+      << "unsupported element bitwidth=" << element_size;
+
+  if (element_size == 8) {
+    auto base_layout = MakeGemmFragment8x16()->Repeat({4, 1}, true, false);
+    auto warp_32x32_layout = base_layout->Repeat({1, 2}, false, false);
+    auto warp_layout = warp_32x32_layout->Replicate(block_m / warp_m)
+                           ->Repeat({1, block_n / warp_n}, true, true);
+    auto block_layout =
+        warp_layout->Repeat({block_k / 32, warp_n / 32}, false, true);
+    return block_layout;
+  } else if (element_size == 16) {
+    auto base_layout = MakeGemmFragment4x16()->Repeat({4, 1}, true, false);
+    auto warp_16x32_layout = base_layout->Repeat({1, 2}, false, false);
+    auto warp_layout = warp_16x32_layout->Replicate(block_m / warp_m)
+                           ->Repeat({1, block_n / warp_n}, true, true);
+    auto block_layout =
+        warp_layout->Repeat({block_k / 16, warp_n / 32}, false, true);
+    return block_layout;
+  } else if (element_size == 32) {
+    auto base_layout = MakeGemmFragment2x16()->Repeat({4, 1}, true, false);
+    auto warp_8x32_layout = base_layout->Repeat({1, 2}, false, false);
+    auto warp_layout = warp_8x32_layout->Replicate(block_m / warp_m)
+                           ->Repeat({1, block_n / warp_n}, true, true);
+    auto block_layout =
+        warp_layout->Repeat({block_k / 8, warp_n / 32}, false, true);
+    return block_layout;
+  } else {
+    ICHECK(0);
+    return Fragment();
+  }
 }
 
 Fragment MakeGemmFragmentA(const int block_m, const int block_n,
@@ -224,7 +681,7 @@ Fragment MakeGemmFragmentA(const int block_m, const int block_n,
     return block_layout;
   } else {
     if (element_size == 8) {
-      auto base_layout = makeGemmFragment8x16()->Repeat({2, 2}, false, false);
+      auto base_layout = MakeGemmFragment8x16()->Repeat({2, 2}, false, false);
       auto warp_layout = base_layout->Repeat({block_m / warp_m, 1}, true)
                              ->Replicate(block_n / warp_n);
       auto block_layout =
@@ -238,7 +695,7 @@ Fragment MakeGemmFragmentA(const int block_m, const int block_n,
           warp_layout->Repeat({warp_m / 16, block_k / 16}, false, false);
       return block_layout;
     } else if (element_size == 32) {
-      auto base_layout = makeGemmFragment8x4()->Repeat({2, 2}, false, false);
+      auto base_layout = MakeGemmFragment8x4()->Repeat({2, 2}, false, false);
       auto warp_layout = base_layout->Repeat({block_m / warp_m, 1}, true)
                              ->Replicate(block_n / warp_n);
       auto block_layout =
@@ -290,9 +747,9 @@ Fragment MakeGemmFragmentACDNA(const int block_m, const int block_n,
   if (transposed) {
     auto base_layout =
         element_size == 16
-            ? makeGemmFragmentAB16x16CDNATransposed(k_pack)->Repeat(
+            ? MakeGemmFragmentAB16x16CDNATransposed(k_pack)->Repeat(
                   {1, 1}, false, false)
-            : makeGemmFragmentAB16x32CDNATransposed(k_pack)->Repeat(
+            : MakeGemmFragmentAB16x32CDNATransposed(k_pack)->Repeat(
                   {1, 1}, false, false);
     auto warp_layout =
         base_layout->Repeat({block_k / mfma_k, warp_m / 16}, false, true);
@@ -302,8 +759,8 @@ Fragment MakeGemmFragmentACDNA(const int block_m, const int block_n,
   } else {
     auto base_layout =
         element_size == 16
-            ? makeGemmFragmentAB16x16CDNA(k_pack)->Repeat({1, 1}, false, false)
-            : makeGemmFragmentAB16x32CDNA(k_pack)->Repeat({1, 1}, false, false);
+            ? MakeGemmFragmentAB16x16CDNA(k_pack)->Repeat({1, 1}, false, false)
+            : MakeGemmFragmentAB16x32CDNA(k_pack)->Repeat({1, 1}, false, false);
     auto warp_layout =
         base_layout->Repeat({warp_m / 16, block_k / mfma_k}, false, false);
     auto block_layout = warp_layout->Repeat({block_m / warp_m, 1}, true, true)
@@ -312,7 +769,7 @@ Fragment MakeGemmFragmentACDNA(const int block_m, const int block_n,
   }
 }
 
-Fragment makeGemmFragment32x32(int element_size) {
+Fragment MakeGemmFragment32x32(int element_size) {
   IterVar i = MakeIterVar("i", 32);
   IterVar j = MakeIterVar("j", 32);
   IterVar rep = MakeIterVar("rep", 1);
@@ -342,7 +799,7 @@ Fragment MakeGemmVoltaFragmentC(const int block_m, const int block_n,
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 32 == 0);
   ICHECK(warp_n % 32 == 0);
-  auto base_layout = makeGemmFragment32x32(element_size);
+  auto base_layout = MakeGemmFragment32x32(element_size);
   auto warp_layout =
       base_layout->Repeat({warp_m / 32, warp_n / 32}, false, false);
   auto block_layout =
@@ -445,10 +902,7 @@ static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  // stride==4 is a truncated 4-row period used by tile::gather4/scatter4
-  // (s=i%8 ∈ [0,4) is a valid subset of the 8-row XOR pattern, matching
-  // what TMA applies per-row in hardware).
-  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
+  ICHECK(stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 2) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -459,6 +913,11 @@ static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
   PrimExpr c_swizzle = xor2x2(c, FloorDiv(s, 4));
   PrimExpr index = vec + (c_swizzle + s * 2) * vector_size;
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+}
+
+Layout MakeQuarterBankSwizzleLayout(int stride, int continuous,
+                                    int element_size) {
+  return MakeQuarterBankSwizzleLayout2D(stride, continuous, element_size);
 }
 
 Layout MakeQuarterBankSwizzleLayout(const Buffer &buffer) {
@@ -476,8 +935,7 @@ static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
-  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
+  ICHECK(stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 4) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -488,6 +946,10 @@ static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
   PrimExpr c_swizzle = xor4x4(c, FloorDiv(s, 2));
   PrimExpr index = vec + (c_swizzle + s * 4) * vector_size;
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+}
+
+Layout MakeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
+  return MakeHalfBankSwizzleLayout2D(stride, continuous, element_size);
 }
 
 Layout MakeHalfBankSwizzleLayout(const Buffer &buffer) {
@@ -505,8 +967,7 @@ static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
-  ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
+  ICHECK(stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 8) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
@@ -519,6 +980,10 @@ static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
+Layout MakeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
+  return MakeFullBankSwizzleLayout2D(stride, continuous, element_size);
+}
+
 Layout MakeFullBankSwizzleLayout(const Buffer &buffer) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base = MakeFullBankSwizzleLayout2D(static_cast<int>(info.stride),
@@ -529,7 +994,7 @@ Layout MakeFullBankSwizzleLayout(const Buffer &buffer) {
 
 // Detail implementation please ref to
 // bitblas::tl::mfma_layout::make_mfma_swizzle_layout
-Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
+Layout MakeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
                                    int kPack = 1) {
   const int numBanks = 32;
   const int bankBitWidth = 32;
@@ -552,7 +1017,7 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
   return Layout(Array{row, col}, {row, colOff});
 }
 
-Layout makeGemmABLayoutF64_Kinner(int stride, int continuous) {
+Layout MakeGemmABLayoutF64_Kinner(int stride, int continuous) {
   // Swizzle<2, 0, 4>
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
@@ -565,7 +1030,7 @@ Layout makeGemmABLayoutF64_Kinner(int stride, int continuous) {
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-Layout makeGemmABLayoutF64_Kouter(int stride, int continuous) {
+Layout MakeGemmABLayoutF64_Kouter(int stride, int continuous) {
   // Swizzle<2, 2, 2>
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
@@ -824,9 +1289,9 @@ Layout MakeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, bool k_inner) {
   if (element_size == 64) {
     if (!k_inner && continuity % 16 == 0) // float64 KxN
-      return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
+      return MakeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
     if (k_inner && continuity % 16 == 0) // float64 NxK
-      return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
+      return MakeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
     return MakeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
   int vector_size = 128 / element_size;
@@ -850,9 +1315,9 @@ Layout MakeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                               int continuity, int element_size, bool k_inner) {
   if (element_size == 64) {
     if (!k_inner && continuity % 16 == 0) // float64 KxN
-      return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
+      return MakeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
     if (k_inner && continuity % 16 == 0) // float64 NxK
-      return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
+      return MakeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
     // fallback for float64 when stride % 8 != 0
     if (mat_stride % 8 != 0)
       return MakeLinearLayout(
@@ -881,7 +1346,113 @@ Layout MakeGemmABLayoutHopper(int mat_stride, int mat_continuous,
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
-  TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
+  __builtin_unreachable(); // to prevent compiler warning
+}
+
+Layout MakeGemmABSwizzlePH1(int stride, int continuous, int elem_bytes, int SG,
+                            int SS, int SL, int swizzle_offset) {
+  Var row = InputPlaceholder(0);
+  Var col = InputPlaceholder(1);
+  PrimExpr addr = (row * continuous + col) * elem_bytes;
+
+  PrimExpr line_id = FloorDiv(addr, SL);
+  PrimExpr line_offset = FloorMod(addr, SL);
+  PrimExpr sg_per_sl = FloorDiv(SL, SG);
+
+  PrimExpr offset_line_id = FloorDiv(swizzle_offset, SL);
+  PrimExpr cycle_line_id = FloorMod(line_id + offset_line_id, sg_per_sl);
+
+  PrimExpr sg_id = FloorDiv(line_offset, SG);
+  PrimExpr sg_offset = FloorMod(line_offset, SG);
+  PrimExpr target_sg_id = sg_id ^ cycle_line_id;
+  PrimExpr target_line_offset = target_sg_id * SG + sg_offset;
+  PrimExpr target_addr = line_id * SL + target_line_offset;
+
+  PrimExpr i = FloorDiv(target_addr, continuous * elem_bytes);
+  PrimExpr j =
+      FloorDiv(FloorMod(target_addr, continuous * elem_bytes), elem_bytes);
+  return Layout(Array<PrimExpr>{stride, continuous}, {i, j});
+}
+
+Layout MakeGemmABLayoutPH1(int mat_stride, int mat_continuous, int continuity,
+                           int element_size, bool k_inner) {
+  ICHECK_LE(continuity, mat_continuous)
+      << "continuity must be <= mat_continuous, continuity=" << continuity
+      << ", mat_continuous=" << mat_continuous;
+  int SG = 0, SS = 256, SL = 256;
+  if (element_size == 8 || (element_size == 16 && k_inner) ||
+      (element_size == 32 && k_inner)) {
+    SG = 16;
+  } else if (element_size == 16 && !k_inner) {
+    SG = 32;
+  } else if (element_size == 32 && !k_inner) {
+    SG = 64;
+  } else {
+    ICHECK(0) << "Unsupported layout for PH1 with stride=" << mat_stride
+              << ", continuous=" << mat_continuous
+              << ", element_size=" << element_size << ", k_inner=" << k_inner;
+  }
+  int elem_bytes = element_size / 8;
+  int chunk_cols =
+      (continuity < mat_continuous) ? continuity : 256 / elem_bytes;
+  if (mat_continuous <= chunk_cols) {
+    return MakeGemmABSwizzlePH1(mat_stride, mat_continuous, elem_bytes, SG, SS,
+                                SL, 0);
+  }
+
+  ICHECK_GT(chunk_cols, 0) << "chunk_cols must be positive";
+  ICHECK_LE(chunk_cols, 256 / elem_bytes)
+      << "chunk_cols must be <= " << (256 / elem_bytes) << ", got "
+      << chunk_cols;
+  ICHECK(mat_continuous % chunk_cols == 0)
+      << "PH1 chunked swizzle requires mat_continuous divisible by chunk_cols, "
+      << "mat_continuous=" << mat_continuous << ", chunk_cols=" << chunk_cols;
+
+  Var row = InputPlaceholder(0);
+  Var col = InputPlaceholder(1);
+  PrimExpr chunk_id = FloorDiv(col, chunk_cols);
+  PrimExpr col_in_chunk = FloorMod(col, chunk_cols);
+
+  int swizzle_bytes = mat_stride * chunk_cols * elem_bytes;
+  int swizzle_cycle_bytes = (SL / SG) * SL;
+  if (swizzle_bytes >= swizzle_cycle_bytes) {
+    auto chunk_swizzle =
+        MakeGemmABSwizzlePH1(mat_stride, chunk_cols, elem_bytes, SG, SS, SL, 0);
+    Array<PrimExpr> chunk_out = chunk_swizzle->Forward({row, col_in_chunk});
+    PrimExpr chunk_linear = chunk_out[0] * chunk_cols + chunk_out[1];
+    PrimExpr global_linear =
+        chunk_id * (mat_stride * chunk_cols) + chunk_linear;
+    PrimExpr i = FloorDiv(global_linear, mat_continuous);
+    PrimExpr j = FloorMod(global_linear, mat_continuous);
+    return Layout(Array<PrimExpr>{mat_stride, mat_continuous}, {i, j});
+  }
+
+  ICHECK(swizzle_bytes * 2 == swizzle_cycle_bytes);
+
+  PrimExpr cycle_id = FloorMod(chunk_id, 2);
+  PrimExpr global_cycle_linear;
+  for (int index = 0; index < 2; ++index) {
+    int swizzle_offset = index * swizzle_bytes;
+    auto chunk_swizzle = MakeGemmABSwizzlePH1(
+        mat_stride, chunk_cols, elem_bytes, SG, SS, SL, swizzle_offset);
+    Array<PrimExpr> chunk_out = chunk_swizzle->Forward({row, col_in_chunk});
+    PrimExpr chunk_linear = chunk_out[0] * chunk_cols + chunk_out[1];
+    PrimExpr global_block_linear =
+        index * (mat_stride * chunk_cols) + chunk_linear;
+    PrimExpr pred = (cycle_id == index);
+    if (index == 0) {
+      global_cycle_linear = global_block_linear;
+    } else {
+      global_cycle_linear =
+          Select(pred, global_block_linear, global_cycle_linear);
+    }
+  }
+  PrimExpr global_linear =
+      FloorDiv(chunk_id, 2) * (2 * mat_stride * chunk_cols) +
+      global_cycle_linear;
+  PrimExpr i = FloorDiv(global_linear, mat_continuous);
+  PrimExpr j = FloorMod(global_linear, mat_continuous);
+  return Layout(Array<PrimExpr>{mat_stride, mat_continuous}, {i, j});
 }
 
 Layout MakeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
@@ -910,12 +1481,12 @@ Layout MakeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
     ICHECK(0) << "Unsupported layout for sm100 with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
-  TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
+  __builtin_unreachable(); // to prevent compiler warning
 }
 
 Layout MakeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack) {
-  return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
+  return MakeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
 }
 
 Layout MakeSwizzledLayout(const Buffer &buffer, bool k_inner, bool allow_pad) {
@@ -971,23 +1542,20 @@ SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
   int vector_size = 128 / info.element_size;
 
   // Check from smallest to largest granularity
-  // Need to verify stride and continuous constraints before comparing.
-  // stride==4 is the truncated 4-row period used by tile::gather4/scatter4
-  // (see Make{Quarter,Half,Full}BankSwizzleLayout2D).
-  bool stride_ok = info.stride == 4 || info.stride % 8 == 0;
-  if (stride_ok &&
+  // Need to verify stride and continuous constraints before comparing
+  if (info.stride % 8 == 0 &&
       info.continuous % (static_cast<int64_t>(vector_size) * 2) == 0) {
     if (StructuralEqual()(layout, MakeQuarterBankSwizzleLayout(buffer))) {
       return SwizzleMode::Swizzle32B();
     }
   }
-  if (stride_ok &&
+  if (info.stride % 8 == 0 &&
       info.continuous % (static_cast<int64_t>(vector_size) * 4) == 0) {
     if (StructuralEqual()(layout, MakeHalfBankSwizzleLayout(buffer))) {
       return SwizzleMode::Swizzle64B();
     }
   }
-  if (stride_ok &&
+  if (info.stride % 8 == 0 &&
       info.continuous % (static_cast<int64_t>(vector_size) * 8) == 0) {
     if (StructuralEqual()(layout, MakeFullBankSwizzleLayout(buffer))) {
       return SwizzleMode::Swizzle128B();

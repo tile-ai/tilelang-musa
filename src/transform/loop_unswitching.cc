@@ -15,6 +15,7 @@
  */
 
 #include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/stmt.h>
@@ -22,7 +23,6 @@
 #include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
-#include "tir/transforms/ir_utils.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -169,7 +169,7 @@ public:
   void VisitStmt_(const IfThenElseNode *op) final {
     // Skip the interior of any if statement with matching condition
     if (excluded_condition.defined() &&
-        ExprDeepEqual()(op->condition, excluded_condition)) {
+        StructuralEqual()(op->condition, excluded_condition)) {
       return;
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -415,8 +415,8 @@ public:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    // Replace if the condition matches the hoisted condition.
-    if (ExprDeepEqual()(op->condition, hoisted_condition)) {
+    // Replace if the condition is structurally equal to the hoisted condition
+    if (StructuralEqual()(op->condition, hoisted_condition)) {
       if (take_then) {
         return VisitStmt(op->then_case);
       } else {
@@ -554,7 +554,7 @@ public:
         result = GetRef<Stmt>(op);
       } else {
         result = For(op->loop_var, op->min, op->extent, op->kind, body,
-                     op->thread_binding, op->annotations, op->step, op->span);
+                     op->thread_binding, op->annotations);
       }
       if (pushed_thread_idx) {
         thread_idx_vars_in_scope_.erase(op->loop_var.get());
@@ -574,7 +574,7 @@ public:
         result = GetRef<Stmt>(op);
       } else {
         result = For(op->loop_var, op->min, op->extent, op->kind, body,
-                     op->thread_binding, op->annotations, op->step, op->span);
+                     op->thread_binding, op->annotations);
       }
       if (pushed_thread_idx) {
         thread_idx_vars_in_scope_.erase(op->loop_var.get());
@@ -597,7 +597,7 @@ public:
     // two versions.
     if (!allow_non_trivial_else_ && !IsSideEffectFreeStmt(else_body)) {
       result = For(op->loop_var, op->min, op->extent, op->kind, body,
-                   op->thread_binding, op->annotations, op->step, op->span);
+                   op->thread_binding, op->annotations);
       if (pushed_thread_idx) {
         thread_idx_vars_in_scope_.erase(op->loop_var.get());
       }
@@ -609,18 +609,17 @@ public:
     else_body = Substitute(else_body, {{op->loop_var, else_loop_var}});
 
     For then_loop(op->loop_var, op->min, op->extent, op->kind, then_body,
-                  op->thread_binding, op->annotations, op->step, op->span);
+                  op->thread_binding, op->annotations);
     For else_loop(else_loop_var, op->min, op->extent, op->kind, else_body,
-                  op->thread_binding, op->annotations, op->step, op->span);
+                  op->thread_binding, op->annotations);
 
-    result =
-        IfThenElse(if_node->condition, then_loop, else_loop, if_node->span);
+    result = IfThenElse(if_node->condition, then_loop, else_loop);
 
     // Wrap with hoisted Let bindings (in reverse order so first binding is
     // outermost)
     for (auto it = finder.hoisted_let_bindings.rbegin();
          it != finder.hoisted_let_bindings.rend(); ++it) {
-      result = SeqStmt({tirx::Bind(it->first, it->second), result}, op->span);
+      result = SeqStmt({tirx::Bind(it->first, it->second), result});
     }
 
     if (pushed_thread_idx) {
@@ -636,13 +635,7 @@ private:
 // --- Public API ---
 
 Stmt ApplyLoopUnswitching(Stmt stmt, bool allow_non_trivial_else) {
-  Stmt ret = LoopUnswitcher(allow_non_trivial_else)(stmt);
-  if (!ret.same_as(stmt)) {
-    // Unswitching duplicates definitions into mutually exclusive branches.
-    // Freshen their Var identities before returning SSA IR.
-    return ConvertSSA(ret);
-  }
-  return ret;
+  return LoopUnswitcher(allow_non_trivial_else)(std::move(stmt));
 }
 
 using namespace tirx::transform;

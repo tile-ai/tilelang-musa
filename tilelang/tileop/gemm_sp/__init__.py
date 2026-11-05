@@ -10,6 +10,16 @@ from tilelang import _ffi_api
 from tilelang.ir import GemmSPWarpPolicy
 
 
+def _ensure_backend_registration(target: Target) -> None:
+    from tilelang.cuda.target import target_is_cuda
+    from tilelang.musa.target import target_is_musa
+
+    if target_is_cuda(target):
+        from tilelang.cuda.op import gemm_sp as _cuda_gemm_sp  # noqa: F401
+    if target_is_musa(target):
+        from tilelang.musa.op import gemm_sp as _musa_gemm_sp  # noqa: F401
+
+
 @tvm_ffi.register_object("tl.GemmSP")
 class GemmSP(Node, Scriptable):
     A: tirx.Buffer
@@ -30,9 +40,18 @@ class GemmSP(Node, Scriptable):
     trans_B: bool
     trans_E: bool
 
+    stride_A: int
+    stride_B: int
+    offset_A: int
+    offset_B: int
     clear_accum: bool
+    kPack: int
     wg_wait: int
     policy: GemmSPWarpPolicy
+
+    @property
+    def k_pack(self):
+        return self.kPack
 
     @tvm_ffi.register_global_func("tl.gemm_sp.infer_layout")
     def gemm_sp_infer_layout(self, target: Target, thread_bounds: Range):
@@ -40,8 +59,8 @@ class GemmSP(Node, Scriptable):
         return self.infer_layout(target, thread_nums)
 
     @tvm_ffi.register_global_func("tl.gemm_sp.lower")
-    def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_index: tirx.PrimExpr):
-        stmt = self.lower(target, layout_map, thread_bounds, thread_index)
+    def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_var: tirx.Var):
+        stmt = self.lower(target, layout_map, thread_bounds, thread_var)
         return stmt
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -49,14 +68,15 @@ class GemmSP(Node, Scriptable):
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).infer_layout(target, thread_nums)
 
-    def lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_index: tirx.PrimExpr):
+    def lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_var: tirx.Var):
         thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
-        return impl_class(self).lower(layout_map, target, thread_bounds, thread_index)
+        return impl_class(self).lower(layout_map, target, thread_bounds, thread_var)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
         return str(_ffi_api.GemmSPGetGemmInstructionKey(self, int(thread_nums), target))
 
     def _get_implementation_class(self, gemm_inst: str, target: Target):
+        _ensure_backend_registration(target)
         return resolve_gemm_sp_impl(gemm_inst, target)

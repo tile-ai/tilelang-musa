@@ -2,35 +2,31 @@ from __future__ import annotations
 
 from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
-from tvm.tirx import PrimFunc, SBlock
-from tvm.tirx.stmt_functor import post_order_visit
 
 import tilelang
-from tilelang.backend.pass_pipeline import PassPipeline
+from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
+    target_has_tma,
     should_disable_shared_memory_reuse,
     should_enable_aggressive_merge,
     should_enable_race_check,
     should_force_let_inline,
 )
-from tilelang.contrib.nvcc import (
-    get_target_compute_version,
-    have_mbarrier,
-    have_pdl,
-    have_tma,
-)
+from tilelang.contrib.nvcc import have_pdl, have_tma
 from tilelang.transform import PassContext
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
     # Avoid importing jit.adapter.utils at module import time.
-    from tilelang.jit.adapter.utils import is_cuda_target
+    from tilelang.jit.adapter.utils import is_cuda_target, is_musa_target
 
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if (not is_cuda_target(target)) or (not have_tma(target)):
+    if target is None:
+        return False
+    if not ((is_cuda_target(target) or is_musa_target(target)) and target_has_tma(target)):
         return False
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not disable_warp_specialized
@@ -46,32 +42,9 @@ def module_has_tma(mod: IRModule) -> bool:
     return any(func.attrs and func.attrs.get("tl.has_tma", False) for _, func in mod.functions.items())
 
 
-def _module_has_shared_barrier(mod: IRModule) -> bool:
-    """Whether any function allocates a shared.barrier / shared.cluster_barrier
-    buffer (i.e. uses ``T.alloc_barrier``).
-    """
-    found = False
-
-    def visit(node):
-        nonlocal found
-        if isinstance(node, SBlock):
-            for buffer in node.alloc_buffers:
-                if buffer.scope() in ("shared.barrier", "shared.cluster_barrier"):
-                    found = True
-
-    for _, func in mod.functions.items():
-        if isinstance(func, PrimFunc):
-            post_order_visit(func.body, visit)
-    return found
-
-
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=True, default_threads=128)(mod)
-    # Record body-bound global bases before optional let inlining obscures
-    # their provenance. CopyAnalysis consumes this marker for every lowering
-    # path, independently of whether warp specialization is enabled.
-    mod = tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
@@ -86,26 +59,16 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    # Verify reducer v2 epoch lifecycle and access rules (early, so
-    # diagnostics point at user-written code)
-    mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
-    mod = tilelang.transform.VerifyReducerEpoch()(mod)
-    # Warn on buffers that are read before anything writes them.
-    # Runs after the reducer passes above, so legacy reducers have been
-    # canonicalized, and before PipelinePlanning and LowerTileOp, while
-    # loop bodies are still in source order and tile ops still declare
-    # their access regions.
-    mod = tilelang.transform.VerifyBufferInit()(mod)
+    # Set layouts for reducers
+    mod = tilelang.transform.LayoutReducer()(mod)
 
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
-    # AutoWarpSpecialization: derive a WSSchedule for kernels without one, using the scheduler named by tl.enable_auto_warp_specialization (opt-in; no-op when unset).
-    # MaterializeWSSchedule: Materialize a user-provided warp-specialization schedule (T.annotate_ws_schedule).
-    # ProducerConsumerWarpSpecialized: The pass classifies copy ops as TMA/cp.async/sync inline. Shared buffers are multi-versioned internally only for functions where the WS transformation actually applies.
+    # The pass classifies copy ops as TMA/cp.async/sync inline. Shared buffers
+    # are multi-versioned internally only for functions where the WS
+    # transformation actually applies.
     if allow_warp_specialized(target=target):
-        mod = tilelang.cuda.transform.AutoWarpSpecialization()(mod)
-        mod = tilelang.cuda.transform.MaterializeWSSchedule()(mod)
         mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
     # @CUDA / Blackwell specific
@@ -117,13 +80,6 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # pipeline body extraction focused on canonical SeqStmt bodies.
     mod = tilelang.transform.IfStmtBinding()(mod)
 
-    # Expand only explicitly requested unroll loops before pipeline planning
-    # and fold the constants exposed by substitution. This makes their
-    # copy/compute statements individual scheduling units.
-    mod = tilelang.transform.UnrollLoop()(mod)
-    # Simplify the unrolled loop bodies.
-    mod = tilelang.transform.Simplify()(mod)
-
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
@@ -132,20 +88,14 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
 
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
-    # Plan physical storage/communication for reducer v2 epochs and
-    # materialize the first-class reducer ops. Loop layouts are frozen at
-    # this point; the planner only reads them.
-    mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     # Visualize the layout
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
-    # Assert no reducer v2 construct survived materialization
-    mod = tilelang.transform.VerifyReducerConsumed()(mod)
 
     # @CUDA specific
     # Lower l2 persistent map
-    mod = tilelang.cuda.transform.LowerL2Persistent()(mod)
+    mod = lower_l2_persistent_for_target(mod, target)
     # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
@@ -160,6 +110,8 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
+    if allow_lower_musa_burst(target) and hasattr(tilelang.transform, "LateVectorizePlanner"):
+        mod = tilelang.transform.LateVectorizePlanner()(mod)
     # Hoist any root-block annotations to PrimFunc attrs if pass is available
     mod = tilelang.transform.HoistNonRestrictParams()(mod)
     return mod
@@ -179,20 +131,6 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # Buffer allocation placement is handled uniformly for both paths.
     mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
     # @CUDA-specific
-    # LowerSharedBarrier emits hardware mbarrier code (the cutlass Barrier type,
-    # tl::tl_shuffle_elect, tl::fence_barrier_init) which only exists on sm_90+.
-    # Reject T.alloc_barrier() up front on pre-Hopper targets instead of letting
-    # nvcc fail later with cryptic "identifier 'Barrier' is undefined" errors.
-    if not have_mbarrier(target) and _module_has_shared_barrier(mod):
-        compute_version = get_target_compute_version(target)
-        raise ValueError(
-            f"T.alloc_barrier() requires sm_90 (Hopper) or later, but the current "
-            f"target is sm_{compute_version.replace('.', '')} (compute capability "
-            f"{compute_version}). Hardware mbarrier operations (Barrier type, "
-            f"tl_shuffle_elect, fence_barrier_init) are not available on this "
-            f"architecture. Use __syncthreads() or named barriers for pre-Hopper "
-            f"targets."
-        )
     mod = tilelang.cuda.transform.LowerSharedBarrier()(mod)
 
     # @CUDA-specific
@@ -241,7 +179,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     # @CUDA-specific
     # Mark the function contains pdl_sync or pdl_trigger
-    mod = tilelang.cuda.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
+    mod = tilelang.cuda.transform.MarkCudaSyncCalls(nvcc.have_pdl(target))(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
@@ -276,9 +214,11 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     # @CUDA-specific
     # Transform threadblock to persistent threadblock
-    mod = tilelang.cuda.transform.PersistThreadblock()(mod)
+    mod = persist_threadblock_for_target(mod, target)
 
     return mod
 
 
-CUDA_PIPELINE = PassPipeline("cuda", CUDAPassPipelineBody)
+cuda_pipeline = PassPipeline("cuda", CUDAPassPipelineBody)
+
+register_pipeline(cuda_pipeline)

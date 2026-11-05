@@ -7,7 +7,7 @@
 #define TVM_TL_OP_UTILS_H_
 
 #include "./operator.h"
-#include "cuda/stubs/cuda.h"
+#include "region.h"
 #include "support/check.h"
 #include "tvm/runtime/base.h"
 #include <tvm/tirx/buffer.h>
@@ -17,9 +17,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
-
-// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
-TVM_DLL int to_CUtensorMapDataType(DataType dtype);
 
 // Reverses an array (used for row-major/column-major layout conversion).
 template <typename T> ffi::Array<T> ReverseArray(ffi::Array<T> array) {
@@ -53,6 +50,7 @@ TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
 TVM_DLL PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load,
                                              int rw_mask);
 
+// Check if a buffer is a fragment buffer (scope == "local.fragment")
 inline bool IsFragmentBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.fragment";
 }
@@ -89,13 +87,6 @@ inline bool IsSharedBuffer(const Buffer &buffer, bool allow_dynamic = true) {
     return buffer.scope() == "shared" || buffer.scope() == "shared.dyn";
   }
   return buffer.scope() == "shared";
-}
-
-inline bool IsTmemBuffer(const Buffer &buffer) {
-  if (!buffer.defined()) {
-    return false;
-  }
-  return buffer.scope() == "shared.tmem";
 }
 
 inline bool IsGlobalBuffer(const Buffer &buffer) {

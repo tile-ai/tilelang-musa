@@ -21,9 +21,10 @@ class GemmScalar(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
+        thread_var: tirx.Var,
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
+        del mbar_phase_expr
         M, N, K = self.M, self.N, self.K
         A_buf = self.ARegion.buffer
         B_buf = self.BRegion.buffer
@@ -47,10 +48,8 @@ class GemmScalar(GemmBase):
                 T.clear(C_buf)
             for i, j, k in T.grid(M, N, K):
                 C_buf[c0 + i, c1 + j] += T.cast(
-                    A_buf[a0 + (k if trans_A else i), a1 + (i if trans_A else k)],
-                    accum_dtype,
-                ) * T.cast(
-                    B_buf[b0 + (j if trans_B else k), b1 + (k if trans_B else j)],
+                    A_buf[a0 + (k if trans_A else i), a1 + (i if trans_A else k)]
+                    * B_buf[b0 + (j if trans_B else k), b1 + (k if trans_B else j)],
                     accum_dtype,
                 )
 

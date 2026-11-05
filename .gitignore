@@ -21,10 +21,6 @@ debug/
 build/
 *dist/
 dist*/
-!tilelang/distributed/
-!tilelang/distributed/**
-!tilelang/musa/distributed/
-!tilelang/musa/distributed/**
 wheelhouse/
 __pycache__
 nnfusion.tar.gz
@@ -100,11 +96,8 @@ tilelang/jit/adapter/cython/.cycache
 # cache directory for clangd
 .cache/
 
-# claude (keep local settings ignored, but track the skills symlinks)
+# claude
 **/.claude
-!/.claude
-/.claude/*
-!/.claude/skills
 
 # CMake
 cmake-build/
@@ -126,11 +119,11 @@ maint/host_checks/logs/*
 # csv
 *.csv
 
+# clang-tidy
+/run-clang-tidy.py
+
 # perf regression test
 .perf_regression/
 
 # agent skills folder
 .humanize*
-
-# uv Lockfile
-uv.lock

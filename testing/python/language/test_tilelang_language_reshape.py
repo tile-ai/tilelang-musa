@@ -260,6 +260,7 @@ def test_reshape_shape_mismatch():
         reshape_shape_mismatch_test(1024, 32, T.float32)
 
 
+@tilelang.testing.requires_musa
 def test_reduce_absmax_after_reshape_3d():
     M, N, num_groups, num_per_channels = 2, 384, 3, 128
     threads = 128
@@ -279,7 +280,7 @@ def test_reduce_absmax_after_reshape_3d():
             T.copy(B_local, B)
 
     jit_kernel = tl.compile(main, out_idx=-1)
-    A_torch = torch.randint(-100, 100, (M, N), dtype=getattr(torch, dtype)).cuda()
+    A_torch = torch.randint(-100, 100, (M, N), dtype=getattr(torch, dtype), device="musa")
     B_torch = jit_kernel(A_torch)
 
     ref = A_torch.abs().reshape(M, num_groups, num_per_channels).max(dim=2).values

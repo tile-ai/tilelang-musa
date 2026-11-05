@@ -1,9 +1,7 @@
 #pragma once
 
-#ifndef __CUDACC_RTC__
-// NVRTC has no libstdc++; ``int*_t`` / ``uint*_t`` come from
-// ``tl_templates/cuda/nvrtc_std.h``.
 #include <cstdint>
+#ifndef __CUDACC_RTC__
 #include <cuda.h>
 #endif
 

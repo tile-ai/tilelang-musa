@@ -1,9 +1,14 @@
 {
   "gitmodule_updates": {
-    "3rdparty/tvm": "https://github.com/MooreThreads/tvm_musa"
+    "3rdparty/tvm": "https://github.com/MooreThreads/tvm_musa",
+    "3rdparty/mutlass": "https://github.com/MooreThreads/mutlass"
   },
   "gitmodule_refs": {
-    "3rdparty/tvm": "767f335d2e051c8af7a8d68c77c46a74197ddccb"
+    "3rdparty/tvm": "ab686f3e21435b146bc303538bca079dec07e00b",
+    "3rdparty/mutlass": "d31e365170c9f51db887306032b81cc82141489b"
   },
-  "remove_paths": []
+  "remove_paths": [
+    ".mthreads-ci.yml",
+    "AGENTS.md"
+  ]
 }

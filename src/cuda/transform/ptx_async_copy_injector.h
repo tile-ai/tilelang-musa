@@ -18,6 +18,12 @@ struct PTXAsyncCopyInjectResult {
  * whether a region should use async-copy lowering before invoking this helper.
  */
 PTXAsyncCopyInjectResult
+InjectPTXAsyncCopy(const tvm::tirx::Stmt &body, bool enable_auto_async_copy,
+                   bool async_without_async_commit_wait,
+                   bool disable_force_async_wait = false,
+                   bool sync_inside_conditionals = false);
+
+PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const tvm::tirx::Stmt &body,
                    bool async_without_async_commit_wait = false);
 

@@ -2,7 +2,7 @@ from tilelang import tvm as tvm
 from tvm import DataType
 import tilelang
 import tilelang.language as T
-from tilelang.cuda.intrinsics import get_swizzle_layout
+from tilelang.intrinsics import get_swizzle_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     TensorCoreIntrinEmitter,
 )

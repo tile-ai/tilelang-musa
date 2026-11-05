@@ -1,15 +1,7 @@
 #pragma once
 
 #include "common.h"
-#include "cutlass/arch/reg_reconfig.h"
 #include "cutlass/cutlass.h"
-
-#if defined(CUDA_CTA_RECONFIG_ACTIVATED) ||                                    \
-    (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) &&                       \
-     (defined(__CUDA_ARCH_SPECIFIC__) ||                                       \
-      defined(__CUDA_ARCH_FAMILY_SPECIFIC__)))
-#define TL_CUDA_ARCH_CTA_RECONFIG_ENABLED
-#endif
 
 #if __CUDA_ARCH_LIST__ >= 900
 #include "cute/arch/cluster_sm90.hpp"
@@ -67,52 +59,25 @@ get_warp_group_idx(int warp_size = detail::default_warp_size(),
   return detail::linear_thread_idx_in_block() / threads_per_group;
 }
 
-template <bool kDependentFalse = false> TL_DEVICE void warpgroup_arrive() {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)
-  cute::warpgroup_arrive();
-#else
-  static_assert(kDependentFalse, "tl::warpgroup_arrive requires sm_90");
-#endif
-}
+#if __CUDA_ARCH_LIST__ >= 900
+TL_DEVICE void warpgroup_arrive() { cute::warpgroup_arrive(); }
+TL_DEVICE void warpgroup_commit_batch() { cute::warpgroup_commit_batch(); }
 
-template <bool kDependentFalse = false>
-TL_DEVICE void warpgroup_commit_batch() {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)
-  cute::warpgroup_commit_batch();
-#else
-  static_assert(kDependentFalse, "tl::warpgroup_commit_batch requires sm_90");
-#endif
-}
-
-template <int NumMma, bool kDependentFalse = false>
-TL_DEVICE void warpgroup_wait() {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)
+template <int NumMma> TL_DEVICE void warpgroup_wait() {
   cute::warpgroup_wait<NumMma>();
-#else
-  static_assert(kDependentFalse, "tl::warpgroup_wait requires sm_90");
-#endif
-}
-
-template <int NumMma, bool kDependentFalse = false>
-TL_DEVICE void wait_wgmma() {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)
-  cute::warpgroup_wait<NumMma>();
-#else
-  static_assert(kDependentFalse, "tl::wait_wgmma requires sm_90");
-#endif
 }
 
 TL_DEVICE void warpgroup_fence_operand(uint32_t *regs, int count) {
 #pragma unroll
   for (int i = 0; i < count; ++i) {
-    asm volatile("" : "+r"(regs[i]) : : "memory");
+    cute::warpgroup_fence_operand(regs[i]);
   }
 }
 
 TL_DEVICE void warpgroup_fence_operand(float *regs, int count) {
 #pragma unroll
   for (int i = 0; i < count; ++i) {
-    asm volatile("" : "+f"(regs[i]) : : "memory");
+    cute::warpgroup_fence_operand(regs[i]);
   }
 }
 
@@ -120,9 +85,7 @@ TL_DEVICE void warpgroup_fence_operand(float *regs, int count) {
 //   thread_extent: the logical size (in number of threads) of each "group"
 //                  within which we want to elect exactly ONE representative
 //                  thread.
-template <int thread_extent, bool kDependentFalse = false>
-TL_DEVICE bool tl_shuffle_elect() {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
   // Special case: thread_extent == 0 means "elect exactly one thread
   // in the entire thread block", i.e., the leader of the first warp of the
   // block.
@@ -158,33 +121,15 @@ TL_DEVICE bool tl_shuffle_elect() {
     return cute::elect_one_sync() &&
            (cutlass::canonical_warp_idx() % warp_extent) == 0;
   }
-#else
-  static_assert(kDependentFalse,
-                "tl::tl_shuffle_elect requires sm_90 or later");
-  return {};
-#endif
 }
 
-template <uint32_t RegCount, bool kDependentFalse = false>
-TL_DEVICE void warpgroup_reg_alloc() {
-#if defined(TL_CUDA_ARCH_CTA_RECONFIG_ENABLED)
+template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_alloc() {
   asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" : : "n"(RegCount));
-#else
-  static_assert(kDependentFalse,
-                "tl::warpgroup_reg_alloc requires a target with CTA register "
-                "reconfiguration, such as sm_90a");
-#endif
 }
 
-template <uint32_t RegCount, bool kDependentFalse = false>
-TL_DEVICE void warpgroup_reg_dealloc() {
-#if defined(TL_CUDA_ARCH_CTA_RECONFIG_ENABLED)
+template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_dealloc() {
   asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
-#else
-  static_assert(kDependentFalse,
-                "tl::warpgroup_reg_dealloc requires a target with CTA register "
-                "reconfiguration, such as sm_90a");
-#endif
 }
+#endif
 
 } // namespace tl

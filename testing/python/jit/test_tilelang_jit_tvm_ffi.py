@@ -134,8 +134,8 @@ def run_gemm_jit_kernel(
     in_dtype = T.dtype(in_dtype).as_torch()
     out_dtype = T.dtype(out_dtype).as_torch()
 
-    A = torch.randn(M, K, dtype=in_dtype).cuda()
-    B = torch.randn(K, N, dtype=in_dtype).cuda()
+    A = torch.randn(M, K, dtype=in_dtype).musa()
+    B = torch.randn(K, N, dtype=in_dtype).musa()
 
     if trans_A:
         A = A.T
@@ -233,19 +233,19 @@ def run_tvm_ffi_kernel_multi_stream(
     matmul_kernel = tilelang.compile(program, execution_backend="tvm_ffi")
     in_dtype = T.dtype(in_dtype).as_torch()
     out_dtype = T.dtype(out_dtype).as_torch()
-    tensor_a = torch.randn(M, K, dtype=in_dtype).cuda()
-    tensor_b = torch.randn(K, N, dtype=in_dtype).cuda()
+    tensor_a = torch.randn(M, K, dtype=in_dtype).musa()
+    tensor_b = torch.randn(K, N, dtype=in_dtype).musa()
 
     if trans_A:
         tensor_a = tensor_a.T
     if trans_B:
         tensor_b = tensor_b.T
-    tensor_c = torch.randn(M, N, dtype=out_dtype).cuda()
+    tensor_c = torch.randn(M, N, dtype=out_dtype).musa()
 
     num_streams = 4
     for _ in range(num_streams):
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
+        stream = torch.musa.Stream()
+        with torch.musa.stream(stream):
             matmul_kernel(tensor_a, tensor_b, tensor_c)
 
 
@@ -283,14 +283,14 @@ def run_tvm_ffi_dynamic_shape(
     in_dtype = T.dtype(in_dtype).as_torch()
     out_dtype = T.dtype(out_dtype).as_torch()
 
-    tensor_a = torch.randn(M, K, dtype=in_dtype).cuda()
-    tensor_b = torch.randn(K, N, dtype=in_dtype).cuda()
+    tensor_a = torch.randn(M, K, dtype=in_dtype).musa()
+    tensor_b = torch.randn(K, N, dtype=in_dtype).musa()
 
     if trans_A:
         tensor_a = tensor_a.T
     if trans_B:
         tensor_b = tensor_b.T
-    tensor_c = torch.randn(M, N, dtype=out_dtype).cuda()
+    tensor_c = torch.randn(M, N, dtype=out_dtype).musa()
 
     matmul_kernel(tensor_a, tensor_b, tensor_c)
 
@@ -309,9 +309,9 @@ def test_tvm_ffi_dynamic_shape():
 
 
 def check_hopper():
-    if not torch.cuda.is_available():
+    if not torch.musa.is_available():
         return False
-    props = torch.cuda.get_device_properties(0)
+    props = torch.musa.get_device_properties(0)
     compute_capability = props.major, props.minor
     return compute_capability == (9, 0)
 
@@ -354,8 +354,8 @@ def run_tvm_ffi_im2col_tma_desc(N, C, H, W, F, K, S, D, P, block_M, block_N, blo
 
     conv_kernel = tilelang.compile(program, out_idx=-1, execution_backend="tvm_ffi")
 
-    a = torch.randn(N, H, W, C).cuda().half()
-    b = torch.randn(K, K, C, F).cuda().half()
+    a = torch.randn(N, H, W, C).musa().half()
+    b = torch.randn(K, K, C, F).musa().half()
 
     out_c = conv_kernel(a, b)
 
@@ -494,36 +494,6 @@ def test_tvm_ffi_pdl():
     tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
 
     print("pdl test passed!")
-
-
-@tilelang.testing.requires_cuda
-def test_tvm_ffi_dynamic_shape_output_before_input():
-    """An output may precede the input that supplies its symbolic dimension.
-
-    The dynamic-symbolic map records parameter indices taken from the PrimFunc
-    signature, and an output's shape is resolved while that output is being
-    allocated. When the output precedes its input, the referenced slot is not an
-    input, so resolving it against the compacted input list reads the wrong tensor
-    or runs off the end of that list.
-    """
-    N = T.dynamic("N")
-
-    @tilelang.jit(out_idx=[0], execution_backend="tvm_ffi")
-    def kernel():
-        @T.prim_func
-        def main(
-            B: T.Tensor((N,), "float32"),
-            A: T.Tensor((N,), "float32"),
-        ):
-            with T.Kernel(1, threads=128):
-                for i in T.Parallel(N):
-                    B[i] = A[i] + T.float32(9)
-
-        return main
-
-    a = torch.arange(128, dtype=torch.float32).cuda()
-    out = kernel()(a)
-    tilelang.testing.torch_assert_close(out, a + 9, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

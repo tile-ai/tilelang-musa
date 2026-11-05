@@ -2,16 +2,45 @@
 
 from __future__ import annotations
 from typing import Literal, Any
-
 from tilelang._typing import BufferLikeType
+from tilelang.language.frame import get_let_value, has_let_value
 from tilelang.utils.language import (
     to_buffer_region,
     legalize_pairwise_extents,
 )
+from tilelang.language.utils import get_extent, buffer_region_to_tile_region
 from tilelang.utils.deprecated import deprecated
-from tilelang.language.utils import get_extent, buffer_region_to_tile_region, _normalize_annotations
 import tvm
 from tvm import ir, tirx
+
+
+EvictionPolicy = Literal["evict_normal", "evict_first", "evict_last"]
+CachePolicy = Literal["cache_none", "cache_once", "cache_normal", "cache_persist"]
+_EVICTION_POLICY_MAP = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+_CACHE_POLICY_MAP = {
+    "cache_none": 0,
+    "cache_once": 1,
+    "cache_normal": 2,
+    "cache_persist": 3,
+}
+_EVICTION_TO_CACHE_POLICY = {
+    _EVICTION_POLICY_MAP["evict_normal"]: _CACHE_POLICY_MAP["cache_normal"],
+    _EVICTION_POLICY_MAP["evict_first"]: _CACHE_POLICY_MAP["cache_once"],
+    _EVICTION_POLICY_MAP["evict_last"]: _CACHE_POLICY_MAP["cache_persist"],
+}
+
+
+def _set_tma_cache_annotations(ann: dict) -> None:
+    if "eviction_policy" in ann:
+        if "inner_cache_policy" in ann or "outer_cache_policy" in ann:
+            raise ValueError("eviction_policy cannot be combined with inner_cache_policy or outer_cache_policy.")
+    else:
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP["evict_normal"]
+
+    if "inner_cache_policy" not in ann:
+        ann["inner_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
+    if "outer_cache_policy" not in ann:
+        ann["outer_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
 
 
 def _normalize_copy_regions(
@@ -51,16 +80,18 @@ def _normalize_copy_regions(
     return src, dst
 
 
-# Cache eviction priority names -> integer ids used in the tile-op call
-# protocol (consumed by CUDA codegen; see the CUDA dialect's copy/im2col).
-EVICTION_POLICY_IDS = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
-
-
 def copy(
     src: BufferLikeType,
     dst: BufferLikeType,
     *,
     coalesced_width: int | None = None,
+    disable_tma: bool = False,
+    force_async_copy: bool = False,
+    eviction_policy: EvictionPolicy | None = None,
+    inner_cache_policy: CachePolicy | None = None,
+    outer_cache_policy: CachePolicy | None = None,
+    src_robust_desc: tirx.PrimExpr | None = None,
+    prefer_instruction: str | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
@@ -70,12 +101,22 @@ def copy(
         src (Union[tirx.Buffer, tirx.BufferLoad, tirx.BufferRegion]): Source memory region
         dst (Union[tirx.Buffer, tirx.BufferLoad, tirx.BufferRegion]): Destination memory region
         coalesced_width (Optional[int], keyword-only): Width for coalesced memory access. Defaults to None.
+        disable_tma (bool, keyword-only): Whether to disable TMA acceleration. Defaults to False.
+        force_async_copy (bool, keyword-only): Force MUSA async-copy lowering for this copy site.
+        eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
+        inner_cache_policy (Optional[str], keyword-only): MUSA inner-cache policy.
+        outer_cache_policy (Optional[str], keyword-only): MUSA outer-cache policy.
+        src_robust_desc (Optional[tirx.PrimExpr], keyword-only): MUSA robust source descriptor
+            created by `T.make_robust_desc(addr, size_bytes)`.
+        prefer_instruction (Optional[str], keyword-only): Backend-specific preferred lowering
+            instruction category. CUDA and MUSA recognize "tma", "cp_async", and
+            "sync". For "tma", T.copy keeps synchronous copy semantics; global -> shared copies
+            lower through TMA with an automatically allocated barrier and wait when constraints
+            are satisfied.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
-            coalesced_width can also be specified here. Values in annotations take precedence
-            over individual arguments. Backend-specific copy hints ride through this dict;
-            the backend dialects expose them as typed keywords instead
-            (``tilelang.cuda.language.copy`` adds ``disable_tma``, ``eviction_policy`` and
-            ``prefer_instruction``). Hints a target does not understand are ignored.
+            coalesced_width, disable_tma, force_async_copy, src_robust_desc, cache-policy fields,
+            and prefer_instruction can also be specified here.
+            Values in annotations take precedence over individual arguments.
         loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy
             (only valid for normal SIMT copy; incompatible with TMA/LDSM/STSM/TMem). When provided,
             it is attached to the outermost parallel loop generated by this copy.
@@ -105,29 +146,56 @@ def copy(
       scope-specific decisions happen during lowering.
     """
     src, dst = _normalize_copy_regions(src, dst)
+    if isinstance(src_robust_desc, tirx.Var) and has_let_value(src_robust_desc):
+        src_robust_desc = get_let_value(src_robust_desc)
+    if src_robust_desc is not None and not (
+        isinstance(src_robust_desc, tirx.Call)
+        and src_robust_desc.op.same_as(tirx.op.Op.get("tl.make_robust_desc"))
+        and len(src_robust_desc.args) == 2
+    ):
+        raise ValueError("src_robust_desc must be created by T.make_robust_desc(addr, size_bytes)")
+    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
+        body: tirx.Stmt = tirx.BufferStore(dst.buffer, src, dst.indices)
+        if src_robust_desc is not None:
+            body = tirx.AttrStmt(src.buffer.data, "tl.source_robust_desc", src_robust_desc, body)
+        if force_async_copy:
+            body = tirx.AttrStmt(
+                tirx.IntImm("int32", 0),
+                "tl.force_async_copy",
+                tirx.IntImm("int32", 1),
+                body,
+            )
+        return body
 
-    # Build annotations dict before selecting the scalar fast path: a scalar
-    # copy with metadata must remain a tile op so the metadata is preserved.
-    ann = _normalize_annotations(annotations)
+    # Build annotations dict
+    ann = annotations.copy() if annotations else {}
 
     # Individual arguments take lower precedence than annotations
     if "coalesced_width" not in ann and coalesced_width is not None:
         ann["coalesced_width"] = coalesced_width
+    if "disable_tma" not in ann and disable_tma:
+        ann["disable_tma"] = disable_tma
+    if "force_async_copy" not in ann and force_async_copy:
+        ann["force_async_copy"] = tirx.IntImm("int32", 1)
+    if "src_robust_desc" not in ann and src_robust_desc is not None:
+        ann["src_robust_desc"] = src_robust_desc
+    if "eviction_policy" not in ann and eviction_policy is not None:
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
+    if "inner_cache_policy" not in ann and inner_cache_policy is not None:
+        ann["inner_cache_policy"] = _CACHE_POLICY_MAP[inner_cache_policy]
+    if "outer_cache_policy" not in ann and outer_cache_policy is not None:
+        ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
+    _set_tma_cache_annotations(ann)
+    if "prefer_instruction" not in ann and prefer_instruction is not None:
+        ann["prefer_instruction"] = prefer_instruction
+    if isinstance(ann.get("prefer_instruction"), str):
+        ann["prefer_instruction"] = tirx.StringImm(ann["prefer_instruction"])
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
-        # Scalar fast path. Mirror the dtype conversion the region path applies
-        # in copy.cc; cast to the load dtype, which is what BufferStore checks
-        # once index lanes are folded in.
-        value = src
-        if src.dtype != dst.dtype:
-            value = tirx.Cast(dst.dtype, src)
-        return tirx.BufferStore(dst.buffer, value, dst.indices)
-
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
 
 
 def copy_cluster(
@@ -137,9 +205,8 @@ def copy_cluster(
     dst_block: int | tirx.PrimExpr | None = None,
     cluster_mask: int | None = None,
     remote_barrier: tirx.BufferLoad | None = None,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    eviction_policy: EvictionPolicy | None = None,
     coalesced_width: int | None = None,
-    annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
     """Cluster-aware copy for TMA multicast or SM-to-SM shared-memory copy.
@@ -157,8 +224,6 @@ def copy_cluster(
         coalesced_width: Vectorization width (in elements) for the SIMT loop
             used on the SM-to-SM fallback path (``dst_block`` set, no fast
             bulk-async route available).
-        annotations: Additional annotations dict. Values in annotations take
-            precedence over individual arguments.
         loop_layout: Parallel loop layout hint (Fragment) for the SIMT loop on
             the SM-to-SM fallback path. Incompatible with the TMA multicast
             path (``cluster_mask`` set).
@@ -168,21 +233,22 @@ def copy_cluster(
     """
     src, dst = _normalize_copy_regions(src, dst)
 
-    ann = _normalize_annotations(annotations)
-    if "dst_block" not in ann and dst_block is not None:
+    ann: dict = {}
+    if dst_block is not None:
         ann["dst_block"] = dst_block
-    if "cluster_mask" not in ann and cluster_mask is not None:
+    if cluster_mask is not None:
         ann["cluster_mask"] = cluster_mask
-    if "barrier" not in ann and remote_barrier is not None:
+    if remote_barrier is not None:
         ann["barrier"] = remote_barrier
-    if "eviction_policy" not in ann and eviction_policy is not None:
-        ann["eviction_policy"] = EVICTION_POLICY_IDS[eviction_policy]
-    if "coalesced_width" not in ann and coalesced_width is not None:
+    if eviction_policy is not None:
+        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if coalesced_width is not None:
         ann["coalesced_width"] = coalesced_width
-    if loop_layout is not None and "parallel_loop_layout" not in ann:
+    if loop_layout is not None:
         ann["parallel_loop_layout"] = loop_layout
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
 
 
 def async_copy(
@@ -211,21 +277,21 @@ def async_copy(
         tirx.Call: A handle to the async copy operation
     """
     src, dst = _normalize_copy_regions(src, dst)
-    ann = _normalize_annotations(annotations)
+    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
+        return tirx.BufferStore(dst.buffer, src, dst.indices)
+
+    ann = annotations.copy() if annotations else {}
     if "coalesced_width" not in ann and coalesced_width is not None:
         ann["coalesced_width"] = coalesced_width
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
-
-    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
-        return tirx.BufferStore(dst.buffer, src, dst.indices)
 
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.async_copy"),
         src,
         dst,
-        annotations=ann,
+        annotations=ann if ann else None,
     )
 
 
@@ -234,9 +300,10 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier=None,
-    cluster_mask: int | None = None,
     leader_scope_threads: int | None = None,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    eviction_policy: EvictionPolicy | None = None,
+    inner_cache_policy: CachePolicy | None = None,
+    outer_cache_policy: CachePolicy | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
     """TMA copy with user-managed synchronization.
@@ -246,13 +313,6 @@ def tma_copy(
     T.tma_copy() emits only the producer part (expect_tx + tma_load).
     The user manages synchronization explicitly via T.barrier_arrive() and
     T.mbarrier_wait_parity(). ``barrier`` is required for loads.
-
-    ``cluster_mask`` turns a load into a TMA **multicast** within the thread-block
-    cluster while keeping that same split-phase contract, unlike T.copy_cluster()
-    whose multicast path also emits the wait. The lowest-ranked CTA in the mask
-    issues the multicast and the other in-mask CTAs issue nothing; a CTA *outside*
-    the mask falls back to its own unicast load. Every CTA runs its own expect_tx
-    against its local copy of ``barrier``, so each one waits on its own arrival.
 
     For **stores** (shared -> global): issues tma_store + tma_store_arrive (no wait).
     Unlike T.copy() which emits tma_store + tma_store_arrive + tma_store_wait,
@@ -269,12 +329,11 @@ def tma_copy(
             Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
-        cluster_mask: Bitmask of the CTAs in the thread-block cluster that receive
-            a multicast load, e.g. ``0b11`` for the first two ranks. Loads only;
-            ``None`` issues an ordinary unicast load.
         leader_scope_threads: Number of threads in each TMA leader-election scope
             (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
         eviction_policy: Cache eviction policy. Defaults to None.
+        inner_cache_policy: MUSA inner-cache policy. Defaults to backend normal-cache policy.
+        outer_cache_policy: MUSA outer-cache policy. Defaults to backend normal-cache policy.
         annotations: Additional annotations dict. Values in annotations take
             precedence over individual arguments.
 
@@ -297,18 +356,12 @@ def tma_copy(
     src = to_buffer_region(src, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
-    ann = _normalize_annotations(annotations)
+    ann = annotations.copy() if annotations else {}
 
     if barrier is not None:
         from .builtin import _mbar_to_buffer_load
 
         ann["barrier"] = _mbar_to_buffer_load(barrier)
-
-    if cluster_mask is not None:
-        if not isinstance(cluster_mask, int) or cluster_mask <= 0:
-            raise ValueError(f"cluster_mask must be a positive int bitmask, got {cluster_mask}")
-        if "cluster_mask" not in ann:
-            ann["cluster_mask"] = cluster_mask
 
     if leader_scope_threads is not None:
         if not isinstance(leader_scope_threads, int) or leader_scope_threads <= 0:
@@ -319,9 +372,14 @@ def tma_copy(
             ann["leader_scope_threads"] = leader_scope_threads
 
     if "eviction_policy" not in ann and eviction_policy is not None:
-        ann["eviction_policy"] = EVICTION_POLICY_IDS[eviction_policy]
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
+    if "inner_cache_policy" not in ann and inner_cache_policy is not None:
+        ann["inner_cache_policy"] = _CACHE_POLICY_MAP[inner_cache_policy]
+    if "outer_cache_policy" not in ann and outer_cache_policy is not None:
+        ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
+    _set_tma_cache_annotations(ann)
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
 
 
 _TMA_SUPPORTED_DTYPES = frozenset(
@@ -349,7 +407,6 @@ def tma_gather4(
     barrier,
     swizzle=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
-    annotations: dict | None = None,
 ):
     """Issue a TMA tile::gather4 load (sm_100a, Blackwell).
 
@@ -363,9 +420,6 @@ def tma_gather4(
 
     The ``swizzle`` kwarg is deprecated; mark the shared tile via
     ``T.annotate_layout`` for non-default swizzle.
-
-    ``annotations`` is an additional annotations dict, merged before the
-    internal gather4 encoding keys.
     """
     if not isinstance(src, tirx.Buffer):
         raise TypeError("tma_gather4 src must be a tirx.Buffer (global)")
@@ -412,16 +466,13 @@ def tma_gather4(
     src_region = to_buffer_region(src, access_type="r", extents=[4, K_box])
     dst_region = to_buffer_region(dst, access_type="w", extents=[4, K_box])
 
-    ann = _normalize_annotations(annotations)
-    ann.update(
-        {
-            "is_gather4": True,
-            "gather4_rows": rows,
-            "gather4_col": col,
-            "barrier": bar_load,
-            "eviction_policy": ep,
-        }
-    )
+    ann = {
+        "is_gather4": True,
+        "gather4_rows": rows,
+        "gather4_col": col,
+        "barrier": bar_load,
+        "eviction_policy": ep,
+    }
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.copy"),
@@ -453,7 +504,6 @@ def tma_scatter4(
     *,
     swizzle=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
-    annotations: dict | None = None,
 ):
     """Issue a TMA tile::scatter4 store (sm_100a, Blackwell).
 
@@ -461,9 +511,6 @@ def tma_scatter4(
     a 2D global tensor ``dst``. Caller is responsible for ``tma_store_arrive``
     / ``tma_store_wait`` and the ``T.shuffle_elect`` guard. See
     :func:`tma_gather4` for descriptor / swizzle inference details.
-
-    ``annotations`` is an additional annotations dict, merged before the
-    internal scatter4 encoding keys.
     """
     if not isinstance(src, tirx.Buffer):
         raise TypeError("tma_scatter4 src must be a tirx.Buffer (shared)")
@@ -504,15 +551,12 @@ def tma_scatter4(
     src_region = to_buffer_region(src, access_type="r", extents=[4, K_box])
     dst_region = to_buffer_region(dst, access_type="w", extents=[4, K_box])
 
-    ann = _normalize_annotations(annotations)
-    ann.update(
-        {
-            "is_scatter4": True,
-            "gather4_rows": rows,
-            "gather4_col": col,
-            "eviction_policy": ep,
-        }
-    )
+    ann = {
+        "is_scatter4": True,
+        "gather4_rows": rows,
+        "gather4_col": col,
+        "eviction_policy": ep,
+    }
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.copy"),
@@ -525,7 +569,6 @@ def tma_scatter4(
 def transpose(
     src: BufferLikeType,
     dst: BufferLikeType,
-    annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """Transpose a 2D buffer in shared memory: dst[j, i] = src[i, j].
 
@@ -535,7 +578,6 @@ def transpose(
     Args:
         src: Source buffer or region of shape (..., M, N).
         dst: Destination buffer or region of shape (..., N, M).
-        annotations: Optional annotations to attach to the call.
 
     Returns:
         tirx.Call: A handle to the transpose operation.
@@ -558,11 +600,10 @@ def transpose(
         tirx.op.Op.get("tl.tileop.transpose"),
         src,
         dst,
-        annotations=_normalize_annotations(annotations),
     )
 
 
-def im2col_impl(
+def im2col(
     img: BufferLikeType,
     col: BufferLikeType,
     nhw_step: tirx.PrimExpr,
@@ -572,16 +613,26 @@ def im2col_impl(
     dilation: int,
     pad: int,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
-    annotations: dict | None = None,
 ) -> tirx.PrimExpr:
-    """Shared im2col implementation behind the common and dialect wrappers.
+    """Perform im2col transformation for 2D convolution.
 
-    ``eviction_policy`` rides in the tile-op annotations; only the CUDA TMA
-    lowering reads it, so only the CUDA dialect exposes it.
+    Args:
+        img (tirx.Buffer): Input image buffer
+        col (tirx.Buffer): Output column buffer
+        nhw_step (tirx.PrimExpr): Step size for batch and spatial dimensions
+        c_step (tirx.PrimExpr): Step size for channel dimension
+        kernel (int): Kernel size
+        stride (int): Stride of the convolution
+        dilation (int): Dilation rate
+        pad (int): Padding size
+
+    Returns:
+        tirx.Call: A handle to the im2col operation
     """
-    ann = _normalize_annotations(annotations)
-    if eviction_policy is not None and "eviction_policy" not in ann:
-        ann["eviction_policy"] = EVICTION_POLICY_IDS[eviction_policy]
+    if eviction_policy is None:
+        eviction_policy = 0
+    else:
+        eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
     img_region = to_buffer_region(img)
     col_region = to_buffer_region(col)
     img_extents = [r.extent for r in img_region.region]
@@ -599,41 +650,8 @@ def im2col_impl(
         stride,
         dilation,
         pad,
-        annotations=ann,
+        eviction_policy,
     )
-
-
-def im2col(
-    img: BufferLikeType,
-    col: BufferLikeType,
-    nhw_step: tirx.PrimExpr,
-    c_step: tirx.PrimExpr,
-    kernel: int,
-    stride: int,
-    dilation: int,
-    pad: int,
-    annotations: dict | None = None,
-) -> tirx.PrimExpr:
-    """Perform im2col transformation for 2D convolution.
-
-    Args:
-        img (tirx.Buffer): Input image buffer
-        col (tirx.Buffer): Output column buffer
-        nhw_step (tirx.PrimExpr): Step size for batch and spatial dimensions
-        c_step (tirx.PrimExpr): Step size for channel dimension
-        kernel (int): Kernel size
-        stride (int): Stride of the convolution
-        dilation (int): Dilation rate
-        pad (int): Padding size
-        annotations: Optional annotations to attach to the call
-
-    The CUDA dialect (``tilelang.cuda.language.im2col``) additionally accepts
-    ``eviction_policy``, a cache hint for the TMA lowering.
-
-    Returns:
-        tirx.Call: A handle to the im2col operation
-    """
-    return im2col_impl(img, col, nhw_step, c_step, kernel, stride, dilation, pad, annotations=annotations)
 
 
 @deprecated("T.c2d_im2col", "T.im2col", "0.14.0")
@@ -646,8 +664,7 @@ def c2d_im2col(
     stride: int,
     dilation: int,
     pad: int,
-    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
-    annotations: dict | None = None,
+    eviction_policy: EvictionPolicy | None = None,
 ) -> tirx.PrimExpr:
     """Deprecated alias for :func:`im2col`.
 
@@ -655,7 +672,7 @@ def c2d_im2col(
         Use :func:`im2col` instead. This alias is scheduled for removal in
         TileLang 0.14.0.
     """
-    return im2col_impl(
+    return im2col(
         img,
         col,
         nhw_step,
@@ -665,5 +682,4 @@ def c2d_im2col(
         dilation,
         pad,
         eviction_policy,
-        annotations=annotations,
     )

@@ -1,15 +1,9 @@
 import os
 import random
-import sys
 import pytest
 
-os.environ["PYTHONHASHSEED"] = "0"
 
-# Ensure we import the in-tree `tilelang/` instead of any globally installed
-# versions that may appear earlier on PYTHONPATH.
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+DEFAULT_TEST_SEED = int(os.environ.get("TL_TEST_SEED", "0"))
 
 
 def _configure_torch_extensions_dir():
@@ -22,24 +16,60 @@ def _configure_torch_extensions_dir():
 
 _configure_torch_extensions_dir()
 
-random.seed(0)
 
-try:
-    import torch
-except ImportError:
-    pass
-else:
-    torch.manual_seed(0)
-    # Workaround: hipBLASLt on ROCm 7.1 nightly has a bug with certain matmul shapes
-    if hasattr(torch.version, "hip") and torch.version.hip:
-        torch.backends.cuda.preferred_blas_library("hipblas")
+def seed_everything(seed: int = DEFAULT_TEST_SEED):
+    random.seed(seed)
 
-try:
-    import numpy as np
-except ImportError:
-    pass
-else:
-    np.random.seed(0)
+    try:
+        import numpy as np
+    except ImportError:
+        pass
+    else:
+        np.random.seed(seed)
+
+    try:
+        import torch
+    except ImportError:
+        pass
+    else:
+        torch.manual_seed(seed)
+
+
+@pytest.fixture(scope="function", autouse=True)
+def _reset_random_seed():
+    seed_everything(DEFAULT_TEST_SEED)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _configure_torch_backend():
+    try:
+        import torch
+    except ImportError:
+        pass
+    else:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.mudnn.deterministic = True
+        torch.backends.mudnn.allow_tf32 = False
+
+
+collect_ignore = [
+    "python/cache",
+    "python/carver",
+    "python/cpu",
+    "python/autotune",
+    "python/tilelibrary",
+    "python/kernel/test_tilelang_kernel_bf16_gemm_mma.py",
+    "python/kernel/test_tilelang_kernel_fp8_gemm_mma.py",
+    "python/kernel/test_tilelang_kernel_gemm_mma_intrinsic.py",
+    "python/kernel/test_tilelang_kernel_int4_gemm_mma.py",
+    "python/language/test_tilelang_language_cooperative.py",
+    "python/language/test_tilelang_language_pdl.py",
+    "python/language/test_tilelang_language_cluster.py",
+    "python/language/test_tilelang_language_async_copy_gemm_sm80.py",
+    "python/language/test_tilelang_language_intrinsics_codegen.py",
+    "python/transform/test_tilelang_transform_lower_ldgstg.py",
+    "python/jit/test_tilelang_jit_parcompile.py",
+]
 
 
 def pytest_addoption(parser):
@@ -73,15 +103,6 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_sep(
             "-",
             f"Skipped {config._perf_items_filtered} perf test(s). Re-run with --run-perf to include them.",
-        )
-        return
-    if executed_count == 0 and getattr(config, "_ascend_suite_gated", False):
-        # testing/ascend/conftest.py ignored its whole directory because this
-        # build has no Ascend backend; that is a legitimate outcome, not a
-        # mis-configured run.
-        terminalreporter.write_sep(
-            "-",
-            "Skipped the Ascend test suite: the Ascend backend is not built into this library.",
         )
         return
     if executed_count == 0:

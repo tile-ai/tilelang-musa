@@ -98,67 +98,6 @@ struct fp8_e5_t {
     return static_cast<float>(static_cast<hip_fp8_e5_t>(*this));
   }
 };
-
-// HIP's shuffle builtins do not provide exact overloads for TileLang's FP8
-// wrappers. Carry the raw byte through the native unsigned-int overload so the
-// exact FP8 bit pattern is preserved without widening through float.
-#define TL_DEFINE_FP8_SHFL_OVERLOADS(TYPE)                                     \
-  __device__ __forceinline__ TYPE __shfl(TYPE value, int src_lane,             \
-                                         int width = warpSize) {               \
-    TYPE result;                                                               \
-    result.data = static_cast<unsigned char>(                                  \
-        __shfl(static_cast<unsigned int>(value.data), src_lane, width));       \
-    return result;                                                             \
-  }                                                                            \
-  __device__ __forceinline__ TYPE __shfl_xor(TYPE value, int lane_mask,        \
-                                             int width = warpSize) {           \
-    TYPE result;                                                               \
-    result.data = static_cast<unsigned char>(                                  \
-        __shfl_xor(static_cast<unsigned int>(value.data), lane_mask, width));  \
-    return result;                                                             \
-  }                                                                            \
-  __device__ __forceinline__ TYPE __shfl_down(TYPE value, unsigned int delta,  \
-                                              int width = warpSize) {          \
-    TYPE result;                                                               \
-    result.data = static_cast<unsigned char>(                                  \
-        __shfl_down(static_cast<unsigned int>(value.data), delta, width));     \
-    return result;                                                             \
-  }                                                                            \
-  __device__ __forceinline__ TYPE __shfl_up(TYPE value, unsigned int delta,    \
-                                            int width = warpSize) {            \
-    TYPE result;                                                               \
-    result.data = static_cast<unsigned char>(                                  \
-        __shfl_up(static_cast<unsigned int>(value.data), delta, width));       \
-    return result;                                                             \
-  }
-
-TL_DEFINE_FP8_SHFL_OVERLOADS(fp8_e4_t)
-TL_DEFINE_FP8_SHFL_OVERLOADS(fp8_e5_t)
-
-#undef TL_DEFINE_FP8_SHFL_OVERLOADS
-
-template <typename ScalarType, typename PackedType>
-__device__ __forceinline__ ScalarType
-tl_fp8x2_get_lane(const PackedType &packed, int lane) {
-  ScalarType result;
-  result.data = static_cast<unsigned char>(
-      (static_cast<unsigned int>(packed.__x) >> (lane * 8)) & 0xffu);
-  return result;
-}
-
-template <typename PackedType, typename ScalarType>
-__device__ __forceinline__ void tl_fp8x2_set_lane(PackedType &packed, int lane,
-                                                  ScalarType value) {
-  if (lane == 0) {
-    // The result carrier is uninitialized before its first lane is written.
-    packed.__x = static_cast<decltype(packed.__x)>(value.data);
-    return;
-  }
-  packed.__x = static_cast<decltype(packed.__x)>(
-      (static_cast<unsigned int>(packed.__x) & 0x00ffu) |
-      (static_cast<unsigned int>(value.data) << 8));
-}
-
 // Note: E8M0 types are not supported in current HIP version
 // using fp8_e8_t = __hip_fp8_e8m0_fnuz;
 // using fp8_e8_2_t = __hip_fp8x2_e8m0_fnuz;
@@ -260,33 +199,28 @@ struct __align__(16) fp8_e8_16_t {
 
 __device__ fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x, fp8_e4_t y, fp8_e4_t z,
                                       fp8_e4_t w) {
-  // reinterpret the 4 fp8_e4_t values to unsigned char to avoid sign extension
-  // on shift
-  unsigned char x_char = *reinterpret_cast<unsigned char *>(&x);
-  unsigned char y_char = *reinterpret_cast<unsigned char *>(&y);
-  unsigned char z_char = *reinterpret_cast<unsigned char *>(&z);
-  unsigned char w_char = *reinterpret_cast<unsigned char *>(&w);
-  unsigned int res = ((unsigned int)w_char << 24) |
-                     ((unsigned int)z_char << 16) |
-                     ((unsigned int)y_char << 8) | (unsigned int)x_char;
+  // reinterpret the 4 fp8_e4_t values to signed char value and shift
+  signed char x_char = *reinterpret_cast<signed char *>(&x);
+  signed char y_char = *reinterpret_cast<signed char *>(&y);
+  signed char z_char = *reinterpret_cast<signed char *>(&z);
+  signed char w_char = *reinterpret_cast<signed char *>(&w);
+  int res = (w_char << 24) | (z_char << 16) | (y_char << 8) | x_char;
   return *reinterpret_cast<fp8_e4_4_t *>(&res);
 }
 
 __device__ fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x, fp8_e4_t y, fp8_e4_t z,
                                       fp8_e4_t w, fp8_e4_t v, fp8_e4_t u,
                                       fp8_e4_t t, fp8_e4_t s) {
-  unsigned char x_char = *reinterpret_cast<unsigned char *>(&x);
-  unsigned char y_char = *reinterpret_cast<unsigned char *>(&y);
-  unsigned char z_char = *reinterpret_cast<unsigned char *>(&z);
-  unsigned char w_char = *reinterpret_cast<unsigned char *>(&w);
-  unsigned char v_char = *reinterpret_cast<unsigned char *>(&v);
-  unsigned char u_char = *reinterpret_cast<unsigned char *>(&u);
-  unsigned char t_char = *reinterpret_cast<unsigned char *>(&t);
-  unsigned char s_char = *reinterpret_cast<unsigned char *>(&s);
-  unsigned int a = ((unsigned int)w_char << 24) | ((unsigned int)z_char << 16) |
-                   ((unsigned int)y_char << 8) | (unsigned int)x_char;
-  unsigned int b = ((unsigned int)s_char << 24) | ((unsigned int)t_char << 16) |
-                   ((unsigned int)u_char << 8) | (unsigned int)v_char;
+  signed char x_char = *reinterpret_cast<signed char *>(&x);
+  signed char y_char = *reinterpret_cast<signed char *>(&y);
+  signed char z_char = *reinterpret_cast<signed char *>(&z);
+  signed char w_char = *reinterpret_cast<signed char *>(&w);
+  signed char v_char = *reinterpret_cast<signed char *>(&v);
+  signed char u_char = *reinterpret_cast<signed char *>(&u);
+  signed char t_char = *reinterpret_cast<signed char *>(&t);
+  signed char s_char = *reinterpret_cast<signed char *>(&s);
+  int a = (w_char << 24) | (z_char << 16) | (y_char << 8) | x_char;
+  int b = (s_char << 24) | (t_char << 16) | (u_char << 8) | v_char;
   fp8_e4_8_t res;
   res.x = *reinterpret_cast<fp8_e4_4_t *>(&a);
   res.y = *reinterpret_cast<fp8_e4_4_t *>(&b);
@@ -299,34 +233,26 @@ __device__ fp8_e4_16_t make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
                                         fp8_e4_t y1, fp8_e4_t y2, fp8_e4_t y3,
                                         fp8_e4_t y4, fp8_e4_t y5, fp8_e4_t y6,
                                         fp8_e4_t y7) {
-  unsigned char x0_char = *reinterpret_cast<unsigned char *>(&x0);
-  unsigned char x1_char = *reinterpret_cast<unsigned char *>(&x1);
-  unsigned char x2_char = *reinterpret_cast<unsigned char *>(&x2);
-  unsigned char x3_char = *reinterpret_cast<unsigned char *>(&x3);
-  unsigned char x4_char = *reinterpret_cast<unsigned char *>(&x4);
-  unsigned char x5_char = *reinterpret_cast<unsigned char *>(&x5);
-  unsigned char x6_char = *reinterpret_cast<unsigned char *>(&x6);
-  unsigned char x7_char = *reinterpret_cast<unsigned char *>(&x7);
-  unsigned char y0_char = *reinterpret_cast<unsigned char *>(&y0);
-  unsigned char y1_char = *reinterpret_cast<unsigned char *>(&y1);
-  unsigned char y2_char = *reinterpret_cast<unsigned char *>(&y2);
-  unsigned char y3_char = *reinterpret_cast<unsigned char *>(&y3);
-  unsigned char y4_char = *reinterpret_cast<unsigned char *>(&y4);
-  unsigned char y5_char = *reinterpret_cast<unsigned char *>(&y5);
-  unsigned char y6_char = *reinterpret_cast<unsigned char *>(&y6);
-  unsigned char y7_char = *reinterpret_cast<unsigned char *>(&y7);
-  unsigned int a = ((unsigned int)x3_char << 24) |
-                   ((unsigned int)x2_char << 16) |
-                   ((unsigned int)x1_char << 8) | (unsigned int)x0_char;
-  unsigned int b = ((unsigned int)x7_char << 24) |
-                   ((unsigned int)x6_char << 16) |
-                   ((unsigned int)x5_char << 8) | (unsigned int)x4_char;
-  unsigned int c = ((unsigned int)y3_char << 24) |
-                   ((unsigned int)y2_char << 16) |
-                   ((unsigned int)y1_char << 8) | (unsigned int)y0_char;
-  unsigned int d = ((unsigned int)y7_char << 24) |
-                   ((unsigned int)y6_char << 16) |
-                   ((unsigned int)y5_char << 8) | (unsigned int)y4_char;
+  signed char x0_char = *reinterpret_cast<signed char *>(&x0);
+  signed char x1_char = *reinterpret_cast<signed char *>(&x1);
+  signed char x2_char = *reinterpret_cast<signed char *>(&x2);
+  signed char x3_char = *reinterpret_cast<signed char *>(&x3);
+  signed char x4_char = *reinterpret_cast<signed char *>(&x4);
+  signed char x5_char = *reinterpret_cast<signed char *>(&x5);
+  signed char x6_char = *reinterpret_cast<signed char *>(&x6);
+  signed char x7_char = *reinterpret_cast<signed char *>(&x7);
+  signed char y0_char = *reinterpret_cast<signed char *>(&y0);
+  signed char y1_char = *reinterpret_cast<signed char *>(&y1);
+  signed char y2_char = *reinterpret_cast<signed char *>(&y2);
+  signed char y3_char = *reinterpret_cast<signed char *>(&y3);
+  signed char y4_char = *reinterpret_cast<signed char *>(&y4);
+  signed char y5_char = *reinterpret_cast<signed char *>(&y5);
+  signed char y6_char = *reinterpret_cast<signed char *>(&y6);
+  signed char y7_char = *reinterpret_cast<signed char *>(&y7);
+  int a = (x3_char << 24) | (x2_char << 16) | (x1_char << 8) | x0_char;
+  int b = (x7_char << 24) | (x6_char << 16) | (x5_char << 8) | x4_char;
+  int c = (y3_char << 24) | (y2_char << 16) | (y1_char << 8) | y0_char;
+  int d = (y7_char << 24) | (y6_char << 16) | (y5_char << 8) | y4_char;
   fp8_e4_8_t res_x;
   res_x.x = *reinterpret_cast<fp8_e4_4_t *>(&a);
   res_x.y = *reinterpret_cast<fp8_e4_4_t *>(&b);

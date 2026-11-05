@@ -40,23 +40,23 @@ def kernel_alloc_var_ne(data):
     return out
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_alloc_var_eq():
     with warnings.catch_warnings():
         warnings.filterwarnings("error", message="Immutable value.*is re-bound")
-        data = torch.tensor([0, 1, 2, 3, 2], dtype=torch.int32, device="cuda")
+        data = torch.tensor([0, 1, 2, 3, 2], dtype=torch.int32, device="musa")
         result = kernel_alloc_var_eq(data)
-        expected = torch.tensor([0, 0, 1, 0, 1], dtype=torch.int32, device="cuda")
+        expected = torch.tensor([0, 0, 1, 0, 1], dtype=torch.int32, device="musa")
         torch.testing.assert_close(result, expected)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_alloc_var_ne():
     with warnings.catch_warnings():
         warnings.filterwarnings("error", message="Immutable value.*is re-bound")
-        data = torch.tensor([0, 1, 2, 3, 0], dtype=torch.int32, device="cuda")
+        data = torch.tensor([0, 1, 2, 3, 0], dtype=torch.int32, device="musa")
         result = kernel_alloc_var_ne(data)
-        expected = torch.tensor([0, 1, 1, 1, 0], dtype=torch.int32, device="cuda")
+        expected = torch.tensor([0, 1, 1, 1, 0], dtype=torch.int32, device="musa")
         torch.testing.assert_close(result, expected)
 
 

@@ -9,7 +9,7 @@ import tilelang.testing
 @tilelang.jit
 def dynamic_smem_kernel():
     # Symbolic length to drive dynamic shared memory allocation
-    length = T.dynamic("len", dtype=T.int32)  # noqa: F821
+    length = T.symbolic("len", dtype=T.int32)  # noqa: F821
 
     @T.prim_func
     def main(global_tensor: T.Tensor[(length,), T.int32]):  # noqa: F821
@@ -22,19 +22,19 @@ def dynamic_smem_kernel():
     return main
 
 
-def _require_cuda_tensor(shape, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+def _require_musa_tensor(shape, dtype):
+    if not torch.musa.is_available():
+        pytest.skip("MUSA not available")
     try:
-        return torch.randint(0, 100, shape, dtype=dtype, device="cuda")
+        return torch.randint(0, 100, shape, dtype=dtype, device="musa")
     except RuntimeError as err:
-        pytest.skip(f"CUDA runtime unavailable: {err}")
+        pytest.skip(f"MUSA runtime unavailable: {err}")
 
 
 def _run_and_check(kernel, n):
-    a = _require_cuda_tensor((n,), torch.int32)
+    a = _require_musa_tensor((n,), torch.int32)
     kernel(a)
-    torch.cuda.synchronize()
+    torch.musa.synchronize()
 
 
 def test_dynamic_shared_memory_varies_across_calls():

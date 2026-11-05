@@ -3,14 +3,11 @@ import errno
 from pathlib import Path
 from types import SimpleNamespace
 
+import cloudpickle
 import pytest
 
-from tilelang import tvm
-
 import tilelang.cache.kernel_cache as kernel_cache_mod
-from tilelang.backend import create_backend_context
 from tilelang.cache.kernel_cache import KernelCache
-from tilelang.engine.param import KernelParam, dump_kernel_params
 from tilelang.env import env
 from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
@@ -29,14 +26,17 @@ class _FakeKernel:
     def __init__(self, libpath: str):
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
-        self.params = [KernelParam(tvm.DataType("float32"), [4])]
+        self.params = ["param"]
 
 
 @pytest.fixture
 def cache_dirs(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
+    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
+    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     return cache_dir
 
 
@@ -64,8 +64,8 @@ def _write_complete_kernel_cache_entry(
     (cache_path / cache.device_kernel_path).write_text(device_source)
     (cache_path / cache.host_kernel_path).write_text(host_source)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
-    cache._write_manifest(str(cache_path))
+    with (cache_path / cache.params_path).open("wb") as f:
+        cloudpickle.dump(["param"], f)
     return cache_path
 
 
@@ -87,11 +87,12 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     monkeypatch.setattr(cache, "_load_kernel_source", fail_source_load)
     monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fake_from_database))
 
-    backend_context = create_backend_context("cuda", execution_backend="tvm_ffi")
     loaded = cache._load_kernel_from_disk(
         key,
-        backend_context=backend_context,
+        target="cuda",
+        target_host=None,
         out_idx=[0],
+        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,
@@ -101,8 +102,7 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     assert captured["host_kernel_source"] == CachedTextSource(path=str(cache_path / cache.host_kernel_path))
     assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
     assert captured["kernel_lib_path"] == str(cache_path / cache.kernel_lib_path)
-    assert captured["params"] == [KernelParam(tvm.DataType("float32"), [4])]
-    assert captured["backend_context"] is backend_context
+    assert captured["params"] == ["param"]
 
 
 def test_kernel_cache_disk_hit_perf_skips_large_source_file_reads(cache_dirs, monkeypatch):
@@ -144,8 +144,10 @@ def test_kernel_cache_disk_hit_perf_skips_large_source_file_reads(cache_dirs, mo
 
     loaded = cache._load_kernel_from_disk(
         key,
-        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
+        target="cuda",
+        target_host=None,
         out_idx=[0],
+        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,
@@ -202,7 +204,8 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
     cache_path = Path(cache._get_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
+    with (cache_path / cache.params_path).open("wb") as f:
+        cloudpickle.dump(["param"], f)
 
     def fail_from_database(cls, **kwargs):
         raise AssertionError("incomplete cache entries should miss before rebuilding from database")
@@ -211,8 +214,10 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
 
     loaded = cache._load_kernel_from_disk(
         key,
-        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
+        target="cuda",
+        target_host=None,
         out_idx=[0],
+        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,

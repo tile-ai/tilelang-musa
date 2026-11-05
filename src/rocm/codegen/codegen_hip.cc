@@ -9,7 +9,6 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 #include <cstdint>
@@ -19,7 +18,7 @@
 #include <vector>
 
 #include "backend/common/target_utils.h"
-#include "rocm/op/builtin.h"
+#include "op/builtin.h"
 
 namespace tvm {
 namespace codegen {
@@ -55,177 +54,6 @@ std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
   }
   return std::nullopt;
 }
-
-// Convert an element-wise vector expression into the scalar expression for a
-// single lane.  In particular, this keeps BufferLoad nodes inside a scalar
-// Select instead of materializing both vector-valued branches before the
-// ternary is emitted.  Unlike CUDA's Select visitor (introduced in #2843),
-// which materializes the condition and both branches as SSA temporaries before
-// extracting lanes, HIP intentionally preserves lazy branch evaluation here.
-class VectorLaneScalarizer : public ExprMutator {
-public:
-  explicit VectorLaneScalarizer(int lane) : lane_(lane) {}
-
-private:
-  PrimExpr VisitExpr(const PrimExpr &expr) final {
-    PrimExpr result = ExprMutator::VisitExpr(expr);
-    if (result.dtype().is_fixed_length_vector()) {
-      return Shuffle::ExtractElement(expr, lane_);
-    }
-    return result;
-  }
-
-  PrimExpr VisitExpr_(const RampNode *op) final {
-    PrimExpr base = VisitExpr(op->base);
-    PrimExpr stride = VisitExpr(op->stride);
-    return base + stride * IntImm(stride.dtype(), lane_);
-  }
-
-  PrimExpr VisitExpr_(const BroadcastNode *op) final {
-    return VisitExpr(op->value);
-  }
-
-  PrimExpr VisitExpr_(const LetNode *op) final {
-    // Inlining before lane extraction preserves bodies that select a
-    // different lane of a bound vector through a Shuffle.  It also prevents
-    // scalar bindings from being emitted as statements before the enclosing
-    // Select, where they would evaluate inactive branch loads eagerly.
-    return VisitExpr(Substitute(op->body, {{op->var, op->value}}));
-  }
-
-  PrimExpr VisitExpr_(const CallNode *op) final {
-    if (op->dtype.is_fixed_length_vector()) {
-      if (op->op.same_as(builtin::reinterpret())) {
-        ICHECK_EQ(op->args.size(), 1U);
-        DataType source_dtype = op->args[0].dtype();
-        if (source_dtype.lanes() == op->dtype.lanes() &&
-            source_dtype.bits() == op->dtype.bits()) {
-          return Call(op->dtype.element_of(), op->op, {VisitExpr(op->args[0])},
-                      op->annotations);
-        }
-        ICHECK_EQ(source_dtype.lanes() * source_dtype.bits(),
-                  op->dtype.lanes() * op->dtype.bits())
-            << "reinterpret expects source and target to have the same number "
-               "of bits";
-        DataType result_element_dtype = op->dtype.element_of();
-        DataType source_bits_dtype = DataType::UInt(source_dtype.bits());
-        DataType result_bits_dtype = DataType::UInt(op->dtype.bits());
-        auto as_unsigned_bits = [](PrimExpr value,
-                                   DataType unsigned_dtype) -> PrimExpr {
-          if (value.dtype() == unsigned_dtype) {
-            return value;
-          }
-          return Call(unsigned_dtype, builtin::reinterpret(), {value});
-        };
-        auto from_unsigned_bits = [](PrimExpr value,
-                                     DataType result_dtype) -> PrimExpr {
-          if (value.dtype() == result_dtype) {
-            return value;
-          }
-          return Call(result_dtype, builtin::reinterpret(), {value});
-        };
-
-        if (source_dtype.bits() < op->dtype.bits()) {
-          ICHECK_EQ(op->dtype.bits() % source_dtype.bits(), 0);
-          int source_lanes_per_result = op->dtype.bits() / source_dtype.bits();
-          PrimExpr packed = make_zero(result_bits_dtype);
-          for (int i = 0; i < source_lanes_per_result; ++i) {
-            int source_lane = lane_ * source_lanes_per_result + i;
-            PrimExpr source_value =
-                VectorLaneScalarizer(source_lane)(op->args[0]);
-            PrimExpr source_bits =
-                as_unsigned_bits(source_value, source_bits_dtype);
-            PrimExpr widened = Cast(result_bits_dtype, source_bits);
-            packed = packed | (widened << IntImm(result_bits_dtype,
-                                                 i * source_dtype.bits()));
-          }
-          return from_unsigned_bits(packed, result_element_dtype);
-        }
-
-        ICHECK_EQ(source_dtype.bits() % op->dtype.bits(), 0);
-        int result_lanes_per_source = source_dtype.bits() / op->dtype.bits();
-        int source_lane = lane_ / result_lanes_per_source;
-        int bit_offset =
-            (lane_ % result_lanes_per_source) * result_element_dtype.bits();
-        PrimExpr source_value = VectorLaneScalarizer(source_lane)(op->args[0]);
-        PrimExpr source_bits =
-            as_unsigned_bits(source_value, source_bits_dtype);
-        PrimExpr shifted = source_bits >> IntImm(source_bits_dtype, bit_offset);
-        PrimExpr narrowed = Cast(result_bits_dtype, shifted);
-        return from_unsigned_bits(narrowed, result_element_dtype);
-      }
-      Array<PrimExpr> args;
-      args.reserve(op->args.size());
-      for (const PrimExpr &arg : op->args) {
-        args.push_back(VisitExpr(arg));
-      }
-      if (op->op.same_as(builtin::call_pure_extern()) ||
-          op->op.same_as(builtin::call_extern())) {
-        return Call(op->dtype.element_of(), op->op, args, op->annotations);
-      }
-      if (op->op.same_as(tl::add2())) {
-        return args[0] + args[1];
-      }
-      if (op->op.same_as(tl::sub2())) {
-        return args[0] - args[1];
-      }
-      if (op->op.same_as(tl::mul2())) {
-        return args[0] * args[1];
-      }
-      if (op->op.same_as(tl::fma2())) {
-        return args[0] * args[1] + args[2];
-      }
-      if (op->op.same_as(tl::max2())) {
-        return Select(args[0] > args[1], args[0], args[1]);
-      }
-      if (op->op.same_as(tl::min2())) {
-        return Select(args[0] < args[1], args[0], args[1]);
-      }
-      if (op->op.same_as(tl::abs2())) {
-        if (args[0].dtype().is_bfloat16()) {
-          return Call(args[0].dtype(), builtin::call_pure_extern(),
-                      {StringImm("__habs"), args[0]});
-        }
-        PrimExpr zero = make_zero(args[0].dtype());
-        return Select(args[0] >= zero, args[0], -args[0]);
-      }
-    }
-    return ExprMutator::VisitExpr_(op);
-  }
-
-  PrimExpr VisitExpr_(const ShuffleNode *op) final {
-    int output_lane = op->dtype.is_scalar() ? 0 : lane_;
-    ICHECK_LT(output_lane, op->indices.size());
-    const int64_t *index = as_const_int(op->indices[output_lane]);
-    ICHECK(index) << "Vector select scalarization requires constant Shuffle "
-                     "indices: "
-                  << GetRef<Shuffle>(op);
-    int64_t source_lane = *index;
-    for (const PrimExpr &vector : op->vectors) {
-      ICHECK(!vector.dtype().is_scalable_vector());
-      int lanes = vector.dtype().lanes();
-      if (source_lane < lanes) {
-        if (vector.dtype().is_scalar()) {
-          ICHECK_EQ(source_lane, 0);
-          return VisitExpr(vector);
-        }
-        return VectorLaneScalarizer(static_cast<int>(source_lane))(vector);
-      }
-      source_lane -= lanes;
-    }
-    ICHECK(false) << "Shuffle index out of range: " << GetRef<Shuffle>(op);
-    return PrimExpr();
-  }
-
-  PrimExpr VisitExpr_(const CastNode *op) final {
-    PrimExpr value = VisitExpr(op->value);
-    DataType dtype =
-        op->dtype.is_fixed_length_vector() ? op->dtype.element_of() : op->dtype;
-    return value.dtype() == dtype ? value : Cast(dtype, value);
-  }
-
-  int lane_;
-};
 
 int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
   ICHECK(op->args.size() == 3 || op->args.size() == 4)
@@ -292,30 +120,6 @@ static std::string GetFP8Type(DataType type) {
     stream << "fp8_e8" << vec << "_t";
   } else {
     LOG(FATAL) << "Unsupported FP8 type in HIP codegen: " << type;
-  }
-  return stream.str();
-}
-
-// Returns the HIP C type string for a float4_e2m1fn DataType.
-// Only used on gfx950; caller sets enable_fp4_ before invoking.
-static std::string GetFP4Type(DataType type) {
-  std::stringstream stream;
-  int32_t lanes = type.lanes();
-  if (type.is_scalar()) {
-    stream << "fp4_e2_t";
-  } else if (lanes == 2) {
-    stream << "fp4_e2_2_t";
-  } else if (lanes == 4) {
-    stream << "fp4_e2_4_t";
-  } else if (lanes == 8) {
-    stream << "fp4_e2_8_t";
-  } else if (lanes == 16) {
-    stream << "fp4_e2_16_t";
-  } else if (lanes == 32) {
-    stream << "fp4_e2_32_t";
-  } else {
-    LOG(FATAL) << "Only support scalar and vector types of width (2,4,8,16,32) "
-                  "for FP4 on HIP";
   }
   return stream.str();
 }
@@ -415,10 +219,6 @@ std::string CodeGenTileLangHIP::Finish() {
     decl_stream << "#include <tl_templates/hip/hip_fp8.h>\n";
   }
 
-  if (enable_fp4_) {
-    decl_stream << "#include <tl_templates/hip/hip_fp4.h>\n";
-  }
-
   if (need_cooperative_groups_) {
     decl_stream << "#include <hip/hip_cooperative_groups.h>\n";
   }
@@ -449,15 +249,7 @@ void CodeGenTileLangHIP::VisitStmt_(const tirx::ForNode *op) {
   stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
          << "; ++" << vid << ") {\n";
   int for_scope = BeginScope();
-  // A lexical_alloc_scope spanning the entire loop body is redundant with
-  // the loop's own braces; unwrap it to avoid emitting `{ {`.
-  Stmt body = op->body;
-  while (const auto *attr = body.as<AttrStmtNode>()) {
-    if (attr->attr_key != tl::attr::kLexicalAllocScope)
-      break;
-    body = attr->body;
-  }
-  PrintStmt(body);
+  PrintStmt(op->body);
   this->EndScope(for_scope);
   PrintIndent();
   stream << "}\n";
@@ -479,6 +271,11 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 
   if (t.is_void()) {
     os << "void";
+    return;
+  }
+
+  if (t == tl::CuTensorMapType()) {
+    os << "CUtensorMap";
     return;
   }
 
@@ -564,38 +361,15 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     enable_fp8_ = true;
     os << GetFP8Type(t);
     return;
-  } else if (t.is_float4()) {
-    // FP4 E2M1 is only supported on gfx950 (CDNA4). Setting enable_fp4_ will
-    // cause Finish() to include hip_fp4.h which is itself guarded by
-    // #if defined(__gfx950__), so this is safe to emit on all HIP targets
-    // (the compiler will reject FP4 kernel code on non-gfx950 anyway).
-    enable_fp4_ = true;
-    if (t.lanes() <= 32) {
-      os << GetFP4Type(t);
-    } else {
-      LOG(FATAL) << "Cannot convert FP4 type with " << t.lanes()
-                 << " lanes to HIP type (max 32 lanes supported)";
-    }
-    return;
   } else if (t == DataType::Bool()) {
     os << "bool";
     return;
   } else if (t.is_vector_bool()) {
-    // HIP does not support bool vectors.
-    // Use ushort vectors for directly addressable lanes and packed unsigned
-    // integers for wider vectors.
+    // CUDA does not support bool vectors.
+    // Use ushort vectors to represent instead.
     int n = t.lanes();
     if (n <= 4) {
       os << "ushort" << n;
-      return;
-    } else if (n == 8) {
-      os << "uint8_t";
-      return;
-    } else if (n == 16) {
-      os << "uint16_t";
-      return;
-    } else if (n == 32) {
-      os << "uint";
       return;
     }
   } else if (t.is_uint() || t.is_int()) {
@@ -781,56 +555,6 @@ void CodeGenTileLangHIP::PrintVecBinaryOp(const std::string &op, DataType t,
   os << sret;
 }
 
-void CodeGenTileLangHIP::VisitExpr_(const SelectNode *op, std::ostream &os) {
-  if (!op->condition.dtype().is_fixed_length_vector()) {
-    CodeGenC::VisitExpr_(op, os);
-    return;
-  }
-
-  TVM_FFI_ICHECK(op->false_value->dtype == op->dtype &&
-                 op->true_value->dtype == op->dtype &&
-                 op->dtype.lanes() == op->condition.dtype().lanes());
-
-  std::string result = name_supply_->FreshName("_");
-  auto scalarize_lane = [&](int lane) {
-    PrimExpr lane_select = VectorLaneScalarizer(lane)(GetRef<PrimExpr>(op));
-    ICHECK(lane_select.dtype().is_scalar());
-    return lane_select;
-  };
-  this->PrintIndent();
-  this->PrintType(op->dtype, stream);
-  stream << ' ' << result << "{};\n";
-  for (int i = 0; i < op->dtype.lanes(); ++i) {
-    PrintVecElemStore(result, op->dtype, i, PrintExpr(scalarize_lane(i)));
-  }
-  os << result;
-}
-
-void CodeGenTileLangHIP::VisitExpr_(const NotNode *op, std::ostream &os) {
-  if (!op->dtype.is_fixed_length_vector()) {
-    CodeGenC::VisitExpr_(op, os);
-    return;
-  }
-
-  std::string result = name_supply_->FreshName("_");
-  this->PrintIndent();
-  this->PrintType(op->dtype, stream);
-  stream << ' ' << result << ";\n";
-  int ssa_scope = BeginScope();
-  {
-    std::string value = SSAGetID(PrintExpr(op->a), op->a.dtype());
-    for (int i = 0; i < op->dtype.lanes(); ++i) {
-      std::ostringstream lane;
-      lane << "!bool(";
-      PrintVecElemLoad(value, op->a.dtype(), i, lane);
-      lane << ')';
-      PrintVecElemStore(result, op->dtype, i, lane.str());
-    }
-  }
-  EndScope(ssa_scope);
-  os << result;
-}
-
 void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
                                           int i,
                                           std::ostream &os) { // NOLINT(*)
@@ -840,23 +564,12 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   }
 
   static const char access[] = {'x', 'y', 'z', 'w'};
-  bool is_packed_bool = t.is_vector_bool() && t.lanes() >= 8;
-  bool is_packed_int4 = t.bits() == 4 && (t.is_int() || t.is_uint());
-  ICHECK(i >= 0 && i < (is_packed_bool                       ? t.lanes()
-                        : is_packed_int4                     ? t.lanes()
-                        : t.is_float4()                      ? 32
-                        : t.bits() == 8                      ? 16
+  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
                         : (t.lanes() == 16)                  ? 16
                         : (t.lanes() == 32)                  ? 32
                         : (t.bits() == 16 || t.bits() == 32) ? 8
                                                              : 4));
-  if (is_packed_bool) {
-    std::ostringstream packed_byte;
-    packed_byte << "((const unsigned char*)(&(" << vec << ")))[" << i / 8
-                << "]";
-    os << "((static_cast<unsigned int>(" << packed_byte.str() << ") >> "
-       << i % 8 << ") & 0x01u)";
-  } else if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     std::string type_name = t.is_int() ? "char" : "unsigned char";
     if (t.lanes() == 2 || t.lanes() == 3) {
       os << vec << "." << access[i % t.lanes()];
@@ -878,46 +591,6 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     os << "((bfloat16x2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
-  } else if (is_packed_int4) {
-    std::ostringstream packed_byte;
-    packed_byte << "((const unsigned char*)(&(" << vec << ")))[" << i / 2
-                << "]";
-    int shift = i % 2 * 4;
-    if (t.is_uint()) {
-      os << "((static_cast<unsigned int>(" << packed_byte.str() << ") >> "
-         << shift << ") & 0x0fu)";
-    } else {
-      os << "((static_cast<int>((static_cast<unsigned int>("
-         << packed_byte.str() << ") >> " << shift << ") & 0x0fu) ^ 8) - 8)";
-    }
-  } else if (t.is_float8() && !t.is_float8_e8m0fnu()) {
-    if (t.lanes() == 2) {
-      os << "tl_fp8x2_get_lane<" << GetFP8Type(t.element_of()) << ">(" << vec
-         << ", " << i << ")";
-      return;
-    }
-    std::string element = vec;
-    int lanes = t.lanes();
-    int lane = i;
-    while (lanes > 4) {
-      int group_size = lanes / 2;
-      element += lane < group_size ? ".x" : ".y";
-      lane %= group_size;
-      lanes = group_size;
-    }
-    element += "." + std::string(1, access[lane]);
-    os << element;
-  } else if (t.is_float4()) {
-    std::string element = vec;
-    int lanes = t.lanes();
-    int lane = i;
-    while (lanes > 2) {
-      int group_size = lanes / 2;
-      element += lane < group_size ? ".x" : ".y";
-      lane %= group_size;
-      lanes = group_size;
-    }
-    os << element << (lane == 0 ? ".x()" : ".y()");
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -948,40 +621,23 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
 
-  bool is_packed_bool = t.is_vector_bool() && t.lanes() >= 8;
-  bool is_packed_int4 = t.bits() == 4 && (t.is_int() || t.is_uint());
-  ICHECK(i >= 0 && i < (is_packed_bool                       ? t.lanes()
-                        : is_packed_int4                     ? t.lanes()
-                        : t.is_float4()                      ? 32
-                        : t.bits() == 8                      ? 16
+  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
                         : (t.lanes() == 16)                  ? 16
                         : (t.lanes() == 32)                  ? 32
                         : (t.bits() == 16 || t.bits() == 32) ? 8
                                                              : 4));
-  if (is_packed_bool) {
-    std::ostringstream packed_byte;
-    packed_byte << "((unsigned char*)(&(" << vec << ")))[" << i / 8 << "]";
-    stream << packed_byte.str() << " = ";
-    if (i % 8 != 0) {
-      stream << "(" << packed_byte.str() << " & ~(0x01u << " << i % 8
-             << ")) | ";
-    }
-    stream << "((static_cast<unsigned int>(" << value << ") & 0x01u) << "
-           << i % 8 << ");\n";
-  } else if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
       stream << vec << '.' << access[i % t.lanes()] << "=" << "(" << value
              << ");\n";
     } else {
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       stream << ac << "=";
-      // Do not read the first lane of each carrier word.
-      if (i % 4 != 0) {
-        stream << "static_cast<unsigned int>(" << ac << ") & ~(0x000000ffu << "
-               << i % 4 * 8 << ") |";
+      // Do not read the first undef lane.
+      if (i != 0) {
+        stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
       }
-      stream << "(static_cast<unsigned int>(static_cast<unsigned char>("
-             << value << ")) << " << i % 4 * 8 << ");\n";
+      stream << "(" << value << " << " << i % 4 * 8 << ");\n";
     }
   } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 &&
              t.is_float()) {
@@ -997,42 +653,6 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     stream << "((bfloat16_t*)(&(" << vec << "." << access[i / 2] << ")))["
            << (i % 2) << "] = " << value << ";\n";
-  } else if (is_packed_int4) {
-    std::ostringstream packed_byte;
-    packed_byte << "((unsigned char*)(&(" << vec << ")))[" << i / 2 << "]";
-    stream << packed_byte.str() << " = ";
-    if (i % 2 != 0) {
-      stream << "(" << packed_byte.str() << " & 0x0fu) | ";
-    }
-    stream << "((static_cast<unsigned int>(" << value << ") & 0x0fu) << "
-           << i % 2 * 4 << ");\n";
-  } else if (t.is_float8() && !t.is_float8_e8m0fnu()) {
-    if (t.lanes() == 2) {
-      stream << "tl_fp8x2_set_lane(" << vec << ", " << i << ", " << value
-             << ");\n";
-      return;
-    }
-    std::string element = vec;
-    int lanes = t.lanes();
-    int lane = i;
-    while (lanes > 4) {
-      int group_size = lanes / 2;
-      element += lane < group_size ? ".x" : ".y";
-      lane %= group_size;
-      lanes = group_size;
-    }
-    stream << element << "." << access[lane] << " = " << value << ";\n";
-  } else if (t.is_float4()) {
-    std::string element = vec;
-    int lanes = t.lanes();
-    int lane = i;
-    while (lanes > 2) {
-      int group_size = lanes / 2;
-      element += lane < group_size ? ".x" : ".y";
-      lane %= group_size;
-      lanes = group_size;
-    }
-    stream << element << (lane == 0 ? ".set_x(" : ".set_y(") << value << ");\n";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -1139,198 +759,6 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
   if (from_ty.is_scalar())
     return CodeGenC::VisitExpr_(op, os);
 
-  // ---------------------------------------------------------------------------
-  // Vectorized FP4 <-> float/half/bfloat16 conversions (gfx950 only).
-  // These use the pair-wise helpers from hip_fp4.h.  We process two lanes at a
-  // time: odd-indexed lane is the "high" nibble, even-indexed is "low".
-  // Only enabled when the FP4 header is included (enable_fp4_ is set by
-  // PrintType when a float4 type is encountered).
-  // ---------------------------------------------------------------------------
-  int fp4_lanes = from_ty.lanes();
-  // Pairwise cast: process 2 FP4 lanes at a time via packed uint8_t byte.
-  // Supported lane widths: 2, 4, 8, 16, 32 (all even widths up to FP4x32).
-  bool fp4_pair_cast = (fp4_lanes == 2 || fp4_lanes == 4 || fp4_lanes == 8 ||
-                        fp4_lanes == 16 || fp4_lanes == 32);
-
-  // FP4 -> float16 : use __tl_cvt_fp4x2_to_half2 per 2-element pair
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float16() && fp4_pair_cast) {
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(target_ty, stream);
-    stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    // Iterate over pairs: src is stored as fp4_e2_{lanes}_t; we access the
-    // packed byte for each pair via reinterpret as uint8_t array.
-    // Materialize the uint1 result into a local variable to avoid taking the
-    // address of a prvalue (C++ UB).
-    for (int i = 0; i < fp4_lanes; i += 2) {
-      std::string tmp = name_supply_->FreshName("_fp4h2_");
-      this->PrintIndent();
-      stream << "uint1 " << tmp << " = __tl_cvt_fp4x2_to_half2(((uint8_t*)&("
-             << src << "))[" << i / 2 << "]);\n";
-      PrintVecElemStore(sret, target_ty, i, "((half_t*)(&(" + tmp + ")))[0]");
-      PrintVecElemStore(sret, target_ty, i + 1,
-                        "((half_t*)(&(" + tmp + ")))[1]");
-    }
-    os << sret;
-    return;
-  }
-
-  // FP4 -> float32 : use __tl_cvt_fp4x2_to_float2 per 2-element pair
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
-      target_ty.bits() == 32 && fp4_pair_cast) {
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(target_ty, stream);
-    stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0; i < fp4_lanes; i += 2) {
-      std::ostringstream val;
-      val << "__tl_cvt_fp4x2_to_float2(((uint8_t*)&(" << src << "))[" << i / 2
-          << "])";
-      std::string tmp = name_supply_->FreshName("_fp4f2_");
-      this->PrintIndent();
-      stream << "float2 " << tmp << " = " << val.str() << ";\n";
-      PrintVecElemStore(sret, target_ty, i, tmp + ".x");
-      PrintVecElemStore(sret, target_ty, i + 1, tmp + ".y");
-    }
-    os << sret;
-    return;
-  }
-
-  // FP4 -> double : use __tl_cvt_fp4x2_to_double2 per 2-element pair
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
-      target_ty.bits() == 64 && fp4_pair_cast) {
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(target_ty, stream);
-    stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0; i < fp4_lanes; i += 2) {
-      std::ostringstream val;
-      val << "__tl_cvt_fp4x2_to_double2(((uint8_t*)&(" << src << "))[" << i / 2
-          << "])";
-      std::string tmp = name_supply_->FreshName("_fp4d2_");
-      this->PrintIndent();
-      stream << "double2 " << tmp << " = " << val.str() << ";\n";
-      PrintVecElemStore(sret, target_ty, i, tmp + ".x");
-      PrintVecElemStore(sret, target_ty, i + 1, tmp + ".y");
-    }
-    os << sret;
-    return;
-  }
-
-  // FP4 -> bfloat16 : use __tl_cvt_fp4x2_to_bfloat162 per 2-element pair
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_bfloat16() && fp4_pair_cast) {
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(target_ty, stream);
-    stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0; i < fp4_lanes; i += 2) {
-      std::ostringstream val;
-      val << "__tl_cvt_fp4x2_to_bfloat162(((uint8_t*)&(" << src << "))["
-          << i / 2 << "])";
-      std::string tmp = name_supply_->FreshName("_fp4bf2_");
-      this->PrintIndent();
-      stream << "uint1 " << tmp << " = " << val.str() << ";\n";
-      PrintVecElemStore(sret, target_ty, i,
-                        "((bfloat16_t*)(&(" + tmp + ")))[0]");
-      PrintVecElemStore(sret, target_ty, i + 1,
-                        "((bfloat16_t*)(&(" + tmp + ")))[1]");
-    }
-    os << sret;
-    return;
-  }
-
-  // float16 -> FP4
-  if (from_ty.is_float16() && target_ty.is_float4_e2m1fn() && fp4_pair_cast) {
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(target_ty, stream);
-    stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0; i < fp4_lanes; i += 2) {
-      std::ostringstream h0, h1;
-      PrintVecElemLoad(src, from_ty, i, h0);
-      PrintVecElemLoad(src, from_ty, i + 1, h1);
-      std::string tmp = name_supply_->FreshName("_h2fp4_");
-      this->PrintIndent();
-      stream << "uint1 " << tmp << " = uint1{__pack_half2(" << h0.str() << ", "
-             << h1.str() << ")};\n";
-      this->PrintIndent();
-      stream << "((uint8_t*)&(" << sret << "))[" << i / 2
-             << "] = __tl_cvt_half2_to_fp4x2(" << tmp << ");\n";
-    }
-    os << sret;
-    return;
-  }
-
-  // float32 -> FP4
-  if (from_ty.is_float() && from_ty.bits() == 32 &&
-      target_ty.is_float4_e2m1fn() && fp4_pair_cast) {
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(target_ty, stream);
-    stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0; i < fp4_lanes; i += 2) {
-      std::ostringstream f0, f1;
-      PrintVecElemLoad(src, from_ty, i, f0);
-      PrintVecElemLoad(src, from_ty, i + 1, f1);
-      this->PrintIndent();
-      stream << "((uint8_t*)&(" << sret << "))[" << i / 2
-             << "] = __tl_cvt_float2_to_fp4x2("
-             << "float2{" << f0.str() << ", " << f1.str() << "});\n";
-    }
-    os << sret;
-    return;
-  }
-
-  // double -> FP4
-  if (from_ty.is_float() && from_ty.bits() == 64 &&
-      target_ty.is_float4_e2m1fn() && fp4_pair_cast) {
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(target_ty, stream);
-    stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0; i < fp4_lanes; i += 2) {
-      std::ostringstream d0, d1;
-      PrintVecElemLoad(src, from_ty, i, d0);
-      PrintVecElemLoad(src, from_ty, i + 1, d1);
-      this->PrintIndent();
-      stream << "((uint8_t*)&(" << sret << "))[" << i / 2
-             << "] = __tl_cvt_double2_to_fp4x2("
-             << "double2{" << d0.str() << ", " << d1.str() << "});\n";
-    }
-    os << sret;
-    return;
-  }
-
-  // bfloat16 -> FP4
-  if (from_ty.is_bfloat16() && target_ty.is_float4_e2m1fn() && fp4_pair_cast) {
-    std::string sret = name_supply_->FreshName("_");
-    this->PrintIndent();
-    this->PrintType(target_ty, stream);
-    stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0; i < fp4_lanes; i += 2) {
-      std::ostringstream b0, b1;
-      PrintVecElemLoad(src, from_ty, i, b0);
-      PrintVecElemLoad(src, from_ty, i + 1, b1);
-      std::string tmp = name_supply_->FreshName("_bf2fp4_");
-      this->PrintIndent();
-      stream << "uint1 " << tmp << " = uint1{__pack_bfloat162(" << b0.str()
-             << ", " << b1.str() << ")};\n";
-      this->PrintIndent();
-      stream << "((uint8_t*)&(" << sret << "))[" << i / 2
-             << "] = __tl_cvt_bfloat162_to_fp4x2(" << tmp << ");\n";
-    }
-    os << sret;
-    return;
-  }
-
   // We could emit make_float4 like calls, but the emitted code looks
   // too compact to read. Emit this as vectorized unary ops.
   std::string sret = name_supply_->FreshName("_");
@@ -1414,32 +842,13 @@ void CodeGenTileLangHIP::PrintCallExtern(Type ret_type, String global_symbol,
 std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
                                              const BufferNode *buffer,
                                              PrimExpr index) {
-  Var buffer_var = buffer->data;
-  const VarNode *buffer_var_node = buffer_var.get();
+  const VarNode *buffer_var = buffer->data.get();
   std::ostringstream os;
-  std::string vid = GetVarID(buffer_var_node);
+  std::string vid = GetVarID(buffer_var);
   std::string scope;
-  if (alloc_storage_scope_.count(buffer_var_node)) {
-    scope = alloc_storage_scope_.at(buffer_var_node);
+  if (alloc_storage_scope_.count(buffer_var)) {
+    scope = alloc_storage_scope_.at(buffer_var);
   }
-
-  // FP4 scalar access on gfx950: redirect to tl_fp4_packed_load helper.
-  // Non-scalar FP4 accesses fall through to the normal path (the vector
-  // types fp4_e2_4_t etc. are directly addressable as structs).
-  if (t.is_float4() && t.is_scalar()) {
-    std::string idx_str = PrintExpr(index);
-    auto packed_it = fp4_packed_buffers_.find(buffer_var);
-    if (packed_it != fp4_packed_buffers_.end()) {
-      // Packed local buffer: use the pre-allocated fp4_e2_2_t array.
-      os << "tl_fp4_packed_load(" << packed_it->second << ", " << idx_str
-         << ")";
-    } else {
-      // Non-packed (e.g. shared) buffer: reinterpret as fp4_e2_2_t*.
-      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
-    }
-    return os.str();
-  }
-
   // bool is_vol = IsVolatile(buffer_var);
   // always false for tl cutlass backend.
   bool is_vol = false;
@@ -1461,7 +870,7 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
   DataType buffer_element_dtype = buffer->dtype;
 
   std::string buffer_str = vid;
-  if (!HandleTypeMatch(buffer_var_node, buffer_element_dtype) || is_vol) {
+  if (!HandleTypeMatch(buffer_var, buffer_element_dtype) || is_vol) {
     std::stringstream temp;
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();
@@ -1498,29 +907,17 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
 }
 
 void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
-  auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
-                                    size_t end = 0) {
+  auto print_extern_call_stmt = [&](std::string name, size_t offset = 0) {
     this->PrintIndent();
     this->stream << name << "(";
-    for (size_t i = start; i < op->args.size() - end; i++) {
-      if (i > start)
+    for (size_t i = offset; i < op->args.size(); i++) {
+      if (i > offset)
         this->stream << ", ";
       this->stream << this->PrintExpr(op->args[i]);
     }
     this->stream << ");\n";
   };
-  if (op->op.same_as(builtin::reinterpret()) && op->args.size() == 1U &&
-      !op->dtype.is_float4() && !op->args[0].dtype().is_float4()) {
-    ICHECK_EQ(op->dtype.lanes() * op->dtype.bits(),
-              op->args[0].dtype().lanes() * op->args[0].dtype().bits())
-        << "reinterpret expects source and target to have the same number of "
-           "bits";
-    os << "__builtin_bit_cast(";
-    this->PrintType(op->dtype, os);
-    os << ", ";
-    this->PrintExpr(op->args[0], os);
-    os << ")";
-  } else if (op->op.same_as(builtin::ptx_cp_async())) {
+  if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
@@ -1581,16 +978,10 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
-    bool has_shape =
-        op->args.size() >= 4 && op->args.back().as<StringImmNode>();
-    if (has_shape) {
-      ICHECK_EQ(Downcast<StringImm>(op->args.back())->value, "m8n8")
-          << "HIP stmatrix codegen only supports m8n8";
-    }
     std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2, has_shape ? 1 : 0);
+    print_extern_call_stmt(func_name, 2);
   } else if (op->op.same_as(tl::wait_wgmma())) {
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
@@ -1603,14 +994,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "cooperative_groups::this_grid().sync();\n";
   } else if (op->op.same_as(tl::sync_warp())) {
-    // AMD wavefronts execute in lockstep, so no runtime barrier is needed for
-    // intra-wavefront convergence and the mask argument is ignored. A compiler
-    // barrier is still required: without one the backend may reorder the LDS
-    // accesses that a warp-synchronous reduction depends on.
-    // __builtin_amdgcn_wave_barrier() emits no instructions and only constrains
-    // scheduling.
-    this->PrintIndent();
-    this->stream << "__builtin_amdgcn_wave_barrier();\n";
+    // AMD wavefronts execute in lockstep, so intra-wavefront convergence is
+    // guaranteed by the hardware. __syncwarp() has no HIP equivalent and is a
+    // no-op here. The mask argument (if present) is intentionally ignored.
   } else if (op->op.same_as(tl::any_sync())) {
     ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
     // HIP __any takes only the predicate; the mask is ignored because
@@ -1931,6 +1317,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << wmma_replacer.rewrite(call_wmma_code);
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
+  } else if (op->op.same_as(tl::tl_gemm())) {
+    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, "
+                                    "A_ptr, B_ptr, C_ptr>, but got "
+                                 << op->args.size();
+    auto op_instance = Downcast<StringImm>(op->args[0]);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
+  } else if (op->op.same_as(tl::tl_gemm_sp())) {
+    LOG(FATAL) << "tl_gemm_sp is not supported on HIP";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
@@ -1980,15 +1375,6 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
-  } else if (op->op.same_as(tl::atomic_addx2_ret_elem_op())) {
-    // atomic_addx2_ret_elem_op(dst_ptr, src_ptr[, memory_order]) -> returns
-    // the previous two values
-    os << "AtomicAddx2Ret(" << PrintExpr(op->args[0]) << ", "
-       << PrintExpr(op->args[1]);
-    if (op->args.size() > 2) {
-      os << ", " << PrintExpr(op->args[2]);
-    }
-    os << ")";
   } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
     // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -1999,15 +1385,6 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
-  } else if (op->op.same_as(tl::atomic_addx4_ret_elem_op())) {
-    // atomic_addx4_ret_elem_op(dst_ptr, src_ptr[, memory_order]) -> returns
-    // the previous four values
-    os << "AtomicAddx4Ret(" << PrintExpr(op->args[0]) << ", "
-       << PrintExpr(op->args[1]);
-    if (op->args.size() > 2) {
-      os << ", " << PrintExpr(op->args[2]);
-    }
-    os << ")";
   } else if (op->op.same_as(tl::atomic_load_elem_op())) {
     // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
     os << "AtomicLoad(" << PrintExpr(op->args[0]) << ", "
@@ -2020,16 +1397,6 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "AtomicStore(" << dst_ptr << ", " << value << ", "
                  << memory_order << ");\n";
-  } else if (op->op.same_as(tl::atomic_or_elem_op())) {
-    // atomic_or_elem_op(dst_ptr, src_value[, memory_order])
-    std::string dst_ptr = PrintExpr(op->args[0]);
-    std::string src_value = PrintExpr(op->args[1]);
-    this->PrintIndent();
-    this->stream << "AtomicOr(" << dst_ptr << ", " << src_value;
-    if (op->args.size() > 2) {
-      this->stream << ", " << PrintExpr(op->args[2]);
-    }
-    this->stream << ");\n";
   } else if (op->op.same_as(tl::atomic_max_elem_op())) {
     // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -2101,13 +1468,6 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
     ICHECK(!func_name.empty() && panel_size > 0)
         << "threadblock_swizzle_pattern: failed to extract func_name and "
            "panel_size";
-    // Only the row/column rasterizations exist in the HIP device templates;
-    // e.g. T.use_swizzle(order="mlx") is Metal-only and must fail here
-    // instead of surfacing as a missing-symbol error from hipcc.
-    ICHECK(func_name == "rasterization2DRow" ||
-           func_name == "rasterization2DColumn")
-        << "threadblock swizzle pattern `" << func_name
-        << "` is not supported by the ROCm backend";
     this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
                  << panel_size << ">();\n";
     this->VisitStmt(op->body);
@@ -2121,17 +1481,8 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {
 
   this->PrintIndent();
   std::string scope = GetPtrStorageScope(op->buffer->data);
-  DataType dtype = op->buffer->dtype;
-
-  // FP4 scalar local buffers use packed storage (2 elements per byte).
-  // Skip the normal type+scope header; emit the packed type directly below.
-  bool is_fp4_scalar_local =
-      dtype.is_float4() && dtype.is_scalar() && scope == "local";
-
-  if (!is_fp4_scalar_local) {
-    PrintStorageScope(scope, stream);
-    PrintType(dtype, stream);
-  }
+  PrintStorageScope(scope, stream);
+  PrintType(op->buffer->dtype, stream);
 
   if (scope == "shared.dyn") {
     stream << ' ' << vid << "[];\n";
@@ -2142,27 +1493,14 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {
         << "Can only handle constant size stack allocation for now";
     size_t constant_size = static_cast<size_t>(opt_size.value());
 
-    if (scope == "shared") {
-      if (dtype.is_float4_e2m1fn() && dtype.is_scalar()) {
-        constant_size = (constant_size + 1) / 2;
-      } else if (dtype == DataType::Int(4) || dtype == DataType::UInt(4) ||
-                 dtype == DataType::Int(1)) {
-        size_t elements_per_storage_word = 32 / dtype.bits();
-        constant_size = (constant_size + elements_per_storage_word - 1) /
-                        elements_per_storage_word;
-      }
+    if ((op->buffer->dtype == DataType::Int(4) ||
+         op->buffer->dtype == DataType::UInt(4) ||
+         op->buffer->dtype == DataType::Int(1)) &&
+        scope == "shared") {
+      constant_size = constant_size / (32 / op->buffer->dtype.bits());
     }
 
-    if (is_fp4_scalar_local) {
-      // Use fp4_e2_2_t (2 elements per byte) as packed storage for FP4
-      // local register arrays.  Record the mapping so BufferLoad/Store
-      // can emit tl_fp4_packed_load / tl_fp4_packed_store calls.
-      enable_fp4_ = true;
-      auto vid_packed = vid + "_packed";
-      stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
-             << "];\n";
-      fp4_packed_buffers_[op->buffer->data] = vid_packed;
-    } else if (scope == "local.var") {
+    if (scope == "local.var") {
       // Single-element variable: emit an initializer so the value is defined.
       // Default to 0; respect the user-provided tl.local_var_init annotation.
       PrimExpr init = tirx::make_const(op->buffer->dtype, 0);
@@ -2182,38 +1520,6 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {
   }
 
   RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
-}
-
-void CodeGenTileLangHIP::VisitStmt_(const BufferStoreNode *op) {
-  ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
-  ICHECK(!op->predicate.defined())
-      << "Predicated buffer store is not supported.";
-
-  DataType value_dtype = op->value.dtype();
-  DataType element_dtype = op->buffer->dtype;
-  Var buffer_var = op->buffer->data;
-
-  // FP4 scalar store: use tl_fp4_packed_store to correctly handle nibble-level
-  // writes without corrupting the neighbouring nibble.
-  if (element_dtype.is_float4() && element_dtype.is_scalar() &&
-      value_dtype.is_scalar()) {
-    std::string idx_str = PrintExpr(op->indices[0]);
-    std::string value = this->PrintExpr(op->value);
-    this->PrintIndent();
-    auto packed_it = fp4_packed_buffers_.find(buffer_var);
-    if (packed_it != fp4_packed_buffers_.end()) {
-      stream << "tl_fp4_packed_store(" << packed_it->second << ", " << idx_str
-             << ", " << value << ");\n";
-    } else {
-      stream << "tl_fp4_packed_store((fp4_e2_2_t*)"
-             << GetVarID(buffer_var.get()) << ", " << idx_str << ", " << value
-             << ");\n";
-    }
-    return;
-  }
-
-  // Default path for all other types.
-  CodeGenC::VisitStmt_(op);
 }
 
 void CodeGenTileLangHIP::VisitExpr_(const RampNode *op, std::ostream &os) {

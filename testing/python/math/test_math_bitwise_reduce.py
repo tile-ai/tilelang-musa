@@ -52,9 +52,9 @@ def run_single_bitwise_reduce(
     kernel = bitwise_reduce(M, N, block_M, block_N, name, func, clear)
 
     if name == "reduce_bitand":
-        expected = torch.full((M,), -1, device="cuda", dtype=torch.int32)
+        expected = torch.full((M,), -1, device="musa", dtype=torch.int32)
     elif name == "reduce_bitor" or name == "reduce_bitxor":
-        expected = torch.full((M,), 0, device="cuda", dtype=torch.int32)
+        expected = torch.full((M,), 0, device="musa", dtype=torch.int32)
     else:
         raise ValueError("Invalid name: {}".format(name))
 
@@ -112,7 +112,7 @@ def bitwise_reduce_input():
     set_bits = torch.bitwise_left_shift(torch.ones_like(rows), rows // 2)
     a = torch.where(set_rows, a | set_bits, a)
 
-    return a.to(device="cuda")
+    return a.to(device="musa")
 
 
 BITWISE_REDUCE_OPS = [
@@ -122,7 +122,7 @@ BITWISE_REDUCE_OPS = [
 ]
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 @pytest.mark.parametrize(("name", "func"), BITWISE_REDUCE_OPS, ids=[name for name, _ in BITWISE_REDUCE_OPS])
 @pytest.mark.parametrize("clear", [True, False], ids=["clear", "no-clear"])
 def test_bitwise_reduce_ops(bitwise_reduce_input, name, func, clear):
