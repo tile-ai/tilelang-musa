@@ -14,9 +14,9 @@ tags: [MUSA, TileLang]
 | 项目 | 要求 |
 | --- | --- |
 | 操作系统 | Linux；源码构建建议使用 x86_64 开发环境 |
-| C 运行时 | glibc 2.28 或更高版本（Ubuntu 20.04 及以上通常满足） |
+| C 运行时 | 配套摩尔线程 TVM FFI wheel 要求 glibc 2.34 或更高版本 |
 | GPU | 已安装 MUSA 驱动的 MTT GPU；仓库 README 当前声明支持 S5000、S4000 和 M1000 |
-| MUSA SDK | 推荐 5.2.0 及以上版本；兼容 4.3.8 和 5.2.0，需要对应版本的 `mcc`、MUSA runtime 和设备编译工具链 |
+| MUSA SDK | 使用与 GPU、驱动和 `torch_musa` 配套的 SDK，包含 `mcc`、MUSA runtime 和设备编译工具链 |
 | Python | Python 3.10 是当前 `torch_musa`/TileLang-MUSA 文档推荐环境 |
 | Python 依赖 | `torch`、`torch_musa`、`tilelang_musa` 和匹配版本的 `apache-tvm-ffi` |
 
@@ -83,11 +83,11 @@ PY
 
 ### 版本说明
 
-当前最新 TileLang-MUSA 发布版本为 `v0.1.12+musa.2`，运行环境兼容
-MUSA SDK 4.3.8 和 5.2.0，推荐使用 MUSA SDK 5.2.0 及以上版本。该版本
+当前推荐的 TileLang-MUSA 发布版本为 `v0.1.12+musa.5`，运行环境需与
+MUSA SDK、驱动和 `torch_musa` 配套。该版本
 基于 TileLang 0.1.12 适配 MUSA 平台。
 本文以
-`v0.1.8+musa.3` 作为旧版本基线，汇总 `v0.1.12+musa.2` 中的 MUSA
+`v0.1.8+musa.3` 作为旧版本基线，汇总 `v0.1.12+musa.5` 中的 MUSA
 接口和编译器能力变化。
 
 ### 版本渠道
@@ -99,7 +99,7 @@ bugfix 集合不一定相同，不能只按 `0.1.x` 主版本号判断二者完�
 
 | 渠道 | 版本 | 获取方式 | 定位 |
 | --- | --- | --- | --- |
-| MUSA SDK 配套正式版 | `v0.1.12+musa.2` | MUSA SDK Python 包源 | 当前 SDK 文档使用的版本，包含相对开源 `v0.1.12+musa.1` 的额外 bugfix |
+| MUSA SDK 配套正式版 | `v0.1.12+musa.5` | MUSA SDK Python 包源 | 当前推荐安装版本，包含相对开源 `v0.1.12+musa.1` 的额外 bugfix |
 | MUSA SDK 配套正式版（历史） | `v0.1.8+musa.3` | MUSA SDK Python 包源 | 发布于 MUSA SDK 5.2.0 时代，配套 `apache-tvm-ffi==0.1.9.post3` |
 | 开源仓库正式版 | `v0.1.12+musa.1` | [GitHub Release](https://github.com/tile-ai/tilelang-musa/releases) | 与 MUSA SDK 配套版本同一基础 TileLang 版本，可用于阅读源码和对照 API |
 | 开源仓库正式版 | `v0.1.13+musa.1` | [GitHub Release](https://github.com/tile-ai/tilelang-musa/releases) | 开源仓库中的后续基础版本，接口和行为应按该 release 说明核对 |
@@ -108,19 +108,19 @@ bugfix 集合不一定相同，不能只按 `0.1.x` 主版本号判断二者完�
 [https://github.com/tile-ai/tilelang-musa](https://github.com/tile-ai/tilelang-musa)。
 当 MUSA SDK 配套包不可用时，用户可以借鉴开源仓库 `v0.1.12+musa.1` 的源码、测试和
 release 说明；如果需要使用当前 SDK 文档中的修复和适配，应优先安装 MUSA SDK 配套的
-`v0.1.12+musa.2`。开源 `v0.1.13+musa.1` 是另一个基础版本，不能直接
-当作 MUSA SDK 配套 `v0.1.12+musa.2` 的替代包。
+`v0.1.12+musa.5`。开源 `v0.1.13+musa.1` 是另一个基础版本，不能直接
+当作 MUSA SDK 配套 `v0.1.12+musa.5` 的替代包。
 
 ### 版本差异概览
 
 以下表格只比较两个 MUSA SDK 配套正式 release：历史正式版 `v0.1.8+musa.3`
-和当前正式版 `v0.1.12+musa.2`。开源仓库中的 `v0.1.12+musa.1`、
+和当前正式版 `v0.1.12+musa.5`。开源仓库中的 `v0.1.12+musa.1`、
 `v0.1.13+musa.1` 属于独立发布渠道，不能直接套用下表的 patch 差异。
 
-| 方向 | MUSA SDK 配套正式历史版 `v0.1.8+musa.3` | 当前 MUSA SDK 配套正式版 `v0.1.12+musa.2` |
+| 方向 | MUSA SDK 配套正式历史版 `v0.1.8+musa.3` | 当前 MUSA SDK 配套正式版 `v0.1.12+musa.5` |
 | --- | --- | --- |
-| 基础版本 | 基于 TileLang 0.1.8，MUSA patch 版本为 `musa.3` | 基于 TileLang 0.1.12，MUSA patch 版本为 `musa.2`，并同步新的 backend、TIRx 与 TVM FFI 结构 |
-| Python 依赖 | `tilelang-musa==0.1.8+musa.3` + `apache-tvm-ffi==0.1.9.post3` | `tilelang_musa==0.1.12+musa.2` + `apache-tvm-ffi==0.1.11.post1` |
+| 基础版本 | 基于 TileLang 0.1.8，MUSA patch 版本为 `musa.3` | 基于 TileLang 0.1.12，MUSA patch 版本为 `musa.5`，并同步新的 backend、TIRx 与 TVM FFI 结构 |
+| Python 依赖 | `tilelang-musa==0.1.8+musa.3` + `apache-tvm-ffi==0.1.9.post3` | `tilelang_musa==0.1.12+musa.5` + `apache-tvm-ffi==0.1.11.post1` |
 | 目标架构 | 主要覆盖 MP22/QY2 与 MP31/PH1 | 覆盖 MP22/QY2 与 MP31/PH1，并完善两类目标的指令选择、布局推导、同步和 runtime 适配 |
 | Copy / TME | 支持 `T.copy`、robust copy、async copy、TME 搬运和 descriptor cache hint | 增加显式 `T.tma_copy`（load 无隐式 wait、store 可批量后显式 wait）、`T.alias_buffer`，以及 1D/2D/3D im2col TME 路径 |
 | Barrier / Pipeline | 支持基础 pipeline、barrier 与 producer 线程控制 | 统一 `expect_tx`、arrive/wait、warp-specialized producer-consumer 与 fallback barrier；`T.copy` 保持同步语义，`T.tma_copy` 交由用户管理 load barrier |
@@ -134,8 +134,8 @@ release 说明；如果需要使用当前 SDK 文档中的修复和适配，应�
 
 ### 版本选择和兼容规则
 
-- 当前最新发布版本 `v0.1.12+musa.2` 使用 `apache-tvm-ffi==0.1.11.post1`，
-  兼容 MUSA SDK 4.3.8 和 5.2.0，推荐使用 MUSA SDK 5.2.0 及以上版本；
+- 当前最新发布版本 `v0.1.12+musa.5` 使用 `apache-tvm-ffi==0.1.11.post1`，
+  MUSA SDK、驱动和 `torch_musa` 需按配套发行说明配置；
 - 历史版本 `v0.1.8+musa.3` 发布于 MUSA SDK 5.2.0 时代，配套
   `apache-tvm-ffi==0.1.9.post3`；
 - 不要只升级 `tilelang_musa` 而保留旧版 `apache-tvm-ffi`，也不要把两个

@@ -6,16 +6,16 @@ tags: [MUSA, TileLang]
 
 ## MUSA 扩展
 
-本节集中介绍 `v0.1.12+musa.2` 的 MUSA 扩展。版本差异已在“版本与环境”
+本节集中介绍 `v0.1.12+musa.5` 的 MUSA 扩展。版本差异已在“版本与环境”
 章节列出；这里按 copy、GEMM、layout、atomic 和辅助算子组织使用方法。
 
 ### 版本差异对照
 
 以下从接口和使用语义角度，对比两个 MUSA SDK 配套正式 release：历史正式版
-`v0.1.8+musa.3` 与当前正式版 `v0.1.12+musa.2`。GitHub 开源
+`v0.1.8+musa.3` 与当前正式版 `v0.1.12+musa.5`。GitHub 开源
 release 的差异请以对应 release notes 为准。
 
-| 能力项 | MUSA SDK 配套正式历史版 `v0.1.8+musa.3` | 当前 MUSA SDK 配套正式版 `v0.1.12+musa.2` |
+| 能力项 | MUSA SDK 配套正式历史版 `v0.1.8+musa.3` | 当前 MUSA SDK 配套正式版 `v0.1.12+musa.5` |
 | --- | --- | --- |
 | `T.Kernel(producer_threads=...)` | 支持通过 `producer_threads` 指定 warp-specialize 场景下的 producer 线程数 | 保持支持 |
 | `T.copy(force_async_copy=True)` | 支持显式请求 global→shared async copy，用于在不使用 TME 的场景下使能 ldlms 路径 | 保持支持，并补充 async copy 触发条件说明 |
@@ -96,7 +96,7 @@ memory，且 robust descriptor 可以和 `force_async_copy=True` 组合。
 #### 手动 TME barrier
 
 对于能够 lowering 成 MUSA TME load 的搬运，可以手动指定 shared barrier，
-并在消费目标 shared buffer 前显式完成 barrier arrive / wait。`v0.1.12+musa.2`
+并在消费目标 shared buffer 前显式完成 barrier arrive / wait。`v0.1.12+musa.5`
 中该能力通过 `T.tma_copy(..., barrier=barrier)` 使用；`T.tma_copy` 的 load
 侧只发起数据搬运，不会像普通 `T.copy` 那样自动完成同步，且 `T.copy` 不再
 接受 `barrier=` 参数。
@@ -345,7 +345,7 @@ kernel = tilelang.compile(program, target="musa", pass_configs=pass_configs)
 
 `accelerated_ops` 用于暴露 MUSA target 上可以高效执行的计算 pattern，定位更接近“显式请求使用某类硬件友好的 fused/accelerated 计算形式”。例如 `T.mul_half_float_to_bfloat16_x4(x, y)` 表示将 `float16x4 * float32x4` 的乘法结果转换为 `bfloat16x4`。普通表达式 `T.Cast("bfloat16", A[i] * B[i])` 在满足 pattern 和类型约束时，也可能由编译器自动识别并优化生成对应操作。
 
-该接口在 `v0.1.12+musa.2` 中作为 MUSA accelerated ops 能力提供。显式调用时需要传入 4-lane vector 表达式，推荐使用 slice 或 `T.Ramp` 写法；`lhs` 必须是 `float16x4`，`rhs` 必须是 `float32x4`，返回值为 `bfloat16x4`。
+该接口在 `v0.1.12+musa.5` 中作为 MUSA accelerated ops 能力提供。显式调用时需要传入 4-lane vector 表达式，推荐使用 slice 或 `T.Ramp` 写法；`lhs` 必须是 `float16x4`，`rhs` 必须是 `float32x4`，返回值为 `bfloat16x4`。
 
 ```python
 C[offset : offset + 4] = T.mul_half_float_to_bfloat16_x4(
@@ -606,7 +606,7 @@ shared tile 前完成对应 arrive/wait；fallback 不依赖 TME barrier。
 
 ### 语言与同步辅助
 
-`v0.1.12+musa.2` 同步了多项常用的 MUSA 语言接口：
+`v0.1.12+musa.5` 提供多项常用的 MUSA 语言接口：
 
 - `T.transpose(src, dst)` 对 2D shared tile 做转置，语义为
   `dst[j, i] = src[i, j]`；

@@ -27,7 +27,7 @@ tags: [MUSA, TileLang]
 3. 不修改 pip 配置，在安装时指定软件源：
 
    ```bash
-   python -m pip install 'tilelang_musa==0.1.12+musa.2' \
+   python -m pip install 'tilelang_musa==0.1.12+musa.5' \
      -i https://dl.mthreads.com/repo/api/pypi/pypi/simple
    python -m pip install 'apache-tvm-ffi==0.1.11.post1' \
      --index-url https://dl.mthreads.com/repo/api/pypi/pypi/simple
@@ -42,7 +42,7 @@ tags: [MUSA, TileLang]
 使用环境变量或 pip 配置文件完成配置后，可通过 pip 直接安装 TileLang-MUSA：
 
 ```bash
-python -m pip install 'tilelang_musa==0.1.12+musa.2'
+python -m pip install 'tilelang_musa==0.1.12+musa.5'
 python -m pip install 'apache-tvm-ffi==0.1.11.post1'
 ```
 
@@ -56,7 +56,7 @@ TileLang-MUSA 源码仓库位于
 [Releases](https://github.com/tile-ai/tilelang-musa/releases) 页面选择
 `v0.1.12+musa.1` 或 `v0.1.13+musa.1`。
 
-本页前面的 pip 命令安装的是 MUSA SDK 配套发行版 `v0.1.12+musa.2`。它与开源
+本页前面的 pip 命令安装的是 MUSA SDK 配套发行版 `v0.1.12+musa.5`。它与开源
 `v0.1.12+musa.1` 具有相同的基础 TileLang 版本，但包含额外 bugfix；开源
 release 适合源码和测试对照，不能直接替代 MUSA SDK 配套包。Python 包版本和
 GitHub release 版本需要分别核对完整的 `musa.*` patch 后缀。

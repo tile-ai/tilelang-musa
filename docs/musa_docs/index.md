@@ -136,7 +136,7 @@ kernel 时应保留 fallback 或 guard，并在目标设备上验证实际 lower
 
 ### 版本渠道摘要
 
-当前文档使用的是 **MUSA SDK 配套正式版** `v0.1.12+musa.2`，相对开源
+当前文档使用的是 **MUSA SDK 配套正式版** `v0.1.12+musa.5`，相对开源
 `v0.1.12+musa.1` 包含额外 bugfix；历史 MUSA SDK 配套正式版为
 `v0.1.8+musa.3`。开源仓库还提供 `v0.1.13+musa.1`，适合阅读源码、测试
 和 release 说明，但不能直接替代当前 MUSA SDK 配套包。
