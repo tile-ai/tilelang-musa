@@ -17,37 +17,24 @@ In most cases, you only need to:
 | Component | Version | Purpose |
 | --- | --- | --- |
 | Public source baseline | [`v0.1.12+musa.1`](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1) | Source code and API reference in this repository |
-| Recommended binary package | `tilelang_musa==0.1.12+musa.5` | Install from the Moore Threads Python package index |
+| Recommended binary package | `tilelang_musa==0.1.12+musa.5` | See the [Installation Guide](./docs/musa_docs/02_installation.md) |
 
-The public source baseline and the recommended binary package have different revision numbers. Building this repository produces the public `.1` source version; it does not reproduce the `.5` binary package.
+The public source baseline is `v0.1.12+musa.1`; the recommended binary package is `v0.1.12+musa.5`.
 
-### Install the Binary Package
-
-Use a Linux x86_64 environment with Python 3.10 or later. Prepare a compatible MUSA SDK, GPU driver, PyTorch and `torch_musa` environment first, then install:
+Prepare the MUSA SDK, driver, PyTorch and `torch_musa` environment as described in the [MUSA Installation Guide](./docs/musa_docs/02_installation.md), then install:
 
 ```bash
-python -m pip install 'tilelang_musa==0.1.12+musa.5' -i https://dl.mthreads.com/repo/api/pypi/pypi/simple
+python -m pip install 'tilelang_musa==0.1.12+musa.5' 'apache-tvm-ffi==0.1.11.post1' \
+  -i https://dl.mthreads.com/repo/api/pypi/pypi/simple
 ```
 
-The package is imported as `tilelang`. Use a separate virtual environment from upstream PyPI `tilelang`, which shares that import name.
-
-Check the installed package version and MUSA device visibility:
-
-```bash
-python -c "from importlib.metadata import version; import torch, torch_musa, tilelang; print('tilelang_musa:', version('tilelang_musa')); print('tilelang:', tilelang.__version__); print('MUSA available:', torch.musa.is_available())"
-```
-
-This check reports installation and device visibility; run an operator correctness test before using your workload.
+See the [MUSA documentation](./docs/musa_docs/index.md) for environment requirements, dependency configuration and getting started.
 
 ## Latest News
 
-### 0.1.12+musa.5 Binary Package
+### v0.1.12+musa.5 Binary Package
 
-The recommended binary installation is now `tilelang_musa==0.1.12+musa.5`, available from the Moore Threads package index above. The public source baseline remains `v0.1.12+musa.1`.
-
-```bash
-python -m pip install 'tilelang_musa==0.1.12+musa.5' -i https://dl.mthreads.com/repo/api/pypi/pypi/simple
-```
+The recommended binary package is `v0.1.12+musa.5`. Follow the [Installation Guide](./docs/musa_docs/02_installation.md) to prepare the required environment and dependencies. The public source baseline remains `v0.1.12+musa.1`.
 
 See [TileOPs v1.0.0](https://github.com/MooreThreads/TileOPs/releases/tag/v1.0.0) for MUSA operator implementations and development examples.
 
@@ -74,26 +61,6 @@ Add support for DeepSeek [TileKernels](./tilekernels/) on the MUSA platform. The
 ## Tested Devices
 
 Tilelang MUSA already supports S5000, S4000, and M1000.
-
-## Build from Public Source
-
-To build the published `v0.1.12+musa.1` source version, use the version branch below. To use the recommended `.5` binary, follow [Install the Binary Package](#install-the-binary-package).
-
-We recommend using a virtual environment.
-
-```
-conda create -n tilelang-dev python=3.10
-conda activate tilelang-dev
-```
-
-Install Tilelang_MUSA
-
-```
-git clone --branch v0.1.12+musa.1 --recursive https://github.com/tile-ai/tilelang-musa.git
-cd tilelang-musa
-pip install -r ./requirements-dev.txt
-pip install -e . -v --no-build-isolation
-```
 
 ## Quick Start
 
@@ -207,13 +174,7 @@ print(f"Latency: {latency} ms")
 - [Operator and kernel source](https://github.com/MooreThreads/TileOPs/tree/v1.0.0/src/tileops): examples across GEMM, attention, normalization, reductions, MoE and other operator families.
 - [Tests](https://github.com/MooreThreads/TileOPs/tree/v1.0.0/tests) and [benchmarks](https://github.com/MooreThreads/TileOPs/tree/v1.0.0/benchmarks): reference inputs, correctness checks and measurement examples.
 
-TileOPs v1.0.0 documents `0.1.12+musa.4` as its compiler runtime. This README recommends `.5` for TileLang-MUSA installation; check your selected TileOPs operators in that environment. Consult the release notes for implementation status and validation scope.
-
-Install the recommended `.5` TileLang-MUSA package from the Moore Threads package index:
-
-```bash
-python -m pip install 'tilelang_musa==0.1.12+musa.5' -i https://dl.mthreads.com/repo/api/pypi/pypi/simple
-```
+TileOPs v1.0.0 documents `v0.1.12+musa.4` as its compiler runtime. For the recommended TileLang-MUSA `v0.1.12+musa.5` environment, follow the [Installation Guide](./docs/musa_docs/02_installation.md). Consult the TileOPs release notes for implementation status and validation scope.
 
 ### Programming, Validation and Optimization
 
@@ -227,7 +188,7 @@ python -m pip install 'tilelang_musa==0.1.12+musa.5' -i https://dl.mthreads.com/
 
 Start with a small input and compare against a PyTorch reference. Check shapes, dtypes, layouts, boundary conditions and synchronization before tuning tile sizes, pipelines or memory layouts. Measure performance after correctness passes, and record the hardware and software versions with the results.
 
-The source code is based on the public `.1` revision. Documentation may describe other package revisions; check its version notes when using the `.5` binary or upstream examples.
+The source code is based on `v0.1.12+musa.1`. Documentation may describe other package revisions; check its version notes when using the `v0.1.12+musa.5` binary or upstream examples.
 
 ## More Docs
 
