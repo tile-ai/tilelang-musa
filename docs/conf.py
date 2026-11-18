@@ -43,6 +43,7 @@ source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
 
 myst_enable_extensions = ["colon_fence", "deflist"]
 myst_title_to_header = True
+myst_heading_anchors = 4
 
 redirects = {"get_started/try_out": "../index.html#getting-started"}
 
