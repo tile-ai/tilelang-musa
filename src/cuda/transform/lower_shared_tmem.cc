@@ -441,7 +441,7 @@ private:
   Map<Buffer, Layout> layout_map_;
 };
 
-PrimFunc LowerSharedTmem(PrimFunc f) {
+PrimFunc LowerSharedTmemCudaBackend(PrimFunc f) {
   auto target = f->GetAttr<Target>(tvm::attr::kTarget);
   ICHECK(target.defined()) << "LowerSharedTmem: Require the target attribute";
   f.CopyOnWrite()->body = SharedTmemRewriter::Rewrite(f->body, target.value());
@@ -451,16 +451,16 @@ PrimFunc LowerSharedTmem(PrimFunc f) {
 namespace transform {
 using namespace tirx::transform;
 
-tvm::transform::Pass LowerSharedTmem() {
+tvm::transform::Pass LowerSharedTmemCudaBackend() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return tl::LowerSharedTmem(std::move(f));
+    return tl::LowerSharedTmemCudaBackend(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedTmem", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerSharedTmem", LowerSharedTmem);
+  refl::GlobalDef().def("tl.cuda.transform.LowerSharedTmem", LowerSharedTmemCudaBackend);
 }
 
 } // namespace transform

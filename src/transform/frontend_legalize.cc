@@ -27,6 +27,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
 
 namespace tvm {

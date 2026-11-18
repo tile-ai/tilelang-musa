@@ -1,4 +1,5 @@
 import tilelang
+from tilelang import tvm
 import tilelang.language as T
 import torch
 import tilelang.testing
@@ -43,6 +44,11 @@ def test_tilelang_copy():
     run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128)
     run_tilelang_copy(M=1024, N=576, block_M=32, block_N=576)
     run_tilelang_copy(M=1024, N=576, block_M=32, block_N=576, dtype=T.float32)
+
+
+def test_tilelang_copy_rejects_tile_larger_than_buffer():
+    with pytest.raises(ValueError, match="larger than the whole source buffer"):
+        tilelang_copy(M=7, N=7, block_M=128, block_N=128)
 
 
 def tilelang_copy_with_stride(M, N, NN, block_M, block_N, dtype=T.float16):
@@ -165,6 +171,30 @@ def run_tilelang_copy_shape_mismatched(M=1024, N=1024, dtype=T.float16):
 
 def test_tilelang_copy_shape_mismatched():
     run_tilelang_copy_shape_mismatched(M=128, N=128)
+
+
+def test_zero_extent_fragment_fill_copy_is_noop():
+    @T.prim_func
+    def main(A: T.Tensor((32, 128), T.float16)):
+        with T.Kernel(1, threads=128):
+            q_shared = T.alloc_shared((32, 128), T.float16)
+            k_local = T.alloc_fragment((32, 128), T.float16)
+            acc = T.alloc_fragment((32, 32), T.float32)
+            T.copy(A[0:32, 0:128], k_local[0:32, 0:128])
+            T.fill(k_local[32:32, 0:128], T.float16(0))
+            T.copy(A[32:32, 0:128], k_local[32:32, 0:128])
+            T.clear(acc)
+            T.gemm(
+                q_shared,
+                k_local,
+                acc,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+            )
+
+    target = tvm.target.Target({"kind": "musa", "arch": "mp_22"})
+    with target:
+        tilelang.lower(main, target=target)
 
 
 def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.float8_e8m0fnu, dst_dtype=T.float8_e8m0fnu):

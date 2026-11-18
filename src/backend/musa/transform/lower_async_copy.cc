@@ -29,13 +29,16 @@ tvm::transform::Pass LowerMUSAAsyncCopy() {
         ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
     bool disable_thread_storage_sync =
         ctx->GetConfig<Bool>(kDisableThreadStorageSync, Bool(false)).value();
+    bool disable_predicated_async_copy =
+        ctx->GetConfig<Bool>(kDisablePredicatedAsyncCopy, Bool(true))
+            .value();
 
     auto *n = f.CopyOnWrite();
-    auto result = InjectPTXAsyncCopy(
-        n->body, enable_auto_async_copy,
-        /*async_without_async_commit_wait=*/false,
-        disable_thread_storage_sync,
-        /*sync_inside_conditionals=*/true);
+    auto result = InjectPTXAsyncCopy(n->body, enable_auto_async_copy,
+                                     /*async_without_async_commit_wait=*/false,
+                                     disable_thread_storage_sync,
+                                     /*sync_inside_conditionals=*/true,
+                                     disable_predicated_async_copy);
     n->body = result.stmt;
     return f;
   };
@@ -44,8 +47,7 @@ tvm::transform::Pass LowerMUSAAsyncCopy() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.LowerMUSAAsyncCopy",
-                        LowerMUSAAsyncCopy);
+  refl::GlobalDef().def("tl.transform.LowerMUSAAsyncCopy", LowerMUSAAsyncCopy);
 }
 
 } // namespace tl

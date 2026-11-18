@@ -3,6 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 import pytest
 from tilelang import tvm
+from tilelang.backend.target import determine_target
 
 
 @tilelang.testing.requires_musa
@@ -155,6 +156,43 @@ def test_parallel_simt_copy_respects_enable_async_copy_config():
     print("=== Parallel SIMT copy (async disabled) codegen ===")
     print(src)
     assert "cp_async_gs<" not in src, "Did not expect cp_async_gs when async copy is disabled"
+
+
+@tilelang.testing.requires_musa
+def test_disable_predicated_async_copy_pass_config():
+    @T.prim_func
+    def main(
+        A: T.Tensor((130, 32), T.float16),
+        B: T.Tensor((130, 32), T.float16),
+    ):
+        with T.Kernel(T.ceildiv(130, 128), threads=128) as bx:
+            S = T.alloc_shared((128, 32), T.float16)
+            T.copy(A[bx * 128 : (bx + 1) * 128, 0:32], S)
+            T.copy(
+                S,
+                B[bx * 128 : (bx + 1) * 128, 0:32],
+                prefer_instruction="sync",
+            )
+
+    target = tvm.target.Target(determine_target("auto"))
+    with target:
+        default_artifact = tilelang.lower(
+            main, target=target, enable_device_compile=False
+        )
+    with tvm.transform.PassContext(
+        config={
+            tilelang.PassConfigKey.TL_DISABLE_PREDICATED_ASYNC_COPY: False,
+        }
+    ):
+        with target:
+            predicated_artifact = tilelang.lower(
+                main, target=target, enable_device_compile=False
+            )
+
+    default_source = str(default_artifact.kernel_source)
+    predicated_source = str(predicated_artifact.kernel_source)
+    assert "cp_async_gs_conditional<" not in default_source
+    assert "cp_async_gs_conditional<" in predicated_source
 
 
 @tilelang.testing.requires_musa

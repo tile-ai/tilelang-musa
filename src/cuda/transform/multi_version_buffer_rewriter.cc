@@ -914,7 +914,7 @@ private:
   std::unordered_map<const SBlockNode *, Array<Buffer>> block_alloc_buffers_;
 };
 
-PrimFunc ApplyMultiVersionBufferRewriter(PrimFunc f) {
+PrimFunc ApplyMultiVersionBufferRewriterCudaBackend(PrimFunc f) {
   return MultiVersionBufferRewriter::Substitute(std::move(f));
 }
 

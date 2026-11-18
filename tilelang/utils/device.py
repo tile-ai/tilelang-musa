@@ -26,6 +26,11 @@ elif IS_MUSA:
     GPUEvent = torch.musa.Event
 elif IS_MPS:
     GPUEvent = torch.mps.Event
+else:
+
+    class GPUEvent:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("GPU timing requires an available CUDA, MUSA, or MPS backend")
 
 
 def get_current_device():

@@ -48,7 +48,7 @@ def test_tma_descriptor_init_after_alloc_global():
 
     assert not tvm.tirx.analysis.undefined_vars(func.body, func.params)
     body_text = func.script()
-    assert body_text.index('T.alloc_buffer((32,), "float16")') < body_text.index('T.call_packed("__tvm_tensormap_create_tiled"')
+    assert body_text.index('T.alloc_buffer((32,), "float16")') < body_text.index('T.call_packed("__tvm_musa_tensormap_create_tiled"')
 
 
 if __name__ == "__main__":

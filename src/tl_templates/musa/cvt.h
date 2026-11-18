@@ -3,6 +3,13 @@
 #include "common.h"
 #include "musa_fp8.h"
 
+#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4) &&             \
+    defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
+#define TL_USE_MUSA_DIRECT_CVT_BUILTINS 1
+#else
+#define TL_USE_MUSA_DIRECT_CVT_BUILTINS 0
+#endif
+
 namespace tl {
 
 using tl_char_v2 = char __attribute__((ext_vector_type(2)));
@@ -66,7 +73,7 @@ TL_DEVICE float4 make_float4_from_float2(float2 lo, float2 hi) {
 
 // fp16 <-> fp32
 TL_DEVICE float2 cvt_half_to_float_x2(half2 in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   const tl_float_v2 out = __musa_f162f32_rn_bst2(in);
   return *reinterpret_cast<const float2 *>(&out);
 #else
@@ -75,7 +82,7 @@ TL_DEVICE float2 cvt_half_to_float_x2(half2 in) {
 }
 
 TL_DEVICE float4 cvt_half_to_float_x4(half4_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   const tl_float_v4 out = __musa_f162f32_rn_bst4(to_musa_half4(in));
   return *reinterpret_cast<const float4 *>(&out);
 #else
@@ -88,7 +95,7 @@ TL_DEVICE half2 cvt_float_to_half_x2(float2 in) {
 }
 
 TL_DEVICE half4_t cvt_float_to_half_x4(float4 in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   return make_half4_t(__float42half4_rn(in));
 #else
   float2 lo = {in.x, in.y};
@@ -103,7 +110,7 @@ TL_DEVICE float2 cvt_bfloat16_to_float_x2(__mt_bfloat162 in) {
 }
 
 TL_DEVICE float4 cvt_bfloat16_to_float_x4(bfloat164_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   return __bfloat1642float4(to_musa_bfloat164(in));
 #else
   return make_float4_from_float2(__bfloat1622float2(in.lo),
@@ -116,7 +123,7 @@ TL_DEVICE __mt_bfloat162 cvt_float_to_bfloat16_x2(float2 in) {
 }
 
 TL_DEVICE bfloat164_t cvt_float_to_bfloat16_x4(float4 in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   return make_bfloat164_t(__float42bfloat164_rn(in));
 #else
   float2 lo = {in.x, in.y};
@@ -130,7 +137,7 @@ TL_DEVICE float4 cvt_fp8e4m3_to_float_x4(fp8_e4_4_t in);
 TL_DEVICE float4 cvt_fp8e5m2_to_float_x4(fp8_e5_4_t in);
 
 TL_DEVICE half2 cvt_fp8e4m3_to_half_x2(fp8_e4_2_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   return __musa_e4m32f16_rn_bst2(*reinterpret_cast<const tl_char_v2 *>(&in));
 #else
   __mt_fp8x2_e4m3 packed;
@@ -140,7 +147,7 @@ TL_DEVICE half2 cvt_fp8e4m3_to_half_x2(fp8_e4_2_t in) {
 }
 
 TL_DEVICE half4_t cvt_fp8e4m3_to_half_x4(fp8_e4_4_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   return make_half4_t(
       __musa_e4m32f16_rn_bst4(*reinterpret_cast<const tl_char_v4 *>(&in)));
 #else
@@ -149,7 +156,7 @@ TL_DEVICE half4_t cvt_fp8e4m3_to_half_x4(fp8_e4_4_t in) {
 }
 
 TL_DEVICE half2 cvt_fp8e5m2_to_half_x2(fp8_e5_2_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   return __musa_e5m22f16_rn_bst2(*reinterpret_cast<const tl_char_v2 *>(&in));
 #else
   __mt_fp8x2_e5m2 packed;
@@ -159,7 +166,7 @@ TL_DEVICE half2 cvt_fp8e5m2_to_half_x2(fp8_e5_2_t in) {
 }
 
 TL_DEVICE half4_t cvt_fp8e5m2_to_half_x4(fp8_e5_4_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   return make_half4_t(
       __musa_e5m22f16_rn_bst4(*reinterpret_cast<const tl_char_v4 *>(&in)));
 #else
@@ -168,7 +175,7 @@ TL_DEVICE half4_t cvt_fp8e5m2_to_half_x4(fp8_e5_4_t in) {
 }
 
 TL_DEVICE float2 cvt_fp8e4m3_to_float_x2(fp8_e4_2_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   const tl_float_v2 out = __musa_f162f32_rn_bst2(
       __musa_e4m32f16_rn_bst2(*reinterpret_cast<const tl_char_v2 *>(&in)));
   return *reinterpret_cast<const float2 *>(&out);
@@ -180,7 +187,7 @@ TL_DEVICE float2 cvt_fp8e4m3_to_float_x2(fp8_e4_2_t in) {
 }
 
 TL_DEVICE float4 cvt_fp8e4m3_to_float_x4(fp8_e4_4_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   const tl_float_v4 out = __musa_f162f32_rn_bst4(
       __musa_e4m32f16_rn_bst4(*reinterpret_cast<const tl_char_v4 *>(&in)));
   return *reinterpret_cast<const float4 *>(&out);
@@ -192,7 +199,7 @@ TL_DEVICE float4 cvt_fp8e4m3_to_float_x4(fp8_e4_4_t in) {
 }
 
 TL_DEVICE float2 cvt_fp8e5m2_to_float_x2(fp8_e5_2_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   const tl_float_v2 out = __musa_f162f32_rn_bst2(
       __musa_e5m22f16_rn_bst2(*reinterpret_cast<const tl_char_v2 *>(&in)));
   return *reinterpret_cast<const float2 *>(&out);
@@ -204,7 +211,7 @@ TL_DEVICE float2 cvt_fp8e5m2_to_float_x2(fp8_e5_2_t in) {
 }
 
 TL_DEVICE float4 cvt_fp8e5m2_to_float_x4(fp8_e5_4_t in) {
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   const tl_float_v4 out = __musa_f162f32_rn_bst4(
       __musa_e5m22f16_rn_bst4(*reinterpret_cast<const tl_char_v4 *>(&in)));
   return *reinterpret_cast<const float4 *>(&out);
@@ -218,7 +225,7 @@ TL_DEVICE float4 cvt_fp8e5m2_to_float_x4(fp8_e5_4_t in) {
 // fp16 / fp32 -> fp8
 TL_DEVICE fp8_e4_2_t cvt_half_to_fp8e4m3_x2(half2 in) {
   fp8_e4_2_t out;
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   *reinterpret_cast<__mt_fp8x2_storage_t *>(&out) =
       (__mt_fp8x2_storage_t)__musa_f162e4m3_rn_bst2(in);
 #else
@@ -229,7 +236,7 @@ TL_DEVICE fp8_e4_2_t cvt_half_to_fp8e4m3_x2(half2 in) {
 
 TL_DEVICE fp8_e4_4_t cvt_half_to_fp8e4m3_x4(half4_t in) {
   fp8_e4_4_t out;
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   *reinterpret_cast<__mt_fp8x4_storage_t *>(&out) =
       (__mt_fp8x4_storage_t)__musa_f162e4m3_rn_bst4(to_musa_half4(in));
 #else
@@ -241,7 +248,7 @@ TL_DEVICE fp8_e4_4_t cvt_half_to_fp8e4m3_x4(half4_t in) {
 
 TL_DEVICE fp8_e5_2_t cvt_half_to_fp8e5m2_x2(half2 in) {
   fp8_e5_2_t out;
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   *reinterpret_cast<__mt_fp8x2_storage_t *>(&out) =
       (__mt_fp8x2_storage_t)__musa_f162e5m2_rn_bst2(in);
 #else
@@ -252,7 +259,7 @@ TL_DEVICE fp8_e5_2_t cvt_half_to_fp8e5m2_x2(half2 in) {
 
 TL_DEVICE fp8_e5_4_t cvt_half_to_fp8e5m2_x4(half4_t in) {
   fp8_e5_4_t out;
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   *reinterpret_cast<__mt_fp8x4_storage_t *>(&out) =
       (__mt_fp8x4_storage_t)__musa_f162e5m2_rn_bst4(to_musa_half4(in));
 #else
@@ -264,7 +271,7 @@ TL_DEVICE fp8_e5_4_t cvt_half_to_fp8e5m2_x4(half4_t in) {
 
 TL_DEVICE fp8_e4_2_t cvt_float_to_fp8e4m3_x2(float2 in) {
   fp8_e4_2_t out;
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   *reinterpret_cast<__mt_fp8x2_storage_t *>(&out) =
       (__mt_fp8x2_storage_t)__musa_f2e4m3_rn_bst2(
           *reinterpret_cast<const tl_float_v2 *>(&in));
@@ -276,7 +283,7 @@ TL_DEVICE fp8_e4_2_t cvt_float_to_fp8e4m3_x2(float2 in) {
 
 TL_DEVICE fp8_e4_4_t cvt_float_to_fp8e4m3_x4(float4 in) {
   fp8_e4_4_t out;
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   *reinterpret_cast<__mt_fp8x4_storage_t *>(&out) =
       (__mt_fp8x4_storage_t)__musa_f2e4m3_rn_bst4(
           *reinterpret_cast<const tl_float_v4 *>(&in));
@@ -288,7 +295,7 @@ TL_DEVICE fp8_e4_4_t cvt_float_to_fp8e4m3_x4(float4 in) {
 
 TL_DEVICE fp8_e5_2_t cvt_float_to_fp8e5m2_x2(float2 in) {
   fp8_e5_2_t out;
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   *reinterpret_cast<__mt_fp8x2_storage_t *>(&out) =
       (__mt_fp8x2_storage_t)__musa_f2e5m2_rn_bst2(
           *reinterpret_cast<const tl_float_v2 *>(&in));
@@ -300,7 +307,7 @@ TL_DEVICE fp8_e5_2_t cvt_float_to_fp8e5m2_x2(float2 in) {
 
 TL_DEVICE fp8_e5_4_t cvt_float_to_fp8e5m2_x4(float4 in) {
   fp8_e5_4_t out;
-#if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+#if TL_USE_MUSA_DIRECT_CVT_BUILTINS
   *reinterpret_cast<__mt_fp8x4_storage_t *>(&out) =
       (__mt_fp8x4_storage_t)__musa_f2e5m2_rn_bst4(
           *reinterpret_cast<const tl_float_v4 *>(&in));
@@ -346,3 +353,5 @@ TL_DEVICE bfloat164_t cvt_fp8e8m0_to_bfloat16_x4(fp8_e8_4_t in) {
 }
 
 } // namespace tl
+
+#undef TL_USE_MUSA_DIRECT_CVT_BUILTINS

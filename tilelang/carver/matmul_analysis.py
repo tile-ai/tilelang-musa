@@ -18,6 +18,7 @@ from .analysis import (
 from tvm.target.target import Target
 from tvm.tirx.stmt_functor import pre_order_visit
 from .arch import get_arch, is_tensorcore_supported_precision
+from .arch.musa import is_musa_tensorcore_supported_precision
 from tilelang.rocm.target import target_get_mcpu, target_is_rdna
 import logging
 
@@ -542,8 +543,15 @@ def get_tensorized_func_and_tags(
         sm_version = arch.replace("sm_", "")
         return int(sm_version) if sm_version.isdigit() else -1
 
+    def check_mp_version(arch: str) -> int:
+        mp_version = arch.replace("mp_", "")
+        return int(mp_version) if mp_version.isdigit() else -1
+
     def is_cuda_tensorcore_target(target: Target) -> bool:
         return target.kind.name == "cuda" and check_sm_version(target.attrs.get("arch", "")) >= 70
+
+    def is_musa_tensorcore_target(target: Target) -> bool:
+        return target.kind.name == "musa" and check_mp_version(target.attrs.get("arch", "")) == 31
 
     def is_rdna_wmma_target(target: Target) -> bool:
         return target.kind.name == "hip" and target_is_rdna(target)
@@ -552,10 +560,10 @@ def get_tensorized_func_and_tags(
         tags: dict[str, list[int] | int] = {}
         block_stmt = sch.get(block)
 
-        # Tensorized schedules are supported by NVIDIA Tensor Cores and by RDNA
-        # WMMA on HIP/gfx11+ targets.  Other targets fall back to the default
-        # Roller policy.
-        if not is_cuda_tensorcore_target(target) and not is_rdna_wmma_target(target):
+        # Tensorized schedules are supported by NVIDIA Tensor Cores, MUSA
+        # SQMMA/WMMA, and RDNA WMMA on HIP/gfx11+ targets. Other targets fall
+        # back to the default Roller policy.
+        if not is_cuda_tensorcore_target(target) and not is_musa_tensorcore_target(target) and not is_rdna_wmma_target(target):
             return False
         # analysis tensorcore axis
         # todo(lei): maybe we can remove this in the future
@@ -638,11 +646,15 @@ def get_tensorized_func_and_tags(
         return func, None
 
     block_stmt = sch.get(main_block)
-    if is_cuda_tensorcore_target(target) or is_rdna_wmma_target(target):
+    if is_cuda_tensorcore_target(target) or is_musa_tensorcore_target(target) or is_rdna_wmma_target(target):
         in_dtype, out_dtype = get_in_out_dtypes(block_stmt)
         if is_cuda_tensorcore_target(target):
             if not is_tensorcore_supported_precision(in_dtype, out_dtype, arch=get_arch(target)):
                 logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by tensorcore")
+                return func, None
+        elif is_musa_tensorcore_target(target):
+            if not is_musa_tensorcore_supported_precision(in_dtype, out_dtype, arch=get_arch(target)):
+                logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype}) is not supported by MUSA tensorcore")
                 return func, None
         elif is_rdna_wmma_target(target) and (str(in_dtype), str(out_dtype)) not in {("float16", "float32")}:
             logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by RDNA WMMA")

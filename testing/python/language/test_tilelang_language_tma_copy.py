@@ -173,6 +173,21 @@ def test_tma_copy_default_block_leader_scope_codegen():
     assert "tl_shuffle_elect<256>()" in source, "Expected block-wide elect<256>"
 
 
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+def test_musa_tma_copy_per_warp_leader_scope_codegen():
+    kernel = tilelang.compile(per_warp_tma_copy_kernel(), out_idx=[1], target="musa")
+    source = kernel.get_kernel_source()
+    assert "tl_shuffle_elect<32>()" in source, "Expected explicit per-warp elect<32>"
+
+
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
+def test_musa_tma_copy_default_static_leader_codegen():
+    kernel = tilelang.compile(block_tma_copy_kernel(), out_idx=[1], target="musa")
+    source = kernel.get_kernel_source()
+    assert "tl_shuffle_elect<256>()" not in source
+    assert "if (((int)threadIdx.x) == 0)" in source, "Expected a static thread-domain leader"
+
+
 def matmul_tma_copy_store(
     M,
     N,

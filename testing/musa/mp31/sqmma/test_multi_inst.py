@@ -7,6 +7,7 @@ import tilelang.language as T
 
 tilelang.disable_cache()
 
+
 PH1_TF32_TOLERANCE_OVERRIDES = {
     torch.float32: (1e-4, 1e-4),
 }
@@ -25,14 +26,18 @@ def matmul(
     trans_B=True,
     dtype="float16",
     accum_dtype="float",
+    out_dtype=None,
 ):
+    if out_dtype is None:
+        out_dtype = dtype
+
     if trans_A and trans_B:
 
         @T.prim_func
         def gemm(
             A: T.Tensor((K, M), dtype),
             B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+            C: T.Tensor((M, N), out_dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
                 A_shared = T.alloc_shared((block_K, block_M), dtype)
@@ -53,7 +58,7 @@ def matmul(
         def gemm(
             A: T.Tensor((K, M), dtype),
             B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
+            C: T.Tensor((M, N), out_dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
                 A_shared = T.alloc_shared((block_K, block_M), dtype)
@@ -74,7 +79,7 @@ def matmul(
         def gemm(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+            C: T.Tensor((M, N), out_dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
                 A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -93,7 +98,7 @@ def matmul(
     def gemm(
         A: T.Tensor((M, K), dtype),
         B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -119,9 +124,9 @@ size_list = [(512, 512, 512)]
 stage_list = [0, 2]
 block_threads_list = [
     (256, 256, 32, 128),
-    (256, 256, 32, 512),
-    (64, 64, 128, 128),
-    (64, 64, 128, 512),
+    (256, 256, 32, 256),
+    (64, 64, 32, 128),
+    (64, 64, 32, 256),
 ]
 test_params = [
     (
@@ -172,6 +177,11 @@ def test_mm_kernel(
     b_shape = (N, K) if trans_B else (K, N)
     A = torch.randn(a_shape, dtype=torch.float16, device=device).to(elem_type)
     B = torch.randn(b_shape, dtype=torch.float16, device=device).to(elem_type)
+    kernel_dtype = get_tilelang_type(elem_type)
+    output_dtype = get_tilelang_type(elem_type)
+    if elem_type == torch.float32:
+        kernel_dtype = T.tfloat32
+        output_dtype = "float32"
     program = matmul(
         M,
         N,
@@ -183,8 +193,9 @@ def test_mm_kernel(
         stages,
         trans_A=trans_A,
         trans_B=trans_B,
-        dtype=get_tilelang_type(elem_type),
+        dtype=kernel_dtype,
         accum_dtype="float32",
+        out_dtype=output_dtype,
     )
     pass_configs = {
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: disable_ws_tma,

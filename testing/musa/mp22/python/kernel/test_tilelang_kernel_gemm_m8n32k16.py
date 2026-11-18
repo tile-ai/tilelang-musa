@@ -7,7 +7,7 @@ import tilelang.testing
 
 
 @pytest.fixture(autouse=True)
-def force_mp22_m16_mma(monkeypatch):
+def force_mp22_m8_mma(monkeypatch):
     cache_enabled = tilelang.is_cache_enabled()
     tilelang.disable_cache()
     monkeypatch.setenv("TILELANG_MUSA_MP22_MMA_SHAPE", "m8n32k16")
@@ -30,6 +30,13 @@ def _assert_uses_m8_gemm(kernel_source, op_name, layout_tag):
         raise AssertionError(
             f"{layout_tag} did not lower to MP22 m8n32k16 {op_name}. Expected trailing inst shape template args: 8, 32, 16."
         )
+
+
+def _assert_uses_default_gemm(kernel_source, op_name, layout_tag):
+    if not re.search(rf"tl::{op_name}<", kernel_source):
+        raise AssertionError(f"{layout_tag} did not lower to {op_name}.")
+    if re.search(rf"tl::{op_name}<[^;]*,\s*8,\s*32,\s*16>", kernel_source):
+        raise AssertionError(f"{layout_tag} incorrectly lowered to MP22 m8n32k16 {op_name}.")
 
 
 def matmul(
@@ -160,6 +167,34 @@ def test_gemm_f16f16f32(trans_A, trans_B, layout_tag, num_threads):
         0,
         num_threads,
     )
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+@pytest.mark.parametrize(
+    "in_dtype, out_dtype, accum_dtype, block_k",
+    [
+        ("float32", "float32", "float32", 16),
+        ("int8", "int32", "int32", 32),
+    ],
+)
+def test_non_fp16_gemm_ignores_m8_override(in_dtype, out_dtype, accum_dtype, block_k):
+    program = matmul(
+        128,
+        128,
+        128,
+        128,
+        128,
+        block_k,
+        False,
+        False,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
+        0,
+        128,
+    )
+    kernel_source = tilelang.compile(program, out_idx=[2]).get_kernel_source()
+    _assert_uses_default_gemm(kernel_source, "gemm_ss", in_dtype)
 
 
 def matmul_sr(

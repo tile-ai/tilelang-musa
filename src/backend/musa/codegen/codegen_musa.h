@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "backend/musa/tma_types.h"
 #include "target/source/codegen_c.h"
@@ -24,7 +25,7 @@ namespace codegen {
 
 class CodeGenTileLangMUSA final : public CodeGenC {
 public:
-  CodeGenTileLangMUSA();
+  explicit CodeGenTileLangMUSA(bool enable_fma_contraction);
   std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
@@ -54,6 +55,7 @@ public:
   // overload visitor
   void VisitExpr_(const RampNode *op, std::ostream &os);      // NOLINT(*)
   void VisitExpr_(const BroadcastNode *op, std::ostream &os); // NOLINT(*)
+  void VisitExpr_(const SelectNode *op, std::ostream &os);
   void VisitExpr_(const FloatImmNode *op, std::ostream &os);
   void VisitExpr_(const CallNode *op, std::ostream &os);
   void VisitExpr_(const CastNode *op, std::ostream &os);
@@ -72,6 +74,8 @@ public:
                               const PrimFunc &func, std::ostream &os);
 
 protected:
+  std::pair<std::string, std::string>
+  PrintInlineRobustDescriptorArgs(const PrimExpr &desc);
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,
@@ -91,6 +95,8 @@ private:
 
   // Whether global barrier is needed.
   bool need_global_barrier_{false};
+  // Whether implicit multiply-add/subtract contraction is enabled.
+  bool enable_fma_contraction_{false};
   // Global barrier state
   std::string vid_global_barrier_state_;
   // Global barrier expected node.

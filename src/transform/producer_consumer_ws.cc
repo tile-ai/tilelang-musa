@@ -626,6 +626,24 @@ static bool HasGlobalToSharedCopyShape(const CopyNode *copy) {
          IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
 }
 
+static bool ContainsNonSharedTileOpCopy(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (found) {
+      return;
+    }
+    if (const auto *call = node.as<CallNode>()) {
+      auto tile_op = ParseOperator(GetRef<Call>(call));
+      if (tile_op.defined()) {
+        if (const auto *copy = tile_op.as<CopyNode>()) {
+          found = !IsSharedBuffer(copy->dst);
+        }
+      }
+    }
+  });
+  return found;
+}
+
 static cuda::CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode *copy,
                                                            Target target) {
   if (copy == nullptr) {
@@ -792,16 +810,18 @@ static VarSet CollectPH1MmaTmaUnsafeDstBuffers(const Array<Stmt> &flat_stmts,
           unsafe_buffers.insert(b->data);
         }
 
-        const bool uses_ph1_f16_wmma =
+        const bool uses_ph1_small_tile_wmma =
             TargetIsPH1(target) && !allow_sqmma && allow_ph1_wmma &&
             IsSharedBuffer(a) && IsSharedBuffer(b) &&
-            c.scope() == "local.fragment" && a_dtype == DataType::Float(16) &&
-            b_dtype == DataType::Float(16) && c_dtype == DataType::Float(32);
-        if (uses_ph1_f16_wmma && *block_size == 32 && num_stages >= 2 &&
-            trans_a && trans_b && m == 16 && n == 8 && k == 16) {
-          // PH1 F16 WMMA TT small-tile staging is not stable as a TMA producer
-          // for this single-consumer-warp pipelined shape. Keep both operands
-          // on the consumer copy path instead of splitting them into WS/TMA.
+            c.scope() == "local.fragment";
+        if (uses_ph1_small_tile_wmma && *block_size == 32 && num_stages >= 2 &&
+            trans_a == trans_b && m == 16 && n == 8 && k == 16) {
+          // PH1 FP16/BF16 WMMA NN/TT small-tile staging is not stable as a TMA
+          // producer for this single-consumer-warp pipelined shape. It can
+          // intermittently corrupt the output and raise musaErrorOutOfBound.
+          // Keep both operands on the consumer copy path instead of splitting
+          // them into WS/TMA. Mixed-transpose and other tile shapes retain the
+          // normal TMA selection path.
           unsafe_buffers.insert(a->data);
           unsafe_buffers.insert(b->data);
         }
@@ -818,14 +838,9 @@ static VarSet CollectPH1MmaTmaUnsafeDstBuffers(const Array<Stmt> &flat_stmts,
         return;
       }
       if (const auto *gemm = tile_op.as<GemmNode>()) {
-        const bool allow_sqmma =
-            gemm->GetGemmInstructionShape(*block_size, target,
-                                          kGemmInstMusaSQMMA)
-                .has_value();
-        const bool allow_ph1_wmma =
-            !allow_sqmma && gemm->GetGemmInstructionShape(*block_size, target,
-                                                          kGemmInstMusaPH1WMMA)
-                                .has_value();
+        const auto gemm_inst = gemm->GetGemmInstructionKey(*block_size, target);
+        const bool allow_sqmma = gemm_inst == kGemmInstMusaSQMMA;
+        const bool allow_ph1_wmma = gemm_inst == kGemmInstMusaPH1WMMA;
         mark_gemm_operands(gemm->a_, gemm->b_, gemm->c_, gemm->a_->dtype,
                            gemm->b_->dtype, gemm->c_->dtype, gemm->m_, gemm->n_,
                            gemm->k_, gemm->transA_, gemm->transB_, allow_sqmma,
@@ -1890,6 +1905,10 @@ private:
       }
       bool all_movable = true;
       for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+        if (ContainsNonSharedTileOpCopy(consumer_compute_stmts[ci])) {
+          all_movable = false;
+          break;
+        }
         if (!IsProducerMovableLoopPrefixStmt(consumer_compute_stmts[ci],
                                              target_)) {
           all_movable = false;
@@ -2924,10 +2943,26 @@ public:
     TiledWSCandidate c;
     c.target_ = target;
     c(stmt);
-    return c.has_pipeline_loop_ && c.has_tma_tile_op_;
+    return c.has_pipeline_loop_ && c.has_tma_tile_op_ &&
+           !c.has_musa_fma_gemm_;
   }
 
 private:
+  void VisitStmt_(const AttrStmtNode *op) final {
+    int old_block_size = block_size_;
+    if (op->attr_key == tirx::attr::thread_extent) {
+      if (const auto *iv = op->node.as<IterVarNode>()) {
+        if (iv->thread_tag == "threadIdx.x") {
+          if (const int64_t *extent = as_const_int(op->value)) {
+            block_size_ = static_cast<int>(*extent);
+          }
+        }
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+    block_size_ = old_block_size;
+  }
+
   void VisitStmt_(const ForNode *op) final {
     bool old = in_pipeline_;
     if (auto anno = op->annotations.Get("num_stages")) {
@@ -2943,16 +2978,33 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
-    if (in_pipeline_ && !has_tma_tile_op_) {
+    if (in_pipeline_) {
       auto tile_op = ParseOperator(GetRef<Call>(op));
-      if (auto *copy = tile_op.as<CopyNode>()) {
-        if (ClassifyCopy(copy, target_) == TileStmtKind::kTmaProducer) {
-          // If the destination buffer has a layout annotation, verify
-          // that the layout is TMA-compatible (swizzle or linear).
-          // Copies whose layout is incompatible with TMA cannot become
-          // TMA producers.
-          if (HasTmaCompatibleLayout(copy->dst)) {
-            has_tma_tile_op_ = true;
+      if (TargetIsMusa(target_) && block_size_ > 0) {
+        String gemm_inst;
+        if (const auto *gemm = tile_op.as<GemmNode>()) {
+          gemm_inst = gemm->GetGemmInstructionKey(block_size_, target_);
+        } else if (const auto *gemm_py = tile_op.as<GemmPyNode>()) {
+          gemm_inst = gemm_py->GetGemmInstructionKey(block_size_, target_);
+        }
+        if (gemm_inst == kGemmInstMusaFMA) {
+          // The MUSA FMA fallback keeps a large per-thread accumulator live.
+          // Splitting that loop into producer/consumer branches can exceed
+          // MTCC's live-variable handling limits.  Leave the original
+          // pipeline intact; accelerated SQMMA/WMMA GEMMs remain eligible.
+          has_musa_fma_gemm_ = true;
+        }
+      }
+      if (!has_tma_tile_op_) {
+        if (auto *copy = tile_op.as<CopyNode>()) {
+          if (ClassifyCopy(copy, target_) == TileStmtKind::kTmaProducer) {
+            // If the destination buffer has a layout annotation, verify
+            // that the layout is TMA-compatible (swizzle or linear).
+            // Copies whose layout is incompatible with TMA cannot become
+            // TMA producers.
+            if (HasTmaCompatibleLayout(copy->dst)) {
+              has_tma_tile_op_ = true;
+            }
           }
         }
       }
@@ -3003,6 +3055,8 @@ private:
   bool in_pipeline_{false};
   bool has_pipeline_loop_{false};
   bool has_tma_tile_op_{false};
+  bool has_musa_fma_gemm_{false};
+  int block_size_{0};
   // Map from buffer data Var to (Buffer, Layout) for layout_map entries.
   BufferLayoutMap layout_map_;
 };

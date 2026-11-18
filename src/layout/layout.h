@@ -107,6 +107,13 @@ public:
 
   virtual bool IsEqual(const LayoutNode *other, bool skip_index = false) const;
 
+  // Internal semantic metadata does not participate in layout geometry or
+  // structural equality.  It travels with layout-preserving derivations so
+  // backend-specific lowering policies can follow the active Layout object.
+  ffi::Optional<ffi::ObjectRef> GetMetadata(const ffi::String &key) const;
+  Layout WithMetadata(const ffi::String &key, ffi::ObjectRef value) const;
+  Layout CopyMetadataTo(Layout target) const;
+
   static void RegisterReflection();
   TVM_FFI_DECLARE_OBJECT_INFO("tl.Layout", LayoutNode, ffi::Object);
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
@@ -117,6 +124,9 @@ protected:
   void UpdateAnalyzer(arith::Analyzer *analyzer) const;
   ffi::Array<PrimExpr> forward_index_;
   ffi::Array<PrimExpr> input_size_;
+  // Metadata is an internal sidecar and may be attached after layout
+  // construction without changing the immutable layout geometry.
+  mutable ffi::Map<ffi::String, ffi::ObjectRef> metadata_;
 };
 
 /*!
@@ -249,22 +259,59 @@ Fragment MakePHSqmmaFragmentC(const int block_m, const int block_n,
                               const int warp_m, const int warp_n,
                               const int element_size,
                               const std::array<int, 3> &inst_shape = {0, 0, 0});
+Fragment MakeSqmmaFragmentC(const int block_m, const int block_n,
+                            const int warp_m, const int warp_n,
+                            const int element_size,
+                            const std::array<int, 3> &inst_shape = {0, 0, 0});
 Fragment MakePH1WmmaCLayout(const int block_m, const int block_n,
                             const int warp_m, const int warp_n,
                             const int element_size,
                             const std::array<int, 3> &inst_shape = {0, 0, 0});
+Fragment MakeWmmaFragmentC(const int block_m, const int block_n,
+                           const int warp_m, const int warp_n,
+                           const int element_size,
+                           const std::array<int, 3> &inst_shape = {0, 0, 0});
 Fragment MakePH1WmmaFragmentA(const int block_m, const int block_n,
                               const int block_k, const int warp_m,
                               const int warp_n, const int element_size,
                               bool transposed = false,
                               const std::array<int, 3> &inst_shape = {0, 0, 0});
+Fragment MakeWmmaFragmentA(const int block_m, const int block_n,
+                           const int block_k, const int warp_m,
+                           const int warp_n, const int element_size,
+                           bool transposed = false,
+                           const std::array<int, 3> &inst_shape = {0, 0, 0});
 Fragment MakePH1WmmaFragmentB(const int block_m, const int block_n,
                               const int block_k, const int warp_m,
                               const int warp_n, const int element_size,
                               bool transposed = false,
                               const std::array<int, 3> &inst_shape = {0, 0, 0});
+Fragment MakeWmmaFragmentB(const int block_m, const int block_n,
+                           const int block_k, const int warp_m,
+                           const int warp_n, const int element_size,
+                           bool transposed = false,
+                           const std::array<int, 3> &inst_shape = {0, 0, 0});
 Layout MakePH1WmmaABLayout(int mat_stride, int mat_continuous, int continuity,
                            int element_size, bool k_inner = true);
+Layout MakeWmmaABLayout(int mat_stride, int mat_continuous, int continuity,
+                        int element_size, bool k_inner = true);
+Fragment MakeGemmQY2FragmentC(const int block_m, const int block_n,
+                              const int warp_m, const int warp_n,
+                              const int element_size);
+Fragment
+MakeGemmQY2WmmaCLayout(const int block_m, const int block_n, const int warp_m,
+                       const int warp_n, const int element_size,
+                       const std::array<int, 3> &inst_shape = {0, 0, 0});
+Fragment
+MakeGemmQY2WmmaFragmentA(const int block_m, const int block_n,
+                         const int block_k, const int warp_m, const int warp_n,
+                         const int element_size, bool transposed = false,
+                         const std::array<int, 3> &inst_shape = {0, 0, 0});
+Fragment
+MakeGemmQY2WmmaFragmentB(const int block_m, const int block_n,
+                         const int block_k, const int warp_m, const int warp_n,
+                         const int element_size, bool transposed = false,
+                         const std::array<int, 3> &inst_shape = {0, 0, 0});
 Fragment MakeGemmFragmentCLinear(const int block_m, const int block_n,
                                  const int block_size);
 Fragment MakeGemmFragmentA(const int block_m, const int block_n,
@@ -279,6 +326,18 @@ Fragment MakeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
                                const int warp_n, const int element_size,
                                const int k_pack, bool transposed = false);
+Fragment MakeGemmQY2FragmentARow(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size);
+Fragment MakeGemmQY2FragmentACol(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size);
+Fragment MakeGemmQY2FragmentBRow(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size);
+Fragment MakeGemmQY2FragmentBCol(const int block_m, const int block_n,
+                                 const int block_k, const int warp_m,
+                                 const int warp_n, const int element_size);
 
 // Default Memory Layout (row-major linear layout for any dimension)
 Layout MakeLinearLayout(ffi::Array<PrimExpr> shape);
@@ -290,6 +349,8 @@ Layout MakeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                               bool k_inner = true);
 Layout MakeGemmABLayoutPH1(int mat_stride, int mat_continuous, int continuity,
                            int element_size, bool k_inner = true);
+Layout MakeSqmmaABLayout(int mat_stride, int mat_continuous, int continuity,
+                         int element_size, bool k_inner = true);
 Layout MakeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
                              int element_size, bool k_inner = true);
 Layout MakeGemmABLayoutCDNA(int stride, int continuous, int element_size,

@@ -6,8 +6,8 @@ This directory carries the 15 TileKernels representative baseline records into
 `tilelang-musa` for MP31/S5000-side tracking.
 
 The benchmark runners use only local implementations under
-`benchmark/mp31/tilekernels`. They are migrated from tilekernels repository (`git@sh-code.mthreads.com:tianyi.xu/tilekernels.git`
-) but do not depend on it.
+`benchmark/mp31/tilekernels`. The migrated kernels are included in this
+repository; a separate TileKernels checkout is not required.
 
 Baseline source:
 

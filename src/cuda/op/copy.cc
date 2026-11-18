@@ -10,6 +10,7 @@
 #include <tvm/runtime/logging.h>
 
 #include "cuda/op/copy.h"
+#include "cuda/stubs/cuda.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 #include "layout/cute_layout.h"
@@ -48,7 +49,7 @@ PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
 int TMAPayloadElementBits(DataType dtype) {
   // IR elements are 8-bit unpacked SMEM slots, but TMA/mbarrier transactions
   // count the packed FP4 payload loaded from global memory.
-  if (dtype.is_float4_e2m1_unpacked()) {
+  if (tvm::tl::IsUnpackedFP4Storage(dtype, 0)) {
     return 4;
   }
   return dtype.bits();
@@ -150,12 +151,12 @@ int TensorMapDataTypeForTMA(DataType global_dtype, DataType shared_dtype) {
   // (float_e2m1_unpacksmem_t). 16U4_ALIGN8B: packed FP4 for mxf4 / mxf4nvf4
   // (float_e2m1_t).
   constexpr int kTensorMapDataType16U4Align16B = 14;
-  if (shared_dtype.is_float4_e2m1_unpacked()) {
+  if (tvm::tl::IsUnpackedFP4Storage(shared_dtype, 0)) {
     ICHECK(global_dtype.is_float4_e2m1fn())
         << "FP4 packed global tensor required for unpacked shared TMA copy";
     return kTensorMapDataType16U4Align16B;
   }
-  return to_CUtensorMapDataType(global_dtype);
+  return cuda::to_CUtensorMapDataType(global_dtype);
 }
 
 int GetEvictionPolicy(const CopyNode &op) {

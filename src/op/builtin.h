@@ -105,6 +105,8 @@ static constexpr const char *kDisableSafeCopyPredication =
     "tl.disable_safe_copy_predication";
 static constexpr const char *kDisableSafeRobustCopyPredication =
     "tl.disable_safe_robust_copy_predication";
+static constexpr const char *kDisablePredicatedAsyncCopy =
+    "tl.disable_predicated_async_copy";
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
@@ -120,15 +122,21 @@ static constexpr const char *kDisableSharedMemoryReuse =
 static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
 static constexpr const char *kEnableAutoUnroll = "tl.enable_auto_unroll";
 static constexpr const char *kEnableFastMath = "tl.enable_fast_math";
+static constexpr const char *kEnableFMAContraction =
+    "tl.enable_fma_contraction";
 static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";
 static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
+// Disable automatic vectorization for loops that access only local fragments.
+// Mixed fragment/global or fragment/local loops are unaffected.
+static constexpr const char *kDisableFragmentVectorize =
+    "tl.disable_fragment_vectorize";
 static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableSQMMA = "tl.disable_sqmma";
-static constexpr const char *kDisablePH1WMMA = "tl.disable_ph1_wmma";
+static constexpr const char *kDisableWMMA = "tl.disable_wmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kEnableMusaBurst = "tl.enable_musa_burst";
 static constexpr const char *kEnableMusaTmaPrefetch =
@@ -225,7 +233,6 @@ static constexpr const char *kGemmInstCudaTCGEN05 = "cuda.tcgen05";
 static constexpr const char *kGemmInstROCmMFMA = "rocm.mfma";
 static constexpr const char *kGemmInstCPUScalar = "cpu.scalar";
 static constexpr const char *kGemmInstMusaMMA = "musa.mma";
-static constexpr const char *kGemmInstMusaQY2MMA = "musa.qy2mma";
 static constexpr const char *kGemmInstMusaSQMMA = "musa.sqmma";
 static constexpr const char *kGemmInstMusaPH1WMMA = "musa.ph1wmma";
 static constexpr const char *kGemmInstMusaFMA = "musa.fma";
@@ -237,6 +244,9 @@ static constexpr const char *kGemmInstMusaFMA = "musa.fma";
  *
  */
 DataType CuTensorMapType();
+
+/*! \brief Opaque 128-bit MUSA robust descriptor parameter type. */
+DataType musaRobustDescriptorType();
 
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
@@ -296,6 +306,16 @@ TVM_DLL const Op &ieee_fsqrt();
 TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
+
+// Explicit MUSA integer fast-divmod operations.  LowerMUSAFastDivmod uses the
+// four-argument internal forms when the magic parameters can be prepared on
+// the host, and the two-argument device forms otherwise.
+TVM_DLL const Op &fast_div();
+TVM_DLL const Op &fast_mod();
+TVM_DLL const Op &musa_fast_div();
+TVM_DLL const Op &musa_fast_mod();
+TVM_DLL const Op &musa_fast_div_device();
+TVM_DLL const Op &musa_fast_mod_device();
 
 // Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
 TVM_DLL const Op &add2();
@@ -661,6 +681,25 @@ TVM_DLL const Op &get_warp_group_idx();
 TVM_DLL const Op &lma_wait();
 
 /*!
+ * \brief Cross-basic-block LDLMS group markers used by the MUSA backend.
+ *
+ * The generic operations take a non-negative compile-time logical group ID.
+ * CodeGenMUSA emits it as the template argument of the corresponding device
+ * helper. The suffixed zero-input operations remain for compatibility.
+ */
+TVM_DLL const Op &async_copy_commit_group();
+TVM_DLL const Op &async_copy_wait_group();
+TVM_DLL const Op &ldlms_crossbb_commit_0();
+TVM_DLL const Op &ldlms_crossbb_wait_0();
+TVM_DLL const Op &ldlms_crossbb_commit_1();
+TVM_DLL const Op &ldlms_crossbb_wait_1();
+
+/*!
+ * \brief Preserve a scheduling boundary in generated MUSA code.
+ */
+TVM_DLL const Op &sched_boundary();
+
+/*!
  * \brief Wait the previous wgmma to finish
  *
  * wait_wgmma(num_mma)
@@ -715,6 +754,9 @@ TVM_DLL const Op &block_rank_in_cluster();
  *
  */
 TVM_DLL const Op &sync_grid();
+
+/*! \brief Emit a system-scope device memory fence. */
+TVM_DLL const Op &fence_sys();
 
 /*!
  * \brief Synchronize all threads in a warp
@@ -1118,6 +1160,20 @@ TVM_DLL const Op &warp_reduce_bitor();
 TVM_DLL const Op &__ldg();
 
 /*!
+ * \brief MUSA MP31 ordinary global-to-register load with LSU cache hints.
+ *
+ * The first argument is a one-dimensional BufferLoad. The remaining
+ * arguments are immediate values forwarded to the MUSA
+ * `__lsu_ld_cache_hint` wrapper: inner persistence, outer persistence,
+ * coherence hierarchy, and SLC/L2 policy. The volatile-effect variant uses
+ * the same argument layout and selects MTCC's volatile intrinsic.
+ */
+TVM_DLL const Op &lsu_ld_cache_hint();
+
+/*! \brief Volatile-effect variant of `lsu_ld_cache_hint`. */
+TVM_DLL const Op &lsu_ld_volatile_cache_hint();
+
+/*!
  * \brief tilelang intrinsic for CUDA find-first-set bit (__ffs / __ffsll).
  *
  *  Returns the one-based position of the least significant set bit, or 0 when
@@ -1220,6 +1276,26 @@ TVM_DLL const Op &stg128();
  *    T.stg256(y, i, value)
  */
 TVM_DLL const Op &stg256();
+
+// CUDA interfaces referenced by the preserved public CUDA backend.
+TVM_DLL const Op &annotate_consumer_reg_alloc();
+TVM_DLL const Op &annotate_producer_reg_dealloc();
+TVM_DLL const Op &clc_get_first_ctaid_x();
+TVM_DLL const Op &clc_get_first_ctaid_y();
+TVM_DLL const Op &clc_get_first_ctaid_z();
+TVM_DLL const Op &clc_is_canceled();
+TVM_DLL const Op &clc_try_cancel();
+TVM_DLL const Op &clc_try_cancel_multicast();
+TVM_DLL const Op &ptx_cluster_store();
+TVM_DLL const Op &ptx_tcgen05_cp_warpx4();
+TVM_DLL const Op &ptx_tcgen05_mma_blockscaled_ss();
+TVM_DLL const Op &ptx_tcgen05_sf_warp_transpose();
+TVM_DLL const Op &tcgen05_after_thread_sync();
+TVM_DLL const Op &tcgen05_before_thread_sync();
+TVM_DLL const Op &tcgen05_ld();
+TVM_DLL const Op &tcgen05_st();
+TVM_DLL const Op &tma_load_gather4();
+TVM_DLL const Op &tma_store_scatter4();
 
 } // namespace tl
 } // namespace tvm

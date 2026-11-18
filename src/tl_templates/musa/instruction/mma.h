@@ -3,6 +3,7 @@
 #include "../common.h"
 #include <cstdint>
 #include <mute/arch/mma_mp31.hpp>
+#include <mute/tensor.hpp>
 #include <type_traits>
 
 namespace tl {

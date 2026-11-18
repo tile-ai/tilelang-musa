@@ -147,8 +147,126 @@ Stmt LowerIm2ColForTarget(const Im2ColOpNode &op, const LowerArgs &lower_args,
 
 bool MatchAnyIm2ColTarget(Target /*target*/) { return true; }
 
+PrimExpr MultiplyIm2ColDims(const Array<PrimExpr> &dims) {
+  PrimExpr result = 1;
+  for (const PrimExpr &dim : dims) {
+    result *= dim;
+  }
+  return result;
+}
+
+std::vector<PrimExpr>
+DecomposeIm2ColIndex(PrimExpr linear, const std::vector<PrimExpr> &axis_dims) {
+  std::vector<PrimExpr> indices(axis_dims.size());
+  for (int axis = static_cast<int>(axis_dims.size()) - 1; axis >= 0; --axis) {
+    indices[axis] = FloorMod(linear, axis_dims[axis]);
+    linear = FloorDiv(linear, axis_dims[axis]);
+  }
+  return indices;
+}
+
+PrimExpr FlattenIm2ColIndices(const std::vector<PrimExpr> &indices,
+                              const std::vector<PrimExpr> &axis_dims) {
+  ICHECK_EQ(indices.size(), axis_dims.size());
+  PrimExpr result = 0;
+  for (size_t axis = 0; axis < indices.size(); ++axis) {
+    result = result * axis_dims[axis] + indices[axis];
+  }
+  return result;
+}
+
+Stmt LowerExplicitIm2ColSIMT(const Im2ColOpNode &op,
+                             const LowerArgs &lower_args) {
+  const Buffer &src = op.src_;
+  const Buffer &dst = op.dst_;
+  const BufferRegion &dst_region = op.dstRegion_;
+  int spatial_rank = op.spatial_rank_;
+
+  ICHECK_GE(spatial_rank, 1);
+  ICHECK_LE(spatial_rank, 3);
+  ICHECK_EQ(src->shape.size(), static_cast<size_t>(spatial_rank + 2));
+  ICHECK_EQ(op.coords_.size(), static_cast<size_t>(spatial_rank + 1));
+  ICHECK_EQ(op.kernel_positions_.size(), static_cast<size_t>(spatial_rank));
+  ICHECK_EQ(op.output_dims_.size(), static_cast<size_t>(spatial_rank));
+  ICHECK_EQ(op.strides_.size(), static_cast<size_t>(spatial_rank));
+  ICHECK_EQ(op.dilations_.size(), static_cast<size_t>(spatial_rank));
+  ICHECK_EQ(op.paddings_.size(), static_cast<size_t>(spatial_rank));
+  ICHECK_GE(dst_region->region.size(), 2U);
+
+  size_t row_axis = dst_region->region.size() - 2;
+  size_t col_axis = dst_region->region.size() - 1;
+  Var i("im2col_i", dst_region->region[row_axis]->extent.dtype());
+  Var j("im2col_j", dst_region->region[col_axis]->extent.dtype());
+
+  PrimExpr output_volume = MultiplyIm2ColDims(op.output_dims_);
+  std::vector<PrimExpr> output_dims(op.output_dims_.begin(),
+                                    op.output_dims_.end());
+  std::vector<PrimExpr> base_output_coords(op.coords_.begin() + 1,
+                                           op.coords_.end());
+  std::vector<PrimExpr> output_dims_physical(output_dims.rbegin(),
+                                             output_dims.rend());
+  std::vector<PrimExpr> base_coords_physical(base_output_coords.rbegin(),
+                                             base_output_coords.rend());
+  PrimExpr base_row =
+      op.coord_n_ * output_volume +
+      FlattenIm2ColIndices(base_coords_physical, output_dims_physical);
+  PrimExpr row = base_row + i;
+  PrimExpr channel = op.coords_[0] + j;
+  PrimExpr batch = FloorDiv(row, output_volume);
+  auto output_coords_physical =
+      DecomposeIm2ColIndex(FloorMod(row, output_volume), output_dims_physical);
+  std::vector<PrimExpr> output_coords(output_coords_physical.rbegin(),
+                                      output_coords_physical.rend());
+
+  PrimExpr valid = And(i < op.dim_nx_, j < op.dim_c_);
+  valid = And(valid, row < src->shape[0] * output_volume);
+  PrimExpr channel_limit = src->shape[src->shape.size() - 1];
+  valid = And(valid, And(channel >= 0, channel < channel_limit));
+
+  Array<PrimExpr> src_indices(spatial_rank + 2, PrimExpr());
+  src_indices.Set(0, batch);
+  for (int axis = 0; axis < spatial_rank; ++axis) {
+    // The explicit API lists spatial metadata in W/H/D order, while the
+    // physical tensor is N[D]HWC.  Reverse the physical spatial axis here.
+    int src_axis = spatial_rank - axis;
+    PrimExpr input_index = output_coords[axis] * op.strides_[axis] +
+                           op.kernel_positions_[axis] * op.dilations_[axis] -
+                           op.paddings_[axis];
+    valid =
+        And(valid, And(input_index >= 0, input_index < src->shape[src_axis]));
+    src_indices.Set(src_axis, input_index);
+  }
+  src_indices.Set(spatial_rank + 1, channel);
+
+  Array<PrimExpr> dst_indices;
+  dst_indices.reserve(dst_region->region.size());
+  for (size_t axis = 0; axis < dst_region->region.size(); ++axis) {
+    PrimExpr index = dst_region->region[axis]->min;
+    if (axis == row_axis) {
+      index += i;
+    } else if (axis == col_axis) {
+      index += j;
+    }
+    dst_indices.push_back(index);
+  }
+
+  Stmt store_zero = BufferStore(dst, make_zero(dst->dtype), dst_indices);
+  Stmt store_value =
+      BufferStore(dst, BufferLoad(src, src_indices), dst_indices);
+  Stmt body = IfThenElse(valid, store_value, store_zero);
+  body =
+      For(j, 0, dst_region->region[col_axis]->extent, ForKind::kSerial, body);
+  body =
+      For(i, 0, dst_region->region[row_axis]->extent, ForKind::kSerial, body);
+  return IfThenElse(EQ(lower_args.thread_var, lower_args.thread_bounds->min),
+                    body);
+}
+
 Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) {
+  if (op.spatial_rank_ != 0) {
+    return LowerExplicitIm2ColSIMT(op, lower_args);
+  }
   const Buffer &src = op.src_;
   const Buffer &dst = op.dst_;
   const BufferRegion &dst_region = op.dstRegion_;
@@ -249,6 +367,11 @@ const bool default_im2col_registered = RegisterDefaultIm2Col();
 
 } // namespace
 
+Stmt LowerIm2ColFallback(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                         arith::Analyzer *analyzer) {
+  return LowerIm2ColSIMT(op, lower_args, analyzer);
+}
+
 void RegisterCopyImpl(CopyImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
@@ -278,6 +401,16 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->SetAccessRegions({src_access, dst_access});
   // Copy annotations from the Call node
   node->annotations = annotations;
+  if (auto dst_block = node->annotations.Get("dst_block")) {
+    if (auto int_imm = dst_block->as<IntImmNode>()) {
+      if (int_imm->value != -1) {
+        node->dst_block = Integer(int_imm->value);
+      }
+    } else {
+      node->dst_block = Downcast<PrimExpr>(dst_block.value());
+    }
+  }
+
   data_ = std::move(node);
 }
 
@@ -511,6 +644,11 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer,
 
 LayoutMap CopyNode::InferLayout(const LayoutInferArgs &layout_args,
                                 InferLevel level) const {
+  if (HasZeroExtentRegion(src_range, layout_args.analyzer) ||
+      HasZeroExtentRegion(dst_range, layout_args.analyzer)) {
+    return {};
+  }
+
   return InferCopyLayout(*this, layout_args, level);
 }
 
@@ -527,6 +665,11 @@ LayoutMap CopyNode::InferSIMTLayout(const LayoutInferArgs &layout_args,
 // implementation.
 Stmt CopyNode::Lower(const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) const {
+  if (HasZeroExtentRegion(src_range, analyzer) ||
+      HasZeroExtentRegion(dst_range, analyzer)) {
+    return Evaluate(0);
+  }
+
   return LowerCopyForTarget(*this, lower_args, analyzer);
 }
 
@@ -542,13 +685,59 @@ Im2ColOp::Im2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->SetAccessRegions({src_access, dst_access});
   node->src_ = node->srcRegion_->buffer;
   node->dst_ = node->dstRegion_->buffer;
-  node->nhw_step_ = args[2];
-  node->c_step_ = args[3];
-  node->kernel_ = args[4].as<IntImm>().value()->value;
-  node->stride_ = args[5].as<IntImm>().value()->value;
-  node->dilation_ = args[6].as<IntImm>().value()->value;
-  node->padding_ = args[7].as<IntImm>().value()->value;
-  node->eviction_policy_ = args[8].as<IntImm>().value()->value;
+  if (args.size() == 9) {
+    // Legacy generic 2-D API.
+    node->nhw_step_ = args[2];
+    node->c_step_ = args[3];
+    node->kernel_ = args[4].as<IntImm>().value()->value;
+    node->stride_ = args[5].as<IntImm>().value()->value;
+    node->dilation_ = args[6].as<IntImm>().value()->value;
+    node->padding_ = args[7].as<IntImm>().value()->value;
+    node->eviction_policy_ = args[8].as<IntImm>().value()->value;
+  } else if (args.size() == 14) {
+    // c2d_im2col_1d(src, dst, c, w, n, dim_c, dim_nw, S, out_w,
+    //                kernel, stride, dilation, padding, eviction)
+    node->spatial_rank_ = 1;
+    node->coords_ = {args[2], args[3]};
+    node->coord_n_ = args[4];
+    node->dim_c_ = args[5];
+    node->dim_nx_ = args[6];
+    node->kernel_positions_ = {args[7]};
+    node->output_dims_ = {args[8]};
+    node->kernel_ = args[9].as<IntImm>().value()->value;
+    node->strides_ = {args[10]};
+    node->dilations_ = {args[11]};
+    node->paddings_ = {args[12]};
+    node->eviction_policy_ = args[13].as<IntImm>().value()->value;
+  } else if (args.size() == 19) {
+    // c2d_im2col_2d metadata is ordered W, H for the TME instruction.
+    node->spatial_rank_ = 2;
+    node->coords_ = {args[2], args[3], args[4]};
+    node->coord_n_ = args[5];
+    node->dim_c_ = args[6];
+    node->dim_nx_ = args[7];
+    node->kernel_positions_ = {args[9], args[8]};
+    node->output_dims_ = {args[10], args[11]};
+    node->strides_ = {args[12], args[13]};
+    node->dilations_ = {args[14], args[15]};
+    node->paddings_ = {args[16], args[17]};
+    node->eviction_policy_ = args[18].as<IntImm>().value()->value;
+  } else if (args.size() == 25) {
+    // c2d_im2col_3d metadata is ordered W, H, D for the TME instruction.
+    node->spatial_rank_ = 3;
+    node->coords_ = {args[2], args[3], args[4], args[5]};
+    node->coord_n_ = args[6];
+    node->dim_c_ = args[7];
+    node->dim_nx_ = args[8];
+    node->kernel_positions_ = {args[11], args[10], args[9]};
+    node->output_dims_ = {args[12], args[13], args[14]};
+    node->strides_ = {args[15], args[16], args[17]};
+    node->dilations_ = {args[18], args[19], args[20]};
+    node->paddings_ = {args[21], args[22], args[23]};
+    node->eviction_policy_ = args[24].as<IntImm>().value()->value;
+  } else {
+    LOG(FATAL) << "Unsupported im2col argument count: " << args.size();
+  }
   node->annotations_ = annotations;
   data_ = std::move(node);
 }
@@ -632,6 +821,24 @@ TVM_REGISTER_OP("tl.tileop.c2d_im2col")
     .set_num_inputs(9)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+#define TVM_REGISTER_EXPLICIT_IM2COL_OP(OpName, PrinterName, NumInputs)        \
+  TVM_REGISTER_OP(OpName)                                                      \
+      .set_attr<TScriptPrinterName>("TScriptPrinterName", PrinterName)         \
+      .set_attr<OpBuilderFunc>(                                                \
+          "TLOpBuilder",                                                       \
+          [](Array<PrimExpr> args, Map<String, ObjectRef> annotations) {       \
+            return Im2ColOp(args, annotations);                                \
+          })                                                                   \
+      .set_num_inputs(NumInputs)                                               \
+      .set_attr<TCallEffectKind>("TCallEffectKind",                            \
+                                 Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_EXPLICIT_IM2COL_OP("tl.tileop.c2d_im2col_1d", "c2d_im2col_1d", 14)
+TVM_REGISTER_EXPLICIT_IM2COL_OP("tl.tileop.c2d_im2col_2d", "c2d_im2col_2d", 19)
+TVM_REGISTER_EXPLICIT_IM2COL_OP("tl.tileop.c2d_im2col_3d", "c2d_im2col_3d", 25)
+
+#undef TVM_REGISTER_EXPLICIT_IM2COL_OP
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   CopyNode::RegisterReflection();

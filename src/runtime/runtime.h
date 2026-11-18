@@ -16,6 +16,12 @@ constexpr const char *tvm_tensormap_create_tiled =
     "__tvm_tensormap_create_tiled";
 constexpr const char *tvm_tensormap_create_im2col =
     "__tvm_tensormap_create_im2col";
+constexpr const char *tvm_musa_tensormap_create_tiled = "__tvm_musa_tensormap_create_tiled";
+constexpr const char *tvm_musa_tensormap_create_im2col = "__tvm_musa_tensormap_create_im2col";
+constexpr const char *tvm_musa_im2col_conv_param_create =
+    "__tvm_musa_im2col_conv_param_create";
+constexpr const char *tvm_musa_im2col_output_dim_create =
+    "__tvm_musa_im2col_output_dim_create";
 #endif // (defined(CUDA_MAJOR_VERSION) && (CUDA_MAJOR_VERSION >= 12)) ||
        // defined(MUSA_MAJOR_VERSION)
 
@@ -30,6 +36,10 @@ constexpr const char *tvm_musa_stream_set_access_policy_window =
     "__tvm_musa_stream_set_access_policy_window";
 constexpr const char *tvm_musa_stream_reset_access_policy_window =
     "__tvm_musa_stream_reset_access_policy_window";
+
+// Construct the 128-bit MUSA robust descriptor passed to device kernels.
+constexpr const char *tvm_musa_robust_descriptor_create =
+    "__tvm_musa_robust_descriptor_create";
 } // namespace tl
 } // namespace tvm
 

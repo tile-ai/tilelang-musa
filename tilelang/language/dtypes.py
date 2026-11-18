@@ -1,3 +1,4 @@
+import builtins
 from tilelang import tvm
 from tvm import ir
 import torch
@@ -149,6 +150,13 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
     if len(args) > 1:
         return tirx.Shuffle(list(args), list(range(len(args))))
     expr = args[0] if args else None
+    if self.is_float4_e2m1_unpacked():
+        # Preserve the custom IR storage tag on older public TVM.
+        if expr is None:
+            return tirx.SizeVar("", self) if is_size_var else tirx.Var("", self)
+        if isinstance(expr, (builtins.int, builtins.float)):
+            return tirx.FloatImm(self, expr)
+        return tirx.Cast(self, expr)
     if isinstance(expr, int_):
         return tvm.tirx.const(expr, dtype=self)
     if self in _STR_TO_TVM_DTYPE_CALL:

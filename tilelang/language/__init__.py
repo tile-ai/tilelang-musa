@@ -67,6 +67,9 @@ from .copy_op import (  # noqa: F401
     transpose,
     im2col,
     c2d_im2col,
+    c2d_im2col_1d,
+    c2d_im2col_2d,
+    c2d_im2col_3d,
     copy_cluster,
 )
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
@@ -112,6 +115,7 @@ from .customize import (
     clamp,  # noqa: F401
     reshape,  # noqa: F401
     view,  # noqa: F401
+    alias_buffer,  # noqa: F401
     atomic_load,  # noqa: F401
     atomic_store,  # noqa: F401
     loop_break,  # noqa: F401
@@ -119,6 +123,7 @@ from .customize import (
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 from .builtin import __ldg as __ldg  # noqa: F401
+from .builtin import lsu_ld_cache_hint as lsu_ld_cache_hint  # noqa: F401
 from .builtin import __ffs as __ffs  # noqa: F401
 from .builtin import ds_read_tr16_b64 as ds_read_tr16_b64  # noqa: F401
 from .builtin import ds_read_tr8_b64 as ds_read_tr8_b64  # noqa: F401

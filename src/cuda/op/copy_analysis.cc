@@ -28,7 +28,7 @@ using namespace ffi;
 namespace {
 
 int TMAPayloadElementBits(DataType dtype) {
-  if (dtype.is_float4_e2m1_unpacked()) {
+  if (tvm::tl::IsUnpackedFP4Storage(dtype, 0)) {
     return 4;
   }
   return dtype.bits();
@@ -437,8 +437,8 @@ CopyInstSelection Unsupported(std::string reason) {
 
 std::string MakeTmaUnavailableReason(const CopyNode &op) {
   std::ostringstream oss;
-  if (op.src->dtype.is_float4_e2m1_unpacked() ||
-      op.dst->dtype.is_float4_e2m1_unpacked()) {
+  if (tvm::tl::IsUnpackedFP4Storage(op.src->dtype, 0) ||
+      tvm::tl::IsUnpackedFP4Storage(op.dst->dtype, 0)) {
     oss << "T.tma_copy() only supports float4_e2m1_unpacked as an FP4 unpack "
            "load from packed global float4_e2m1fn to unpacked shared memory. "
            "The reverse unpacked shared -> packed global TMA store is not "

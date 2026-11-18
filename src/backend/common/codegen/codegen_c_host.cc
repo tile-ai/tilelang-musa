@@ -376,6 +376,9 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
       size = (num->value * sizeof(Shape::index_type) + unit - 1) / unit;
     } else if (type == "tvm_ffi_any") {
       size = (num->value * sizeof(TVMFFIAny) + unit - 1) / unit;
+    } else if (type == "arg_tcode") {
+      // PH1 im2col host parameters use int32 storage in TVMFFIAny slots.
+      size = (num->value * sizeof(int) + unit - 1) / unit;
     } else if (type == "array") {
       size = (num->value * sizeof(DLTensor) + unit - 1) / unit;
     } else {
@@ -399,6 +402,14 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
   } else if (op->op.same_as(builtin::tvm_throw_last_error())) {
     this->PrintIndent();
     this->stream << "return -1;\n";
+  } else if (op->op.same_as(builtin::create_barriers())) {
+    // create_barriers is a device-side builtin and should not be emitted by
+    // host codegen. Keep host codegen robust by lowering it to a no-op value.
+    os << "0";
+  } else if (op->op.same_as(Op::Get("tir.clz"))) {
+    ICHECK_EQ(op->args.size(), 1U);
+    ICHECK_EQ(op->dtype, DataType::UInt(32));
+    os << "__builtin_clz(" << PrintExpr(op->args[0]) << ")";
   } else {
     tvm::codegen::CodeGenC::VisitExpr_(op, os);
   }

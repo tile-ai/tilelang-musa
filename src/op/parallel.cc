@@ -455,7 +455,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
         // If the buffer is not replicated and shape is equal to the
         // source_buffer, use it as source_buffer because the layout inference
         // is more accurate
-      if (is_one(frag->ReplicateExtent()) && !source_buffer.defined()) {
+        if (is_one(frag->ReplicateExtent()) && !source_buffer.defined()) {
           source_buffer = buffer;
           source_buffer_is_write = false;
         }
@@ -704,7 +704,15 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
   Fragment result;
 
   if (IsCommonAccessIndice(buffer)) {
-    result = src_layout;
+    // An explicitly annotated fragment may not carry the thread range of the
+    // control-flow branch where it is used.  Bind it here so PartitionLoop
+    // normalizes the physical thread id by thread_bounds->min before applying
+    // the fragment's local thread map.  Without this, a 512-thread fragment in
+    // a consumer range [128, 640) is guarded as threadIdx.x < 512 instead of
+    // threadIdx.x < 640.
+    result = src_layout->ThreadRange().defined()
+                 ? src_layout
+                 : src_layout->BindThreadRange(layout_args.thread_bounds);
   } else {
     Var rep("_rep");
     auto rep_iter =

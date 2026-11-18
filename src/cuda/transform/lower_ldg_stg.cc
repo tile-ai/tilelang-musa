@@ -39,14 +39,29 @@ namespace tl {
 
 using namespace tirx;
 
-class LowerLDGSTGRewriter : public StmtExprMutator {
+class LowerLDGSTGCudaRewriter : public StmtExprMutator {
 public:
-  explicit LowerLDGSTGRewriter(bool enable_non_predicated,
+  explicit LowerLDGSTGCudaRewriter(bool enable_non_predicated,
                                bool enable_predicated)
       : enable_non_predicated_(enable_non_predicated),
         enable_predicated_(enable_predicated) {}
 
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tl::attr::kSourceRobustDesc ||
+        op->attr_key == tl::attr::kForceAsyncCopy) {
+      bool previous = in_protected_copy_scope_;
+      in_protected_copy_scope_ = true;
+      Stmt body = this->VisitStmt(op->body);
+      in_protected_copy_scope_ = previous;
+      return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
   Stmt VisitStmt_(const BufferStoreNode *store) final {
+    if (in_protected_copy_scope_) {
+      return StmtExprMutator::VisitStmt_(store);
+    }
     // Skip if non-predicated lowering is disabled
     if (!enable_non_predicated_) {
       return StmtExprMutator::VisitStmt_(store);
@@ -96,6 +111,9 @@ public:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *if_stmt) final {
+    if (in_protected_copy_scope_) {
+      return StmtExprMutator::VisitStmt_(if_stmt);
+    }
     // Skip if predicated lowering is disabled
     if (!enable_predicated_) {
       return StmtExprMutator::VisitStmt_(if_stmt);
@@ -172,6 +190,9 @@ public:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *load) final {
+    if (in_protected_copy_scope_) {
+      return StmtExprMutator::VisitExpr_(load);
+    }
     // Only handle global memory loads
     if (load->buffer.scope() != "global") {
       return StmtExprMutator::VisitExpr_(load);
@@ -231,6 +252,9 @@ public:
   }
 
   PrimExpr VisitExpr_(const CallNode *call) final {
+    if (in_protected_copy_scope_) {
+      return StmtExprMutator::VisitExpr_(call);
+    }
     // Skip if predicated lowering is disabled
     if (!enable_predicated_) {
       return StmtExprMutator::VisitExpr_(call);
@@ -301,6 +325,7 @@ public:
   }
 
 private:
+  bool in_protected_copy_scope_{false};
   bool enable_non_predicated_{false};
   bool enable_predicated_{true};
   ffi::Optional<PrimExpr>
@@ -489,7 +514,7 @@ private:
 
 using namespace tirx::transform;
 
-tvm::transform::Pass LowerLDGSTG() {
+tvm::transform::Pass LowerLDGSTGCudaBackend() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     // Check if target is CUDA
     auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
@@ -523,7 +548,7 @@ tvm::transform::Pass LowerLDGSTG() {
 
     auto *n = f.CopyOnWrite();
     n->body =
-        LowerLDGSTGRewriter(enable_non_predicated, enable_predicated)(n->body);
+        LowerLDGSTGCudaRewriter(enable_non_predicated, enable_predicated)(n->body);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerLDGSTG", {});
@@ -531,7 +556,7 @@ tvm::transform::Pass LowerLDGSTG() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerLDGSTG", LowerLDGSTG);
+  refl::GlobalDef().def("tl.cuda.transform.LowerLDGSTG", LowerLDGSTGCudaBackend);
 }
 
 } // namespace tl

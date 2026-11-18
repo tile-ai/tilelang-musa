@@ -27,6 +27,7 @@
 #include "../op/region.h"
 #include "../op/utils.h"
 #include "backend/common/target_utils.h"
+#include "backend/musa/op/copy.h"
 #include "common/bind_utils.h"
 #include "common/pipeline_utils.h"
 #include "tvm/ir/expr.h"
@@ -458,6 +459,7 @@ struct PipelineStageInfo {
   int original_stmt_index{};
   int order = -1, stage = -1;
   bool copy_stage = false;
+  bool async_copy = false;
   bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
   bool conditional_execution = false;
   bool producer_for_copy = false;
@@ -586,7 +588,7 @@ public:
     if (pinfo.HasCpAsyncCommit() && !pinfo.HasCpAsyncCall()) {
       return false;
     }
-    return pinfo.IsCopyStage() || pinfo.HasCpAsyncCall();
+    return pinfo.async_copy || pinfo.HasCpAsyncCall();
   }
 
   bool IsPureCopyStmt(const Stmt &stmt) const {
@@ -691,18 +693,34 @@ public:
            (buffer.defined() && buffer.scope().empty());
   }
 
+  bool CanPipelineAsAsyncCopy(const CopyNode &copy) const {
+    if (!TargetIsMusa(target_)) {
+      return true;
+    }
+
+    musa::CopyAnalysisContext ctx;
+    ctx.target = target_;
+    auto selection = musa::SelectCopyInstForLowering(copy, ctx);
+    bool explicitly_async =
+        selection.supported && musa::CopyInstIsCPAsync(selection.inst);
+    return explicitly_async ||
+           musa::IsPipelineManagedCPAsyncCopy(copy, target_);
+  }
+
   void ClassifyCopyLikeStage(const Stmt &stmt, PipelineStageInfo *pinfo) const {
     ICHECK(pinfo != nullptr);
     if (pinfo->conditional_execution) {
       return;
     }
 
-    if (pinfo->copy_stage) {
+    if (pinfo->copy_stage && !TargetIsMusa(target_)) {
+      pinfo->async_copy = true;
       return;
     }
 
     if (pinfo->HasCpAsyncCall()) {
       pinfo->copy_stage = true;
+      pinfo->async_copy = true;
       return;
     }
 
@@ -716,6 +734,7 @@ public:
         return;
       }
       pinfo->copy_stage = true;
+      pinfo->async_copy = CanPipelineAsAsyncCopy(*copy);
       return;
     }
 
@@ -1080,6 +1099,7 @@ public:
         }
         if (reads_global && writes_shared) {
           pinfo.copy_stage = true;
+          pinfo.async_copy = !TargetIsMusa(target_);
         }
       }
       pipeline_stage_infos.push_back(std::move(pinfo));
@@ -1113,6 +1133,7 @@ public:
     bool pure_copy_stage =
         collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
     pinfo.copy_stage = pure_copy_stage;
+    pinfo.async_copy = pure_copy_stage && !TargetIsMusa(target_);
     pinfo.tma_copy = pure_copy_stage && !pinfo.conditional_execution &&
                      collector.GetTmaCopyPattern();
     ClassifyCopyLikeStage(block->body, &pinfo);

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -35,11 +36,13 @@ public:
   explicit PTXAsyncCopyInjector(bool enable_auto_async_copy,
                                 bool async_without_async_commit_wait,
                                 bool disable_force_async_wait = false,
-                                bool sync_inside_conditionals = false)
+                                bool sync_inside_conditionals = false,
+                                bool disable_predicated_async_copy = false)
       : enable_auto_async_copy_(enable_auto_async_copy),
         async_without_async_commit_wait_(async_without_async_commit_wait),
         disable_force_async_wait_(disable_force_async_wait),
         sync_inside_conditionals_(sync_inside_conditionals),
+        disable_predicated_async_copy_(disable_predicated_async_copy),
         disable_safe_robust_copy_predication_(
             tvm::transform::PassContext::Current()
                 ->GetConfig<Bool>(kDisableSafeRobustCopyPredication,
@@ -65,6 +68,10 @@ public:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tirx::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      thread_vars_.insert(iv->var.get());
+    }
     if (op->attr_key == tl::attr::kSourceRobustDesc) {
       PrimExpr previous_src_robust_desc = current_src_robust_desc_;
       current_src_robust_desc_ = op->value;
@@ -337,15 +344,45 @@ public:
     const BufferLoadNode *load =
         MatchZeroFillBufferLoad(store->value, &predicate);
     if (load) {
-      Optional<Stmt> injected =
-          TryInjectPTX(load, store, predicate.defined(),
-                       predicate.defined() ? predicate.value() : PrimExpr());
+      // MUSA's global->shared async-copy group protocol does not safely
+      // support a software-predicated copy when only part of the producer
+      // thread range participates. Keep the original scalar/vector store for
+      // predicates that depend on a thread binding. A predicate independent of
+      // all thread bindings remains eligible for cp.async.
+      bool predicate_nonuniform =
+          predicate.defined() &&
+          (thread_vars_.empty() ||
+           UsesVar(predicate.value(), [this](const VarNode *var) {
+             return thread_vars_.count(var) != 0;
+           }));
+      bool apply_musa_auto_policy =
+          disable_predicated_async_copy_ && !UseExplicitAsyncSemantics();
+      bool has_robust_source_desc = current_src_robust_desc_.defined();
+      if (predicate_nonuniform && apply_musa_auto_policy &&
+          !has_robust_source_desc) {
+        return StmtMutator::VisitStmt_(store);
+      }
+      bool predicate_as_control_flow = predicate.defined() &&
+                                       !predicate_nonuniform &&
+                                       apply_musa_auto_policy;
+      Optional<Stmt> injected = TryInjectPTX(
+          load, store, predicate.defined() && !predicate_as_control_flow,
+          predicate.defined() ? predicate.value() : PrimExpr());
       if (injected.defined()) {
         injected_ptx_async_copy_ = true;
         if (!UseExplicitAsyncSemantics() &&
             !(in_force_async_copy_ && disable_force_async_wait_)) {
           pending_sync_copies_ = true;
           uncommitted_sync_copies_ = true;
+        }
+        if (predicate_as_control_flow) {
+          // A thread-uniform predicate can retain cp.async, but keep the
+          // predicate as control flow so the false path does not interleave a
+          // scalar zero-fill with an open async-copy group. The sequence pass
+          // will place the normal commit/wait boundary after this statement.
+          auto zero = make_zero(store->value.dtype());
+          Stmt zero_store = BufferStore(store->buffer, zero, store->indices);
+          return IfThenElse(predicate.value(), injected.value(), zero_store);
         }
         return injected.value();
       }
@@ -708,13 +745,12 @@ private:
         return Optional<Stmt>();
       }
       op = tl::musa_cp_async_robust();
-      auto [robust_base, robust_size] = GetRobustDescArgs(robust_desc);
       PrimExpr dst_access_ptr =
           MakeAccessPtrFromLoad(dst_base_load, dst_elem_count, /*rw_mask=*/2);
       PrimExpr src_access_ptr =
           MakeAccessPtrFromLoad(src_base_load, src_elem_count, /*rw_mask=*/1);
       cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes),
-                       robust_base, robust_size};
+                       robust_desc};
       if (predicated && !disable_safe_robust_copy_predication_) {
         cp_async_args.push_back(predicate_value);
       }
@@ -740,14 +776,6 @@ private:
   static Stmt MakeWaitGroupStmt(int n) {
     return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
                          {IntImm(DataType::Int(32), n)}));
-  }
-
-  static std::pair<PrimExpr, PrimExpr> GetRobustDescArgs(const PrimExpr &desc) {
-    const auto *call = desc.as<CallNode>();
-    ICHECK(call && call->op.same_as(tl::make_robust_desc()))
-        << "Expected tl.make_robust_desc call, but got " << desc;
-    ICHECK_EQ(call->args.size(), 2);
-    return {call->args[0], call->args[1]};
   }
 
   // ---- Vectorized-offset contiguity helpers ----
@@ -936,7 +964,9 @@ private:
   bool async_without_async_commit_wait_{false};
   bool disable_force_async_wait_{false};
   bool sync_inside_conditionals_{false};
+  bool disable_predicated_async_copy_{false};
   bool disable_safe_robust_copy_predication_{false};
+  std::unordered_set<const VarNode *> thread_vars_;
   int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
@@ -952,11 +982,13 @@ PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
                    bool async_without_async_commit_wait,
                    bool disable_force_async_wait,
-                   bool sync_inside_conditionals) {
+                   bool sync_inside_conditionals,
+                   bool disable_predicated_async_copy) {
   PTXAsyncCopyInjector injector(enable_auto_async_copy,
                                 async_without_async_commit_wait,
                                 disable_force_async_wait,
-                                sync_inside_conditionals);
+                                sync_inside_conditionals,
+                                disable_predicated_async_copy);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }

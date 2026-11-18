@@ -342,6 +342,24 @@ Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
   data_ = std::move(n);
 }
 
+Optional<ObjectRef> LayoutNode::GetMetadata(const String &key) const {
+  return metadata_.Get(key);
+}
+
+Layout LayoutNode::WithMetadata(const String &key, ObjectRef value) const {
+  metadata_.Set(key, std::move(value));
+  return GetRef<Layout>(this);
+}
+
+Layout LayoutNode::CopyMetadataTo(Layout target) const {
+  if (!metadata_.empty()) {
+    // All callers pass a freshly constructed derived layout.  Attach the
+    // sidecar without rebuilding the target layout geometry.
+    const_cast<LayoutNode *>(target.get())->metadata_ = metadata_;
+  }
+  return target;
+}
+
 void LayoutNode::RegisterReflection() {
   namespace refl = reflection;
   refl::ObjectDef<LayoutNode>()
@@ -462,7 +480,7 @@ Layout LayoutNode::Repeat(int dim, int factor) const {
     new_forward_index.push_back(Substitute(e, vmap));
   }
 
-  return Layout(new_input_size, new_forward_index);
+  return CopyMetadataTo(Layout(new_input_size, new_forward_index));
 }
 
 Layout LayoutNode::Expand(const Array<PrimExpr> &leading_shape) const {
@@ -504,7 +522,7 @@ Layout LayoutNode::Expand(const Array<PrimExpr> &leading_shape) const {
     new_forward_index.push_back(Substitute(e, vmap));
   }
 
-  return Layout(new_input_size, new_forward_index);
+  return CopyMetadataTo(Layout(new_input_size, new_forward_index));
 }
 
 Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
@@ -687,7 +705,7 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
   if (auto packed =
           TryPackedSubtypeReshape(this, shape, az, rescale_num, rescale_den);
       packed.defined()) {
-    return packed;
+    return CopyMetadataTo(packed);
   }
 
   // Step 2. Create new forward indices by reshaping
@@ -705,7 +723,7 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
   Array<PrimExpr> new_forward_index = SubstituteForwardIndex(
       forward_index_, InputShape(), original_indices, az);
   new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
-  return Layout(shape, new_forward_index);
+  return CopyMetadataTo(Layout(shape, new_forward_index));
 }
 
 Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
@@ -1097,6 +1115,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Layout layout, Array<PrimExpr> leading_shape) {
              return layout->Expand(leading_shape);
            })
+      .def("tl.Layout_with_metadata",
+           [](Layout layout, String key, ObjectRef value) {
+             return layout->WithMetadata(key, std::move(value));
+           })
+      .def("tl.Layout_get_metadata",
+           [](Layout layout, String key) { return layout->GetMetadata(key); })
       .def("tl.Layout_is_equal",
            [](Layout layout, Layout other) {
              const LayoutNode *other_node = other.as<LayoutNode>();
@@ -1146,8 +1170,14 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.make_sqmma_swizzled_layout",
            [](int stride, int mat_continuous, int continuity, int element_size,
               bool k_inner) {
-             return MakeGemmABLayoutPH1(stride, mat_continuous, continuity,
-                                        element_size, k_inner);
+             return MakeSqmmaABLayout(stride, mat_continuous, continuity,
+                                      element_size, k_inner);
+           })
+      .def("tl.make_gemm_ab_layout",
+           [](int mat_stride, int mat_continuous, int continuity,
+              int element_size, bool k_inner) {
+             return MakeGemmABLayout(mat_stride, mat_continuous, continuity,
+                                     element_size, k_inner);
            })
       .def("tl.make_tcgen05mma_swizzled_layout",
            [](const Buffer &buffer, int continuity, bool k_inner) {
@@ -1183,6 +1213,17 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                                         static_cast<int>(inst_shape[2]->value)};
              return MakePHSqmmaFragmentC(block_m, block_n, warp_m, warp_n,
                                          element_size, inst);
+           })
+      .def("tl.make_sqmma_fragment_c",
+           [](int block_m, int block_n, int warp_m, int warp_n,
+              int element_size, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3)
+                 << "inst_shape for make_sqmma_fragment_c must have 3 elements";
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return MakeSqmmaFragmentC(block_m, block_n, warp_m, warp_n,
+                                       element_size, inst);
            })
       .def("tl.make_ph1_wmma_fragment_c",
            [](int block_m, int block_n, int warp_m, int warp_n,
@@ -1230,6 +1271,113 @@ TVM_FFI_STATIC_INIT_BLOCK() {
               int element_size, bool k_inner) {
              return MakePH1WmmaABLayout(mat_stride, mat_continuous, continuity,
                                         element_size, k_inner);
+           })
+      .def("tl.make_wmma_fragment_c",
+           [](int block_m, int block_n, int warp_m, int warp_n,
+              int element_size, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3);
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return MakeWmmaFragmentC(block_m, block_n, warp_m, warp_n,
+                                      element_size, inst);
+           })
+      .def("tl.make_wmma_fragment_a",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size, bool transposed, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3);
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return MakeWmmaFragmentA(block_m, block_n, block_k, warp_m, warp_n,
+                                      element_size, transposed, inst);
+           })
+      .def("tl.make_wmma_fragment_b",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size, bool transposed, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3);
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return MakeWmmaFragmentB(block_m, block_n, block_k, warp_m, warp_n,
+                                      element_size, transposed, inst);
+           })
+      .def("tl.make_wmma_ab_layout",
+           [](int mat_stride, int mat_continuous, int continuity,
+              int element_size, bool k_inner) {
+             return MakeWmmaABLayout(mat_stride, mat_continuous, continuity,
+                                     element_size, k_inner);
+           })
+      .def("tl.make_gemm_qy2_fragment_c",
+           [](int block_m, int block_n, int warp_m, int warp_n,
+              int element_size) {
+             return MakeGemmQY2FragmentC(block_m, block_n, warp_m, warp_n,
+                                         element_size);
+           })
+      .def("tl.make_gemm_qy2_wmma_fragment_c",
+           [](int block_m, int block_n, int warp_m, int warp_n,
+              int element_size, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3)
+                 << "inst_shape for make_gemm_qy2_wmma_fragment_c must have 3 "
+                    "elements [M, N, K], but got "
+                 << inst_shape.size();
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return MakeGemmQY2WmmaCLayout(block_m, block_n, warp_m, warp_n,
+                                           element_size, inst);
+           })
+      .def("tl.make_gemm_qy2_wmma_fragment_a",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size, bool transposed, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3)
+                 << "inst_shape for make_gemm_qy2_wmma_fragment_a must have 3 "
+                    "elements [M, N, K], but got "
+                 << inst_shape.size();
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return MakeGemmQY2WmmaFragmentA(block_m, block_n, block_k, warp_m,
+                                             warp_n, element_size, transposed,
+                                             inst);
+           })
+      .def("tl.make_gemm_qy2_wmma_fragment_b",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size, bool transposed, Array<Integer> inst_shape) {
+             ICHECK_EQ(inst_shape.size(), 3)
+                 << "inst_shape for make_gemm_qy2_wmma_fragment_b must have 3 "
+                    "elements [M, N, K], but got "
+                 << inst_shape.size();
+             std::array<int, 3> inst = {static_cast<int>(inst_shape[0]->value),
+                                        static_cast<int>(inst_shape[1]->value),
+                                        static_cast<int>(inst_shape[2]->value)};
+             return MakeGemmQY2WmmaFragmentB(block_m, block_n, block_k, warp_m,
+                                             warp_n, element_size, transposed,
+                                             inst);
+           })
+      .def("tl.make_gemm_qy2_fragment_a_row",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size) {
+             return MakeGemmQY2FragmentARow(block_m, block_n, block_k, warp_m,
+                                            warp_n, element_size);
+           })
+      .def("tl.make_gemm_qy2_fragment_a_col",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size) {
+             return MakeGemmQY2FragmentACol(block_m, block_n, block_k, warp_m,
+                                            warp_n, element_size);
+           })
+      .def("tl.make_gemm_qy2_fragment_b_row",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size) {
+             return MakeGemmQY2FragmentBRow(block_m, block_n, block_k, warp_m,
+                                            warp_n, element_size);
+           })
+      .def("tl.make_gemm_qy2_fragment_b_col",
+           [](int block_m, int block_n, int block_k, int warp_m, int warp_n,
+              int element_size) {
+             return MakeGemmQY2FragmentBCol(block_m, block_n, block_k, warp_m,
+                                            warp_n, element_size);
            })
       .def("tl.make_gemm_fragment_8x8", []() { return MakeGemmFragment8x8(); })
       .def("tl.make_gemm_fragment_8x8_transposed",

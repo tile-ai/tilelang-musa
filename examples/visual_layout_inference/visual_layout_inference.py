@@ -35,8 +35,8 @@ def matmul(A, B, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float
 def main():
     import torch
 
-    a = torch.randn(128, 128).cuda().half()
-    b = torch.randn(128, 128).cuda().half()
+    a = torch.randn(128, 128, device="musa", dtype=torch.float16)
+    b = torch.randn(128, 128, device="musa", dtype=torch.float16)
 
     c = matmul(a, b, 32, 32, 32)
 
@@ -45,12 +45,13 @@ def main():
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("All check passed.")
 
-    # print the layout visualization result and save figures to ./tmp.
+    # Print the inferred layout and save figures to ./tmp.
     """
-    C_local inferenced layout:
-    Shape: [32, 32] -> [8]
-    Thread: _j // 16 * 64 + _i // 16 * 32 + _i % 8 * 4 + _j % 8 // 2
-    Index:  [_j % 16 // 8 * 4 + _i % 16 // 8 * 2 + _j % 2]
+    C_local inferred layout:
+    Shape: (32, 32) -> (8,)
+    Thread: _i % 16 * 8 + _j % 8
+    Index:  (_i // 16 * 4 + _j // 8,)
+    Replicate:  1
     """
 
 

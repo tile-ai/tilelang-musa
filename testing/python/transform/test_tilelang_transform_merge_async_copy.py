@@ -79,8 +79,7 @@ def test_merge_async_copy_folds_robust_unrolled_loop():
                     T.access_ptr(S[v * 4], "w", 4),
                     T.access_ptr(A[v * 4], "r", 4),
                     8,
-                    T.address_of(A[0]),
-                    32,
+                    robust_desc,
                 )
             )
         B[0] = S[0]
@@ -92,4 +91,5 @@ def test_merge_async_copy_folds_robust_unrolled_loop():
     assert len(calls) == 1
     assert str(calls[0].op.name) == "tl.musa_cp_async_robust"
     assert int(calls[0].args[2]) == 16
+    assert len(calls[0].args) == 4
     assert _count_for_loops(mod["main"]) == 0

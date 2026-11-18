@@ -1,9 +1,19 @@
+import re
+
 import tilelang
 import tilelang.testing
 import tilelang.language as T
 import torch
 
 tilelang.disable_cache()
+
+
+def _assert_deferred_wait_source(source):
+    match = re.search(r"tl::gemm_ss<([^>]*)>", source)
+    assert match is not None
+    params = [param.strip() for param in match.group(1).split(",")]
+    assert params[16] == "-1"
+    assert "tl::wait_wgmma<0>();" in source
 
 
 @tilelang.jit(target="musa")
@@ -95,6 +105,7 @@ def test_wait_wgmma():
         block_N=block_N,
         block_K=block_K,
     )
+    _assert_deferred_wait_source(kernel.get_kernel_source())
 
     a = torch.randn(M, K, device="musa", dtype=torch.float16)
     b = torch.randn(K, N, device="musa", dtype=torch.float16)
@@ -120,6 +131,7 @@ def test_wait_wgmma_with_independent_compute():
         block_N=block_N,
         block_K=block_K,
     )
+    _assert_deferred_wait_source(kernel.get_kernel_source())
 
     a = torch.randn(M, K, device="musa", dtype=torch.float16)
     b = torch.randn(K, N, device="musa", dtype=torch.float16)

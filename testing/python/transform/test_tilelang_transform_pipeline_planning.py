@@ -10,6 +10,7 @@ auto_target = tvm.target.Target(determine_target("auto"))
 sm80_target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 sm90_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
 sm100_target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+mp31_target = tvm.target.Target({"kind": "musa", "arch": "mp_31"})
 
 
 def _check(original, transformed, target=auto_target):
@@ -684,6 +685,41 @@ def test_pipeline_planning_marks_async_producers_per_statement():
     assert async_producers == [1, 1, 0]
     assert async_groups == [0, 0, -1]
     assert async_stages == [0]
+
+
+def test_musa_pipeline_only_marks_cp_async_compatible_copies_async():
+    def make_copy(src_dtype, dst_dtype):
+        @T.prim_func
+        def before(
+            A: T.Tensor((64,), src_dtype),
+            C: T.Tensor((64,), dst_dtype),
+        ):
+            with T.Kernel(1, threads=16):
+                A_shared = T.alloc_shared((16,), dst_dtype)
+                for i in T.Pipelined(4, num_stages=2):
+                    T.copy(A[i * 16], A_shared)
+                    T.copy(A_shared, C[i * 16])
+
+        return before
+
+    converted = _run_pipeline_planning(
+        make_copy(T.bfloat16, T.float32), mp31_target
+    )
+    converted_annos = _collect_pipeline_loop_annotations(converted["main"])
+    assert converted_annos
+    assert "software_pipeline_async_producers" not in converted_annos[0]
+    assert "software_pipeline_async_producer_groups" not in converted_annos[0]
+    assert "software_pipeline_async_stages" not in converted_annos[0]
+
+    same_dtype = _run_pipeline_planning(
+        make_copy(T.bfloat16, T.bfloat16), mp31_target
+    )
+    same_dtype_annos = _collect_pipeline_loop_annotations(same_dtype["main"])
+    assert same_dtype_annos
+    async_producers = [
+        int(v) for v in same_dtype_annos[0]["software_pipeline_async_producers"]
+    ]
+    assert async_producers == [1, 0]
 
 
 def test_pipeline_planning_keeps_plain_hopper_pipeline_copies_sync():

@@ -9,7 +9,7 @@ tilelang.disable_cache()
 
 PASS_CONFIGS = {
     tilelang.PassConfigKey.TL_DISABLE_SQMMA: True,
-    tilelang.PassConfigKey.TL_DISABLE_PH1_WMMA: True,
+    tilelang.PassConfigKey.TL_DISABLE_WMMA: True,
 }
 
 

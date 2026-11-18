@@ -192,6 +192,10 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  */
 Stmt FillNode::Lower(const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) const {
+  if (HasZeroExtentRegion(region, analyzer)) {
+    return Evaluate(0);
+  }
+
   return ResolveFillImpl(lower_args.target).lower(*this, lower_args, analyzer);
 }
 

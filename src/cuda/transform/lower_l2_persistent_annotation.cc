@@ -25,11 +25,11 @@ constexpr const char *kL2PersistentMap = "l2_persistent_map";
 using namespace tirx;
 using namespace ffi;
 
-class LowerL2Persistent : public StmtExprMutator {
+class LowerL2PersistentCudaBackend : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f) {
     PrimFuncNode *fptr = f.CopyOnWrite();
-    LowerL2Persistent substituter;
+    LowerL2PersistentCudaBackend substituter;
     // Trace the buffer map for tvm_access_ptr
     substituter.buffer_map_.insert(f->buffer_map.begin(), f->buffer_map.end());
     for (const auto &[_, buffer] : f->buffer_map) {
@@ -88,14 +88,14 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Buffer, FloatImm> hit_ratio_map_;
-  LowerL2Persistent() = default;
+  LowerL2PersistentCudaBackend() = default;
 };
 
 using namespace tirx::transform;
 
-tvm::transform::Pass LowerL2Persistent() {
+tvm::transform::Pass LowerL2PersistentCudaBackend() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return LowerL2Persistent::Substitute(f);
+    return LowerL2PersistentCudaBackend::Substitute(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerL2Persistent", {});
 }
@@ -103,7 +103,7 @@ tvm::transform::Pass LowerL2Persistent() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def("tl.cuda.transform.LowerL2Persistent",
-                        LowerL2Persistent);
+                        LowerL2PersistentCudaBackend);
 }
 
 } // namespace tl

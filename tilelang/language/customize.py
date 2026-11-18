@@ -1,10 +1,13 @@
 """Some customized operations frequently used in tensor programming, exposed on the TileLang language surface."""
 
+# ruff: noqa: F401
+
 from __future__ import annotations
 from tilelang._typing import ShapeType, DType
 import tilelang.language as T
 from tvm import arith
 from tvm.tirx import PrimExpr, Buffer, op
+from tvm.tirx.script.builder import buffer
 from tilelang.utils.language import bits_product, prim_expr_equal
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
 
@@ -76,6 +79,35 @@ def view(src: Buffer, shape: ShapeType | None = None, dtype: DType | None = None
         f"T.reshape/view shape check failed. {bits_product(shape, dtype)}, {bits_product(src.shape, src.dtype)}"
     )
     return T.Tensor(shape, dtype, src.data)
+
+
+def alias_buffer(
+    src: Buffer,
+    shape: ShapeType,
+    strides: ShapeType | None = None,
+    elem_offset: PrimExpr | int = 0,
+) -> Buffer:
+    """Create a strided alias of an existing buffer without allocating memory."""
+    if not isinstance(src, Buffer):
+        raise TypeError(f"T.alias_buffer expects a Buffer, got {type(src).__name__}")
+    if strides is None:
+        compact_strides = []
+        stride = 1
+        for extent in reversed(shape):
+            compact_strides.insert(0, stride)
+            stride *= extent
+        strides = tuple(compact_strides)
+    elif len(shape) != len(strides):
+        raise ValueError(f"T.alias_buffer requires shape and strides to have the same rank, got shape={shape}, strides={strides}")
+    alias = buffer(
+        shape,
+        dtype=src.dtype,
+        data=src.data,
+        strides=strides,
+        elem_offset=src.elem_offset + elem_offset,
+        scope=src.scope(),
+    )
+    return alias.mark_explicit_alias()
 
 
 def loop_break() -> PrimExpr:

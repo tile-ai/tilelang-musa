@@ -5,7 +5,7 @@
 #include <musa_bf16.h>
 #include <musa_fp16.h>
 #include <musa_runtime.h>
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 310)
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
 #include <mute/arch/simd_mp31.hpp>
 #endif
 #include <mutlass/fast_math.h>
@@ -21,7 +21,9 @@ using mutlass::half_t;
 using mutlass::tfloat32_t;
 using int4_t = int4;
 
-using tl_h_elem_t = decltype(__half_raw{}.x);
+// Keep half-vector lanes as _Float16. Using the raw unsigned-short field
+// forces MCC to insert per-lane pack/unpack instructions around SIMD ops.
+using tl_h_elem_t = decltype(__half_raw{}.data);
 using tl_bf_elem_t = decltype(__mt_bfloat16_raw{}.data);
 using tl_h2 = tl_h_elem_t __attribute__((ext_vector_type(2)));
 using tl_h4 = tl_h_elem_t __attribute__((ext_vector_type(4)));
@@ -59,8 +61,77 @@ using v32i32_t = int32_t __attribute__((vector_size(128)));
 #define _AS1 __attribute__((address_space(1)))
 #define _AS3 __attribute__((address_space(3)))
 
+namespace tl {
+
+// Use fields prepared outside the kernel when the divisor is launch-invariant.
+TL_DEVICE int fast_div(int dividend, int divisor, uint32_t multiplier,
+                       uint32_t shift_right) {
+  return divisor != 1
+             ? static_cast<int>(
+                   __umulhi(static_cast<uint32_t>(dividend), multiplier) >>
+                   shift_right)
+             : dividend;
+}
+
+TL_DEVICE int fast_mod(int dividend, int divisor, uint32_t multiplier,
+                       uint32_t shift_right) {
+  int quotient = fast_div(dividend, divisor, multiplier, shift_right);
+  return dividend - quotient * divisor;
+}
+
+// Preserve mutlass::FastDivmod semantics when the divisor is only known on the
+// device.  Construction prepares the multiplier and shift for this value.
+TL_DEVICE int fast_div(int dividend, int divisor) {
+  return mutlass::FastDivmod(divisor).div(dividend);
+}
+
+TL_DEVICE int fast_mod(int dividend, int divisor) {
+  int quotient;
+  int remainder;
+  mutlass::FastDivmod fast_divmod(divisor);
+  fast_divmod(quotient, remainder, dividend);
+  return remainder;
+}
+
+} // namespace tl
+
 TL_DEVICE tl_h_elem_t make_tl_h_elem(half_t x) {
-  return static_cast<__half_raw>(x.to_half()).x;
+  return static_cast<__half_raw>(x.to_half()).data;
+}
+
+template <typename To, typename From>
+TL_DEVICE To tl_bit_cast(const From &from) {
+  static_assert(sizeof(To) == sizeof(From));
+  union {
+    From from;
+    To to;
+  } storage{from};
+  return storage.to;
+}
+
+// MCC can incorrectly expand a vector of repeated FP32-to-FP16 conversions
+// when the packed destination aliases the scalar source. Convert once and
+// replicate the FP16 bits as 32-bit pairs.
+TL_DEVICE uint32_t make_tl_h_pair_bits(half_t x) {
+  uint32_t bits = static_cast<uint32_t>(x.raw());
+  return bits | (bits << 16);
+}
+
+TL_DEVICE tl_h2 make_tl_h2_splat(half_t x) {
+  uint32_t pair = make_tl_h_pair_bits(x);
+  return tl_bit_cast<tl_h2>(pair);
+}
+
+TL_DEVICE tl_h4 make_tl_h4_splat(half_t x) {
+  int32_t pair = static_cast<int32_t>(make_tl_h_pair_bits(x));
+  v2i32_t packed = {pair, pair};
+  return tl_bit_cast<tl_h4>(packed);
+}
+
+TL_DEVICE tl_h8 make_tl_h8_splat(half_t x) {
+  int32_t pair = static_cast<int32_t>(make_tl_h_pair_bits(x));
+  v4i32_t packed = {pair, pair, pair, pair};
+  return tl_bit_cast<tl_h8>(packed);
 }
 
 TL_DEVICE tl_bf_elem_t make_tl_bf_elem(bfloat16_t x) {
@@ -68,9 +139,7 @@ TL_DEVICE tl_bf_elem_t make_tl_bf_elem(bfloat16_t x) {
 }
 
 TL_DEVICE half_t tl_h_elem_to_half(tl_h_elem_t x) {
-  __half_raw raw;
-  raw.x = x;
-  return half_t(__half(raw));
+  return half_t(__half(__half_raw{x}));
 }
 
 TL_DEVICE bfloat16_t tl_bf_elem_to_bfloat16(tl_bf_elem_t x) {
@@ -202,6 +271,56 @@ enum class CacheHint : uint8_t {
   CACHE_NORMAL = 2,
   CACHE_PERSIST = 3,
 };
+
+// MUSA 5.3.0 changed the block TME load/store intrinsics to take an immediate
+// offset before the cache-control arguments.
+#if defined(__MUSACC_VER_MAJOR__) &&                                           \
+    (__MUSACC_VER_MAJOR__ > 5 ||                                               \
+     (__MUSACC_VER_MAJOR__ == 5 && __MUSACC_VER_MINOR__ >= 3))
+#define TL_MUSA_HAS_TME_BLOCK_IMM_OFFSET 1
+#else
+#define TL_MUSA_HAS_TME_BLOCK_IMM_OFFSET 0
+#endif
+
+
+// Wrapper for the MTCC LSU load cache-hint intrinsic. The compiler intrinsic
+// is available on MP31 only; keeping policy values as template arguments
+// guarantees that MTCC receives immediate operands.
+namespace tl {
+
+template <int InnerPersistence = 4, int OuterPersistence = 2, int Chrnt = 0,
+          int L2CachePolicy = 0, bool IsVolatile = false, typename T>
+TL_DEVICE T lsu_ld_cache_hint(const T *ptr) {
+  static_assert(InnerPersistence >= 0 && InnerPersistence <= 5,
+                "invalid LSU inner persistence hint");
+  static_assert(OuterPersistence >= 0 && OuterPersistence <= 3,
+                "invalid LSU outer persistence hint");
+  static_assert(Chrnt >= 0 && Chrnt <= 1, "invalid LSU chrnt hint");
+  static_assert(L2CachePolicy >= 0 && L2CachePolicy <= 1,
+                "invalid LSU L2 cache policy");
+#if !defined(__MUSA_ARCH__) || __MUSA_ARCH__ == 310
+#if defined(__has_builtin)
+#if __has_builtin(__musa_lsu_ld_volatile_cache_hint_i)
+  return __lsu_ld_cache_hint(ptr, InnerPersistence, OuterPersistence, Chrnt,
+                             L2CachePolicy, IsVolatile);
+#else
+  static_assert(!IsVolatile, "volatile LSU loads require compiler builtin support");
+  return __lsu_ld_cache_hint(ptr, InnerPersistence, OuterPersistence, Chrnt,
+                             L2CachePolicy);
+#endif
+#else
+  static_assert(!IsVolatile, "volatile LSU loads require compiler builtin support");
+  return __lsu_ld_cache_hint(ptr, InnerPersistence, OuterPersistence, Chrnt,
+                             L2CachePolicy);
+#endif
+#else
+  static_assert(InnerPersistence < 0,
+                "tl::lsu_ld_cache_hint is supported on MP31 only");
+  return *ptr;
+#endif
+}
+
+} // namespace tl
 
 enum class PrefetchSize : uint8_t {
   NONE = 0,
@@ -376,7 +495,7 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
 template <typename InDatatype, typename OutDatatype>
 TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
   const int c_int = *((int *)c);
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   const int a_int = *((int *)a);
   const int b_int = *((int *)b);
   *c = __dp4a(a_int, b_int, c_int);
@@ -529,6 +648,28 @@ TL_DEVICE tl_f4 shfl_xor_sync(unsigned mask, tl_f4 val, int laneMask) {
                __shfl_xor_sync(mask, val[3], laneMask)};
 }
 
+template <typename T> TL_DEVICE uint32_t packed_shuffle_to_uint32(T val) {
+  static_assert(sizeof(T) == sizeof(uint32_t));
+  return reinterpret_cast<uint32_t &>(val);
+}
+
+template <typename T> TL_DEVICE T packed_shuffle_from_uint32(uint32_t val) {
+  static_assert(sizeof(T) == sizeof(uint32_t));
+  return reinterpret_cast<T &>(val);
+}
+
+TL_DEVICE tl_h2 shfl_xor_sync(unsigned mask, tl_h2 val, int laneMask) {
+  uint32_t raw = packed_shuffle_to_uint32(val);
+  raw = __shfl_xor_sync(mask, raw, laneMask);
+  return packed_shuffle_from_uint32<tl_h2>(raw);
+}
+
+TL_DEVICE tl_bf2 shfl_xor_sync(unsigned mask, tl_bf2 val, int laneMask) {
+  uint32_t raw = packed_shuffle_to_uint32(val);
+  raw = __shfl_xor_sync(mask, raw, laneMask);
+  return packed_shuffle_from_uint32<tl_bf2>(raw);
+}
+
 template <typename T>
 TL_DEVICE T shfl_down_sync(unsigned mask, T val, int delta) {
   return __shfl_down_sync(mask, val, delta);
@@ -544,6 +685,18 @@ TL_DEVICE tl_f4 shfl_down_sync(unsigned mask, tl_f4 val, int delta) {
                __shfl_down_sync(mask, val[1], delta),
                __shfl_down_sync(mask, val[2], delta),
                __shfl_down_sync(mask, val[3], delta)};
+}
+
+TL_DEVICE tl_h2 shfl_down_sync(unsigned mask, tl_h2 val, int delta) {
+  uint32_t raw = packed_shuffle_to_uint32(val);
+  raw = __shfl_down_sync(mask, raw, delta);
+  return packed_shuffle_from_uint32<tl_h2>(raw);
+}
+
+TL_DEVICE tl_bf2 shfl_down_sync(unsigned mask, tl_bf2 val, int delta) {
+  uint32_t raw = packed_shuffle_to_uint32(val);
+  raw = __shfl_down_sync(mask, raw, delta);
+  return packed_shuffle_from_uint32<tl_bf2>(raw);
 }
 
 template <typename T>
@@ -562,6 +715,18 @@ TL_DEVICE tl_f4 shfl_up_sync(unsigned mask, tl_f4 val, int delta) {
       __shfl_up_sync(mask, val[2], delta), __shfl_up_sync(mask, val[3], delta)};
 }
 
+TL_DEVICE tl_h2 shfl_up_sync(unsigned mask, tl_h2 val, int delta) {
+  uint32_t raw = packed_shuffle_to_uint32(val);
+  raw = __shfl_up_sync(mask, raw, delta);
+  return packed_shuffle_from_uint32<tl_h2>(raw);
+}
+
+TL_DEVICE tl_bf2 shfl_up_sync(unsigned mask, tl_bf2 val, int delta) {
+  uint32_t raw = packed_shuffle_to_uint32(val);
+  raw = __shfl_up_sync(mask, raw, delta);
+  return packed_shuffle_from_uint32<tl_bf2>(raw);
+}
+
 template <typename T> TL_DEVICE T shfl_sync(unsigned mask, T val, int srcLane) {
   return __shfl_sync(mask, val, srcLane);
 }
@@ -575,6 +740,18 @@ TL_DEVICE tl_f4 shfl_sync(unsigned mask, tl_f4 val, int srcLane) {
   return tl_f4{
       __shfl_sync(mask, val[0], srcLane), __shfl_sync(mask, val[1], srcLane),
       __shfl_sync(mask, val[2], srcLane), __shfl_sync(mask, val[3], srcLane)};
+}
+
+TL_DEVICE tl_h2 shfl_sync(unsigned mask, tl_h2 val, int srcLane) {
+  uint32_t raw = packed_shuffle_to_uint32(val);
+  raw = __shfl_sync(mask, raw, srcLane);
+  return packed_shuffle_from_uint32<tl_h2>(raw);
+}
+
+TL_DEVICE tl_bf2 shfl_sync(unsigned mask, tl_bf2 val, int srcLane) {
+  uint32_t raw = packed_shuffle_to_uint32(val);
+  raw = __shfl_sync(mask, raw, srcLane);
+  return packed_shuffle_from_uint32<tl_bf2>(raw);
 }
 
 // Specializations for mutlass::half_t
@@ -637,7 +814,7 @@ TL_DEVICE bfloat16_t shfl_sync(unsigned mask, bfloat16_t val, int srcLane) {
 
 TL_DEVICE float2 vec_max_f2(float2 a, float2 b) {
   float2 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   mute::max(out, a, b);
 #else
   out.x = max(a.x, b.x);
@@ -648,7 +825,7 @@ TL_DEVICE float2 vec_max_f2(float2 a, float2 b) {
 
 TL_DEVICE tl_f2 vec_max_f2(tl_f2 a, tl_f2 b) {
   tl_f2 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   float2 a_float2 = {a[0], a[1]};
   float2 b_float2 = {b[0], b[1]};
   float2 out_float2;
@@ -662,7 +839,7 @@ TL_DEVICE tl_f2 vec_max_f2(tl_f2 a, tl_f2 b) {
 
 TL_DEVICE float4 vec_max_f4(float4 a, float4 b) {
   float4 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   mute::max(out, a, b);
 #else
   out.x = max(a.x, b.x);
@@ -675,7 +852,7 @@ TL_DEVICE float4 vec_max_f4(float4 a, float4 b) {
 
 TL_DEVICE tl_f4 vec_max_f4(tl_f4 a, tl_f4 b) {
   tl_f4 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   float4 a_float4 = {a[0], a[1], a[2], a[3]};
   float4 b_float4 = {b[0], b[1], b[2], b[3]};
   float4 out_float4;
@@ -690,7 +867,7 @@ TL_DEVICE tl_f4 vec_max_f4(tl_f4 a, tl_f4 b) {
 
 TL_DEVICE float2 vec_sum_f2(float2 a, float2 b) {
   float2 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   mute::add(out, a, b);
 #else
   out.x = a.x + b.x;
@@ -701,7 +878,7 @@ TL_DEVICE float2 vec_sum_f2(float2 a, float2 b) {
 
 TL_DEVICE tl_f2 vec_sum_f2(tl_f2 a, tl_f2 b) {
   tl_f2 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   float2 a_float2 = {a[0], a[1]};
   float2 b_float2 = {b[0], b[1]};
   float2 out_float2;
@@ -730,7 +907,7 @@ TL_DEVICE tl_f4 vec_sum_f4(tl_f4 a, tl_f4 b) {
 
 TL_DEVICE float2 vec_exp2_f2(float2 a) {
   float2 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   mute::fast_exp2(out, a);
 #else
   out.x = exp2f(a.x);
@@ -741,7 +918,7 @@ TL_DEVICE float2 vec_exp2_f2(float2 a) {
 
 TL_DEVICE tl_f2 vec_exp2_f2(tl_f2 a) {
   tl_f2 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   float2 a_float2 = {a[0], a[1]};
   float2 out_float2;
   mute::fast_exp2(out_float2, a_float2);
@@ -754,7 +931,7 @@ TL_DEVICE tl_f2 vec_exp2_f2(tl_f2 a) {
 
 TL_DEVICE float4 vec_exp2_f4(float4 a) {
   float4 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   mute::fast_exp2(out, a);
 #else
   out.x = exp2f(a.x);
@@ -767,7 +944,7 @@ TL_DEVICE float4 vec_exp2_f4(float4 a) {
 
 TL_DEVICE tl_f4 vec_exp2_f4(tl_f4 a) {
   tl_f4 out;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   float4 a_float4 = {a[0], a[1], a[2], a[3]};
   float4 out_float4;
   mute::fast_exp2(out_float4, a_float4);

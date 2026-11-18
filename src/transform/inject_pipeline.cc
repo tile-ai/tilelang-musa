@@ -2737,7 +2737,7 @@ private:
   std::vector<FinalStmtInfo> CompletePipelineLoopStatements(
       const std::vector<RewrittenStmtInfo> &stmts,
       const std::map<int, AsyncStateLocal> &async_states_local,
-      arith::Analyzer *ana_normalized) const {
+      arith::Analyzer *ana_normalized, bool wait_after_commit) const {
     std::vector<FinalStmtInfo> new_stmts;
     new_stmts.reserve(stmts.size());
     for (const auto &stmt : stmts) {
@@ -2841,6 +2841,11 @@ private:
       Stmt commit_queue_scope =
           AttrStmt(make_zero(DataType::Int(32)),
                    s_tir::attr::async_commit_queue_scope, stage_id, group_body);
+      if (wait_after_commit) {
+        Stmt wait_zero = make_wait_stmt(
+            stage_id, make_zero(DataType::Int(32)), Evaluate(0));
+        commit_queue_scope = SeqStmt({commit_queue_scope, wait_zero});
+      }
       if (!is_one(predicate) && !ana_normalized->CanProve(predicate)) {
         PrimExpr simplified_predicate = ana_normalized->Simplify(predicate);
         if (!is_zero(simplified_predicate)) {
@@ -2866,6 +2871,15 @@ private:
     PrimExpr extent = end - start;
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
+
+    // Work around MTCC's inability to handle cp.async wait and cp.async
+    // commit across basic blocks: drop consumer-side waits and emit
+    // wait_group(0) immediately after each commit.
+    bool use_musa_wait_workaround =
+        target_.defined() && TargetIsMusa(target_.value()) &&
+        !TargetIsQY2(target_.value());
+    bool is_steady_state = use_musa_wait_workaround && !need_bound_check;
+
     auto make_nop = []() {
       return SBlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
@@ -2884,6 +2898,7 @@ private:
                 EmitImpl(unit_start, unit_end, false, need_bound_check);
             expanded.push_back(unit_stmt);
           }
+
           Stmt result = expanded.size() == 1 ? expanded[0] : SeqStmt(expanded);
           return result;
         }
@@ -3025,8 +3040,15 @@ private:
 
     PopulateWaitCounts(new_stmts, &ana_normalized, buffer_to_commit_group,
                        &async_states_local);
+    if (use_musa_wait_workaround) {
+      for (auto &stage_state : async_states_local) {
+        stage_state.second.pending_waits.clear();
+      }
+    }
+
     std::vector<FinalStmtInfo> final_stmts = CompletePipelineLoopStatements(
-        new_stmts, async_states_local, &ana_normalized);
+        new_stmts, async_states_local, &ana_normalized,
+        use_musa_wait_workaround);
 
     Array<Stmt> stmts;
     for (const auto &stmt_info : final_stmts) {
@@ -3060,11 +3082,14 @@ private:
           preserved_annotations.Set(key, kv.second);
         }
       }
-      if (pipeline_num_stages &&
-          preserved_annotations.find("tl_pipelined_num_stages") ==
-              preserved_annotations.end()) {
+      if (is_steady_state) {
+        // // Work around MTCC's inability to handle cp.async wait and cp.async commit across basic blocks
+        preserved_annotations.Set("tl_pipelined_num_stages", Integer(1));
+      } else if (pipeline_num_stages &&
+                 preserved_annotations.find("tl_pipelined_num_stages") ==
+                     preserved_annotations.end()) {
         preserved_annotations.Set("tl_pipelined_num_stages",
-                                  pipeline_num_stages.value());
+                                   pipeline_num_stages.value());
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
