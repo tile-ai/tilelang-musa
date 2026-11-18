@@ -136,13 +136,13 @@ kernel 时应保留 fallback 或 guard，并在目标设备上验证实际 lower
 
 ### 版本渠道摘要
 
-当前文档使用的是 **MUSA SDK 配套正式版** `v0.1.12+musa.5`，相对开源
-`v0.1.12+musa.1` 包含额外 bugfix；历史 MUSA SDK 配套正式版为
-`v0.1.8+musa.3`。开源仓库还提供 `v0.1.13+musa.1`，适合阅读源码、测试
-和 release 说明，但不能直接替代当前 MUSA SDK 配套包。
+当前源码和文档对应 **`v0.1.12+musa.5`**，MUSA 部分覆盖 PH1/MP31 与
+QY2/MP22。可以使用 MUSA SDK Python 包源中的同版本包，也可以从 GitHub
+tag 获取源码并构建。源码构建需要检出仓库固定的 TVM、MUTLASS 及其嵌套依赖。
+硬件指令可用性仍取决于设备、驱动和 MUSA SDK 的匹配关系。
 
 - [版本与环境](./01_version_environment.md)：SDK、Python、target、版本渠道和兼容规则；
-- [安装](./02_installation.md)：MUSA SDK 配套发行版、历史包和源码参考；
+- [安装](./02_installation.md)：同版本 Python 包、源码构建和历史版本；
 - [GitHub 开源仓库](https://github.com/tile-ai/tilelang-musa)：源码、issue、提交记录和 release。
 
 ## 文档目录

@@ -121,7 +121,7 @@ with T.Kernel(T.ceildiv(N, block_N), threads=(block_N, reduce_threads)) as bx:
 GEMV 的关键参数是 `block_N`、`block_K`、K 维并行度和归约方式。小 K 通常
 适合每线程直接累加；大 K 可以增加 `reduce_threads`，但要同时考虑 atomic
 冲突、shared reduction 开销和向量化读取。仓库中的完整 GEMV 讨论见
-[TileLang 官方 GEMV 说明](https://tilelang.com/deeplearning_operators/gemv.html)，MUSA 实现可从 [MUSA GEMV 测试](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/testing/musa/mp31/gemv/)
+[TileLang 官方 GEMV 说明](https://tilelang.com/deeplearning_operators/gemv.html)，MUSA 实现可从 [MUSA GEMV 测试](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/testing/musa/mp31/gemv/)
 开始对照。
 
 ### Attention、MLA、GDN 和 MoE
@@ -133,20 +133,20 @@ Attention 类 kernel 通常由多个阶段组成：Q/K/V 搬运、QK^T GEMM、so
 
 | 场景 | 推荐先看的 benchmark / 源码 | 重点 |
 | --- | --- | --- |
-| FlashAttention | [FlashAttention benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/modelops/) | pipeline copy、shared reuse、softmax 归约 |
-| MLA / DSA | [MLA benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/modelops/ops/) | 低精度 GEMM、长序列 tile 和 workspace |
-| Linear Attention / GDN | [GDN benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/mate/ops/) | 累积状态、scan、分块归约 |
-| MoE | [MoE benchmark kernels](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/tilekernels/moe/) | GEMM batch、路由后的不规则 tile 和输出合并 |
+| FlashAttention | [FlashAttention benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/modelops/) | pipeline copy、shared reuse、softmax 归约 |
+| MLA / DSA | [MLA benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/modelops/ops/) | 低精度 GEMM、长序列 tile 和 workspace |
+| Linear Attention / GDN | [GDN benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/mate/ops/) | 累积状态、scan、分块归约 |
+| MoE | [MoE benchmark kernels](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/tilekernels/moe/) | GEMM batch、路由后的不规则 tile 和输出合并 |
 
 这些 kernel 对 shape、dtype 和 device capability 很敏感。应先运行仓库测试
 中的固定 shape，再把动态 shape、tail tile 和不同 batch 单独加入验证矩阵。
 
 ### Benchmark 中的 FlashAttention 示例
 
-仓库的 [MP31 modelops benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/modelops/) 提供了可以直接复现的 MHA forward benchmark。对应源码入口为：
+仓库的 [MP31 modelops benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/modelops/) 提供了可以直接复现的 MHA forward benchmark。对应源码入口为：
 
-- [MHA kernel](https://github.com/tile-ai/tilelang-musa/blob/v0.1.12%2Bmusa.1/benchmark/mp31/modelops/kernels/example_mha_fwd_bhsd.py)
-- [MHA benchmark wrapper](https://github.com/tile-ai/tilelang-musa/blob/v0.1.12%2Bmusa.1/benchmark/mp31/modelops/ops/example_mha_fwd_bhsd_benchmark.py)
+- [MHA kernel](https://github.com/tile-ai/tilelang-musa/blob/v0.1.12%2Bmusa.5/benchmark/mp31/modelops/kernels/example_mha_fwd_bhsd.py)
+- [MHA benchmark wrapper](https://github.com/tile-ai/tilelang-musa/blob/v0.1.12%2Bmusa.5/benchmark/mp31/modelops/ops/example_mha_fwd_bhsd_benchmark.py)
 
 默认 case `example_mha_fwd_bhsd` 使用 `B=2`、`H=28`、`seq_q=8192`、
 `seq_kv=8192`、`D=128`、FP16、非 causal attention。kernel 内包含两个主要
@@ -194,8 +194,9 @@ reference 做 `assert_close`，再记录 latency、TFLOPS 和有效带宽；不�
 | NHWC | `T.c2d_im2col_2d` | 2D convolution |
 | NDHWC | `T.c2d_im2col_3d` | 3D convolution |
 
-完整参数顺序和 fallback 语义见 [MUSA 扩展](./05_musa_extensions.md)；仓库
-[卷积测试目录](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/testing/musa/mp31/convolution/)。
+完整参数顺序和 fallback 语义见 [MUSA 扩展](./05_musa_extensions.md)；源码中的
+[im2col fallback 测试](https://github.com/tile-ai/tilelang-musa/blob/v0.1.12%2Bmusa.5/testing/python/transform/test_tilelang_transform_im2col_fallback.py)
+可用于对照 lowering 行为。
 
 ### 用例选择和验证清单
 
