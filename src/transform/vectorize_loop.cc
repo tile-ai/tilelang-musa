@@ -42,8 +42,10 @@
 
 #include "../op/builtin.h"
 #include "../op/utils.h"
+#include "arith/ir_mutator_with_analyzer.h"
 #include "arith/scalable_expression.h"
 #include "backend/common/target_utils.h"
+#include "loop_vectorize.h"
 #include "tir/analysis/check_contains.h"
 
 namespace tvm {
@@ -116,6 +118,21 @@ inline PrimExpr BroadcastTo(PrimExpr e, int lanes, bool is_scalable) {
       << " is_scalable=" << e.dtype().is_scalable_vector() << " to " << lanes;
 
   return Broadcast(e, CreateNewLanes(is_scalable, lanes));
+}
+
+static bool IsVectorizablePureExtern(const CallNode *op) {
+  if (!op->op.same_as(builtin::call_pure_extern()) || op->args.size() < 2 ||
+      op->args[0].as<StringImmNode>() == nullptr || op->dtype.is_void() ||
+      op->dtype.is_handle() || op->dtype.is_scalable_vector()) {
+    return false;
+  }
+  for (size_t i = 1; i < op->args.size(); ++i) {
+    if (op->args[i].dtype().is_handle() || op->args[i].dtype().is_void() ||
+        op->args[i].dtype().is_scalable_vector()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /*!
@@ -275,13 +292,16 @@ public:
 
   // Convenience entry to vectorize a loop body without exposing
   // the mutator invocation pattern at call sites.
-  static Stmt Vectorize(const Var &var, const PrimExpr &var_lanes, Stmt body) {
-    TLVectorizer vec{var, var_lanes};
+  static Stmt Vectorize(const Var &var, const PrimExpr &var_lanes, Stmt body,
+                        arith::Analyzer *analyzer) {
+    TLVectorizer vec{var, var_lanes, analyzer};
     return vec(std::move(body));
   }
 
-  TLVectorizer(const Var &var, const PrimExpr &var_lanes)
-      : var_(var), var_lanes_(var_lanes) {
+  TLVectorizer(const Var &var, const PrimExpr &var_lanes,
+               arith::Analyzer *analyzer)
+      : proof_analyzer_(analyzer), var_(var), var_lanes_(var_lanes) {
+    ICHECK(proof_analyzer_ != nullptr);
     ramp_ = Ramp(IntImm(var->dtype, 0), IntImm(var->dtype, 1), var_lanes);
   }
 
@@ -793,9 +813,11 @@ public:
       return MutatePTXCPAsyncExpr_(op);
     }
     auto optional_op = op->op.as<Op>();
-    bool vectorizable = optional_op &&
-                        op_vectorizable_.get(optional_op.value(), false) &&
-                        !op->dtype.is_scalable_vector();
+    bool pure_extern = IsVectorizablePureExtern(op);
+    bool vectorizable =
+        (optional_op && op_vectorizable_.get(optional_op.value(), false) &&
+         !op->dtype.is_scalable_vector()) ||
+        pure_extern;
     if (!vectorizable) {
       // Cannot vectorize this op
       Array<PrimExpr> new_args;
@@ -812,6 +834,24 @@ public:
       } else {
         return Call(op->dtype, op->op, new_args);
       }
+    } else if (pure_extern) {
+      // The first argument names the external function and must remain a
+      // scalar string.  Only mutate the actual function arguments.
+      Array<PrimExpr> call_args{op->args[0]};
+      Array<PrimExpr> value_args;
+      for (size_t i = 1; i < op->args.size(); ++i) {
+        value_args.push_back(op->args[i]);
+      }
+      int lane = 0;
+      Array<PrimExpr> new_value_args = MutateArray(value_args, &lane);
+      if (new_value_args.same_as(value_args)) {
+        return GetRef<PrimExpr>(op);
+      }
+      for (const auto &arg : new_value_args) {
+        call_args.push_back(arg);
+      }
+      return Call(op->dtype.with_lanes(std::max(lane, op->dtype.lanes())),
+                  op->op, call_args, op->annotations);
     } else {
       int lane = 0;
       Array<PrimExpr> new_args = MutateArray(op->args, &lane);
@@ -917,11 +957,24 @@ public:
           << " lanes of storage location by changing the last index.";
       int last_index_lanes = total_lanes / other_index_lanes;
 
-      // Broadcast the last index such that the total number of index
-      // lanes matches the desired number.
-      indices.Set(indices.size() - 1,
-                  BroadcastTo(indices[indices.size() - 1], last_index_lanes,
-                              is_last_index_scalable));
+      bool canonicalized_to_ramp = false;
+      if (indices.size() == 1 && last_index_lanes > 1 &&
+          !indices[0].as<RampNode>() && op->indices[0].dtype().is_scalar()) {
+        if (Optional<PrimExpr> ramp = CanonicalizeContiguousIndexToRamp(
+                op->indices[0], var_, last_index_lanes, proof_analyzer_)) {
+          indices.Set(0, ramp.value());
+          canonicalized_to_ramp = true;
+          is_last_index_scalable = false;
+        }
+      }
+
+      // Keep a proven contiguous flat index as Ramp(base, 1, lanes), allowing
+      // codegen to emit a vector store. Broadcast all other scalar indices.
+      if (!canonicalized_to_ramp) {
+        indices.Set(indices.size() - 1,
+                    BroadcastTo(indices[indices.size() - 1], last_index_lanes,
+                                is_last_index_scalable));
+      }
 
       auto writer = store.CopyOnWrite();
       writer->indices = indices;
@@ -1057,6 +1110,9 @@ public:
 private:
   // analyzer
   arith::Analyzer analyzer_;
+  // Analyzer populated by LoopVectorizer with enclosing thread/loop bounds.
+  // It is used only for the conservative contiguous-index proof.
+  arith::Analyzer *proof_analyzer_;
   // deep equal
   ExprDeepEqual deep_equal_;
   // variable to be replaced
@@ -1156,8 +1212,24 @@ inline bool TargetHasSVE() {
   return val.defined() && val.value()->value;
 }
 
-class LoopVectorizer : public StmtMutator {
+class LoopVectorizer : public arith::IRMutatorWithAnalyzer {
 public:
+  explicit LoopVectorizer(arith::Analyzer *analyzer)
+      : arith::IRMutatorWithAnalyzer(analyzer) {}
+
+  // Pipelining can duplicate a Bind while preserving its Var object. Match the
+  // planner's behavior and let the most recent lexical binding win.
+  Stmt VisitStmt_(const BindNode *op) final {
+    PrimExpr value = this->VisitExpr(op->value);
+    if (SideEffect(value) <= CallEffectKind::kPure) {
+      analyzer_->Bind(op->var, value, /*allow_override=*/true);
+    }
+    if (value.same_as(op->value)) {
+      return GetRef<Stmt>(op);
+    }
+    return Bind(op->var, std::move(value));
+  }
+
   Stmt VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kVectorized) {
       auto *extent_as_int = op->extent.as<IntImmNode>();
@@ -1170,9 +1242,11 @@ public:
             << " for target " << Target::Current();
       }
       ICHECK(is_zero(op->min));
-      return TLVectorizer::Vectorize(op->loop_var, op->extent, op->body);
+      analyzer_->Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+      return TLVectorizer::Vectorize(op->loop_var, op->extent, op->body,
+                                     analyzer_);
     } else {
-      return StmtMutator::VisitStmt_(op);
+      return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
     }
   }
 };
@@ -1197,7 +1271,8 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     if (enable_vectorize) {
-      n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
+      arith::Analyzer analyzer;
+      n->body = tvm::tl::LoopVectorizer(&analyzer)(std::move(n->body));
     } else {
       n->body = tvm::tl::VectorizeSkipper()(std::move(n->body));
     }
@@ -1208,7 +1283,9 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.VectorizeLoop", VectorizeLoop);
+  refl::GlobalDef().def(
+      "tl.transform.VectorizeLoop",
+      static_cast<tvm::transform::Pass (*)(bool)>(VectorizeLoop));
 }
 
 } // namespace tl

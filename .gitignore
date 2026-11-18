@@ -21,6 +21,9 @@ debug/
 build/
 *dist/
 dist*/
+# Keep distributed Python packages and their tests in source distributions.
+!tilelang/distributed/
+!testing/python/distributed/
 wheelhouse/
 __pycache__
 nnfusion.tar.gz

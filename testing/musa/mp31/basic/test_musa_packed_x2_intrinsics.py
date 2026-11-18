@@ -43,6 +43,7 @@ _TORCH_REFS = {
     "abs2": lambda a: torch.abs(a),
 }
 
+
 def _assert_uses_musa_native_x2(src, op_name, dtype_name, native_type):
     assert f"tl::{op_name}" in src
     assert native_type in src
@@ -149,8 +150,11 @@ def _make_auto_vec_fma_kernel(dtype_tl):
     return main
 
 
-def _lower_to_musa_source(func):
-    with tvm.transform.PassContext(), tvm.target.Target("musa"):
+def _lower_to_musa_source(func, enable_fma_contraction=None):
+    pass_configs = {}
+    if enable_fma_contraction is not None:
+        pass_configs[tilelang.PassConfigKey.TL_ENABLE_FMA_CONTRACTION] = enable_fma_contraction
+    with tvm.transform.PassContext(config=pass_configs), tvm.target.Target("musa"):
         artifact = lower(func, target="musa", enable_device_compile=False)
     assert artifact.kernel_source is not None
     return artifact.kernel_source
@@ -158,9 +162,7 @@ def _lower_to_musa_source(func):
 
 @pytest.mark.parametrize("dtype_name,dtype_tl,torch_dtype,native_type", _DTYPES)
 @pytest.mark.parametrize("op_name,op_func", _BINARY_OPS, ids=[name for name, _ in _BINARY_OPS])
-def test_musa_codegen_binary_uses_native_vector_type(
-    op_name, op_func, dtype_name, dtype_tl, torch_dtype, native_type
-):
+def test_musa_codegen_binary_uses_native_vector_type(op_name, op_func, dtype_name, dtype_tl, torch_dtype, native_type):
     del torch_dtype
     src = _lower_to_musa_source(_make_binary_kernel(op_func, dtype_tl))
     _assert_uses_musa_native_x2(src, op_name, dtype_name, native_type)
@@ -182,9 +184,7 @@ def test_musa_codegen_abs2_uses_native_vector_type(dtype_name, dtype_tl, torch_d
 
 @pytest.mark.parametrize("dtype_name,dtype_tl,torch_dtype,native_type", _DTYPES)
 @pytest.mark.parametrize("op_key", list(_AUTO_VEC_OPS.keys()))
-def test_musa_codegen_auto_vec_uses_tilelang_interface(
-    op_key, dtype_name, dtype_tl, torch_dtype, native_type
-):
+def test_musa_codegen_auto_vec_uses_tilelang_interface(op_key, dtype_name, dtype_tl, torch_dtype, native_type):
     del torch_dtype
     py_op, tl_func = _AUTO_VEC_OPS[op_key]
     src = _lower_to_musa_source(_make_auto_vec_binary_kernel(py_op, dtype_tl))
@@ -192,11 +192,18 @@ def test_musa_codegen_auto_vec_uses_tilelang_interface(
 
 
 @pytest.mark.parametrize("dtype_name,dtype_tl,torch_dtype,native_type", _DTYPES)
-def test_musa_codegen_auto_vec_fma_uses_tilelang_interface(
-    dtype_name, dtype_tl, torch_dtype, native_type
-):
-    del torch_dtype
+def test_musa_codegen_auto_vec_fma_contraction_disabled_by_default(dtype_name, dtype_tl, torch_dtype, native_type):
+    del torch_dtype, native_type
     src = _lower_to_musa_source(_make_auto_vec_fma_kernel(dtype_tl))
+    assert "tl::fma" not in src
+    _assert_uses_musa_native_packed_vector(src, "mul", dtype_name)
+    _assert_uses_musa_native_packed_vector(src, "add", dtype_name)
+
+
+@pytest.mark.parametrize("dtype_name,dtype_tl,torch_dtype,native_type", _DTYPES)
+def test_musa_codegen_auto_vec_fma_contraction_enabled(dtype_name, dtype_tl, torch_dtype, native_type):
+    del torch_dtype, native_type
+    src = _lower_to_musa_source(_make_auto_vec_fma_kernel(dtype_tl), enable_fma_contraction=True)
     _assert_uses_musa_native_packed_vector(src, "fma", dtype_name)
 
 

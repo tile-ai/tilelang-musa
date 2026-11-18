@@ -128,6 +128,7 @@ class LibraryGenerator:
                 src.name,
                 "-std=c++17",
                 "-Wno-error=address-of-temporary",
+                "-Wno-error=c++11-narrowing",
                 "--shared",
                 "-fPIC",
                 f"--offload-arch=mp_{target_arch}",
@@ -144,6 +145,7 @@ class LibraryGenerator:
             command += _parse_mcc_extra_args()
             command += [
                 "-I" + MUTLASS_INCLUDE_DIR,
+                "-lmusart",
             ]
 
         elif is_hip_target(target):

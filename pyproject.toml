@@ -54,7 +54,7 @@ nvcc = [
 
 [build-system]
 requires = [
-    "cython>=3.1.0",
+    "cython>=3.1.0,<3.3",
     "scikit-build-core",
     "z3-solver>=4.13.0,<4.15.5",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
@@ -99,6 +99,14 @@ include = [
     "3rdparty/mutlass/tools",
     "testing/**",
     "examples/**",
+    # Includes take precedence over excludes; do not force vendored Git metadata in.
+    "!**/.git",
+    "!**/.git/**",
+    "!**/.github",
+    "!**/.github/**",
+    # Vendored FFI may have been built before sdist creation.
+    "!3rdparty/tvm/3rdparty/tvm-ffi/build/**",
+    "!3rdparty/tvm/3rdparty/tvm-ffi/python/tvm_ffi/_version.py",
 ]
 exclude = [
     ".git",
@@ -111,6 +119,7 @@ exclude = [
 
 [tool.scikit-build.wheel.packages]
 tilelang = "tilelang"
+"tilelang/THIRDPARTYNOTICES.txt" = "THIRDPARTYNOTICES.txt"
 "tilelang/src" = "src"
 # NOTE: The mapping below places the contents of '3rdparty' inside 'tilelang/3rdparty' in the wheel.
 # This is necessary to find TVM shared libraries at runtime.

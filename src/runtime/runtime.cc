@@ -9,8 +9,36 @@
 
 #if defined(MUSA_MAJOR_VERSION)
 #include <musa.h>
-#else
+#endif
+#if defined(CUDA_MAJOR_VERSION) || !defined(MUSA_MAJOR_VERSION)
+// CUDA and MUSA vendor headers declare the same OpenCL interoperability names.
+#define cl_event_flags_enum tl_cuda_cl_event_flags_enum
+#define cl_event_flags tl_cuda_cl_event_flags
+#define cl_context_flags_enum tl_cuda_cl_context_flags_enum
+#define cl_context_flags tl_cuda_cl_context_flags
+#define NVCL_EVENT_SCHED_AUTO tl_cuda_NVCL_EVENT_SCHED_AUTO
+#define NVCL_EVENT_SCHED_SPIN tl_cuda_NVCL_EVENT_SCHED_SPIN
+#define NVCL_EVENT_SCHED_YIELD tl_cuda_NVCL_EVENT_SCHED_YIELD
+#define NVCL_EVENT_SCHED_BLOCKING_SYNC tl_cuda_NVCL_EVENT_SCHED_BLOCKING_SYNC
+#define NVCL_CTX_SCHED_AUTO tl_cuda_NVCL_CTX_SCHED_AUTO
+#define NVCL_CTX_SCHED_SPIN tl_cuda_NVCL_CTX_SCHED_SPIN
+#define NVCL_CTX_SCHED_YIELD tl_cuda_NVCL_CTX_SCHED_YIELD
+#define NVCL_CTX_SCHED_BLOCKING_SYNC tl_cuda_NVCL_CTX_SCHED_BLOCKING_SYNC
 #include "cuda/stubs/cuda.h"
+#undef NVCL_EVENT_SCHED_AUTO
+#undef NVCL_EVENT_SCHED_SPIN
+#undef NVCL_EVENT_SCHED_YIELD
+#undef NVCL_EVENT_SCHED_BLOCKING_SYNC
+#undef NVCL_CTX_SCHED_AUTO
+#undef NVCL_CTX_SCHED_SPIN
+#undef NVCL_CTX_SCHED_YIELD
+#undef NVCL_CTX_SCHED_BLOCKING_SYNC
+
+#undef cl_event_flags_enum
+#undef cl_event_flags
+#undef cl_context_flags_enum
+#undef cl_context_flags
+
 #endif
 
 #include <cstdint>
@@ -223,6 +251,32 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 #endif // defined(CUDA_MAJOR_VERSION) && (CUDA_MAJOR_VERSION >= 12)
 
 #if defined(MUSA_MAJOR_VERSION)
+struct alignas(16) MusaRobustDescriptor {
+  uint32_t words[4];
+};
+
+static_assert(sizeof(MusaRobustDescriptor) == 16,
+              "MUSA robust descriptor must be 128 bits");
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def_packed(
+      tl::tvm_musa_robust_descriptor_create, [](PackedArgs args, Any *ret) {
+        ICHECK_EQ(args.size(), 3)
+            << "Expected (descriptor, base_ptr, size_bytes)";
+        auto *desc =
+            reinterpret_cast<MusaRobustDescriptor *>(args[0].cast<void *>());
+        ICHECK(desc != nullptr) << "Robust descriptor storage is null";
+        uintptr_t base = reinterpret_cast<uintptr_t>(args[1].cast<void *>());
+        uint64_t size = static_cast<uint64_t>(args[2].cast<int64_t>());
+        desc->words[0] = static_cast<uint32_t>(base);
+        desc->words[1] = static_cast<uint32_t>(base >> 32);
+        desc->words[2] = static_cast<uint32_t>(size);
+        desc->words[3] = static_cast<uint32_t>(size >> 32);
+        *ret = 0;
+      });
+}
+
 static uint64_t PtrModulo(const void *ptr, uint64_t align) {
   return reinterpret_cast<uintptr_t>(ptr) % align;
 }
@@ -463,6 +517,50 @@ struct MusaTensorDescriptorArgs {
   }
 };
 
+static MusaTensorDescriptorArgs
+ExtractMusaIm2ColDescriptorArgs(PackedArgs args) {
+  MusaTensorDescriptorArgs t{};
+  int idx = 0;
+  ICHECK_GE(args.size(), 19)
+      << "Invalid __tvm_tensormap_create_im2col args size: "
+      << args.size();
+
+  t.desc = reinterpret_cast<MUtensorDescriptor *>(args[idx++].cast<void *>());
+  t.type = static_cast<MUtensorDescriptorDataType>(args[idx++].cast<int64_t>());
+  t.tensor_rank = static_cast<muuint32_t>(args[idx++].cast<int64_t>());
+  t.global_address = args[idx++].cast<void *>();
+  ICHECK(t.tensor_rank >= 3 && t.tensor_rank <= 5)
+      << "Invalid tensor rank for MUSA TME im2col descriptor: "
+      << t.tensor_rank;
+
+  int expected = 19 + static_cast<int>(t.tensor_rank * 2);
+  ICHECK_EQ(args.size(), expected)
+      << "Unexpected __tvm_tensormap_create_im2col args size: "
+      << "got " << args.size() << ", expected " << expected;
+
+  for (size_t i = 0; i < t.tensor_rank; ++i) {
+    t.global_dim[i] = args[idx++].cast<muuint64_t>();
+  }
+  for (size_t i = 0; i < t.tensor_rank; ++i) {
+    t.global_stride[i] = args[idx++].cast<muuint64_t>();
+  }
+
+  // Padding, dilation, and convolution stride are encoded separately into
+  // MUconvParamer by the MUSA JIT wrapper. They are not descriptor fields.
+  idx += 9;
+  t.interleave =
+      static_cast<MUtensorDescriptorInterleave>(args[idx++].cast<int64_t>());
+  t.oob_fill = static_cast<muuint64_t>(args[idx++].cast<int64_t>());
+  muuint32_t num_spatial = args[idx++].cast<muuint32_t>();
+  ICHECK_EQ(num_spatial, t.tensor_rank - 2);
+  t.smem_box[0] = args[idx++].cast<muuint32_t>();
+  t.smem_box[1] = args[idx++].cast<muuint32_t>();
+  t.swizzle = args[idx++].cast<int64_t>();
+  ICHECK_EQ(idx, args.size());
+  return t;
+}
+
+
 static std::vector<std::string>
 ValidateMusaTensorDescriptorArgs(const MusaTensorDescriptorArgs &t) {
   std::vector<std::string> issues;
@@ -542,12 +640,12 @@ ValidateMusaTensorDescriptorArgs(const MusaTensorDescriptorArgs &t) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def_packed(
-      tl::tvm_tensormap_create_tiled, [](PackedArgs args, Any *ret) {
+      tl::tvm_musa_tensormap_create_tiled, [](PackedArgs args, Any *ret) {
         MusaTensorDescriptorArgs t = MusaTensorDescriptorArgs::Extract(args);
         std::vector<std::string> issues = ValidateMusaTensorDescriptorArgs(t);
         if (!issues.empty()) {
           LOG_FATAL << "Invalid MUSA TMA descriptor arguments for "
-                    << tl::tvm_tensormap_create_tiled << ":\n"
+                    << tl::tvm_musa_tensormap_create_tiled << ":\n"
                     << FormatValidationIssues(issues) << t.ToDebugString();
         }
         MUresult result = muTensorDescriptorEncode(
@@ -567,10 +665,74 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def_packed(
-      tl::tvm_tensormap_create_im2col, [](PackedArgs args, Any *ret) {
-        LOG(FATAL) << "__tvm_tensormap_create_im2col is not "
-                      "supported in MUSA TVM FFI runtime yet.";
-        *ret = -1;
+      tl::tvm_musa_im2col_output_dim_create, [](PackedArgs args, Any *ret) {
+        ICHECK(args.size() >= 2 && args.size() <= 4);
+        auto *output = reinterpret_cast<int32_t *>(args[0].cast<void *>());
+        ICHECK(output != nullptr);
+        for (int i = 1; i < args.size(); ++i) {
+          output[i - 1] = args[i].cast<int32_t>();
+        }
+        *ret = 0;
+      });
+  refl::GlobalDef().def_packed(
+      tl::tvm_musa_im2col_conv_param_create, [](PackedArgs args, Any *ret) {
+        ICHECK_EQ(args.size(), 11)
+            << "Invalid " << tl::tvm_musa_im2col_conv_param_create
+            << " args size: " << args.size();
+        auto *output = reinterpret_cast<int32_t *>(args[0].cast<void *>());
+        ICHECK(output != nullptr) << "im2col conv-param output is null";
+        muuint32_t num_spatial = args[1].cast<muuint32_t>();
+        ICHECK_GE(num_spatial, 1U);
+        ICHECK_LE(num_spatial, 3U);
+        muuint32_t padding[3];
+        muuint32_t stride[3];
+        muuint32_t dilation[3];
+        for (int i = 0; i < 3; ++i) {
+          padding[i] = args[2 + i].cast<muuint32_t>();
+          stride[i] = args[5 + i].cast<muuint32_t>();
+          dilation[i] = args[8 + i].cast<muuint32_t>();
+        }
+        MUconvParamer conv_param{};
+        MUresult result = muTensorIm2colConvParamEncode(
+            &conv_param, num_spatial, padding, stride, dilation);
+        if (result != MUSA_SUCCESS) {
+          LOG_FATAL << "muTensorIm2colConvParamEncode failed with "
+                    << MusaResultToString(result);
+        }
+        const auto *raw = reinterpret_cast<const int32_t *>(&conv_param);
+        output[0] = raw[0];
+        output[1] = raw[1];
+        output[2] = raw[2];
+        *ret = static_cast<int>(result);
+      });
+}
+
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def_packed(
+      tl::tvm_musa_tensormap_create_im2col, [](PackedArgs args, Any *ret) {
+        MusaTensorDescriptorArgs t =
+            ExtractMusaIm2ColDescriptorArgs(args);
+        std::vector<std::string> issues =
+            ValidateMusaTensorDescriptorArgs(t);
+        if (!issues.empty()) {
+          LOG_FATAL << "Invalid MUSA TME im2col descriptor arguments for "
+                    << tl::tvm_musa_tensormap_create_im2col << ":\n"
+                    << FormatValidationIssues(issues) << t.ToDebugString();
+        }
+
+        MUresult result = muTensorDescriptorEncode(
+            t.desc, t.type, t.tensor_rank, t.global_address, t.global_dim,
+            t.global_stride + 1, t.interleave, t.oob_fill);
+        if (result != MUSA_SUCCESS) {
+          LOG_FATAL << "muTensorDescriptorEncode failed for MUSA TME im2col "
+                       "descriptor with "
+                    << MusaResultToString(result) << '\n'
+                    << t.ToDebugString();
+        }
+
+        *ret = static_cast<int>(result);
       });
 }
 

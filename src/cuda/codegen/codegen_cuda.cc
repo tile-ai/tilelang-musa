@@ -23,6 +23,7 @@
 #include "backend/common/target_utils.h"
 #include "cuda/codegen/ptx.h"
 #include "op/builtin.h"
+#include "op/utils.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -235,7 +236,7 @@ static std::string GetTileLangFP8Type(DataType type) {
   return stream.str();
 }
 
-std::string GetTileLangFP6Type(DataType type) {
+std::string GetTileLangFP6TypeCudaBackend(DataType type) {
   std::stringstream stream;
   int32_t lanes = type.lanes();
   std::string vec;
@@ -266,8 +267,8 @@ std::string GetTileLangFP6Type(DataType type) {
   return stream.str();
 }
 
-std::string GetTileLangFP4Type(DataType type) {
-  if (type.is_float4_e2m1_unpacked()) {
+std::string GetTileLangFP4TypeCudaBackend(DataType type) {
+  if (tvm::tl::IsUnpackedFP4Storage(type, 0)) {
     LOG(FATAL) << "float4_e2m1_unpacked is a SMEM/TMA storage tag and has no "
                   "CUDA register type";
   }
@@ -798,18 +799,18 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
   } else if (t.is_float6()) {
     enable_fp6_ = true;
     if (t.lanes() <= 4) {
-      os << GetTileLangFP6Type(t);
+      os << GetTileLangFP6TypeCudaBackend(t);
       return;
     }
     fail = true;
-  } else if (t.is_float4_e2m1_unpacked()) {
+  } else if (tvm::tl::IsUnpackedFP4Storage(t, 0)) {
     LOG(FATAL) << "float4_e2m1_unpacked is a SMEM/TMA storage tag and must be "
                   "lowered through shared-memory allocation";
     return;
   } else if (t.is_float4_e2m1fn()) {
     enable_fp4_ = true;
     if (t.lanes() <= 64) {
-      os << GetTileLangFP4Type(t);
+      os << GetTileLangFP4TypeCudaBackend(t);
     } else {
       fail = true;
     }
@@ -1908,7 +1909,7 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     if (!scope.empty() && IsScopePartOfType()) {
       PrintStorageScope(scope, ptr_os);
     }
-    if (pointed_to.is_float4_e2m1_unpacked() &&
+    if (tvm::tl::IsUnpackedFP4Storage(pointed_to, 0) &&
         (scope == "shared" || scope == "shared.dyn")) {
       ptr_os << "uint8_t";
     } else {
@@ -2404,6 +2405,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fence_sys())) {
+    this->stream << "__threadfence_system();\n";
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
@@ -4380,7 +4383,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
     bool is_float4_unpacked_shared =
-        alloc_dtype.is_float4_e2m1_unpacked() &&
+        tvm::tl::IsUnpackedFP4Storage(alloc_dtype, 0) &&
         (scope == "shared" || scope == "shared.dyn");
     bool is_fp4_scalar_local = alloc_dtype.is_float4_e2m1fn() &&
                                alloc_dtype.is_scalar() && scope == "local";

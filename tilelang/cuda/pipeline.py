@@ -14,8 +14,39 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     should_enable_race_check,
     should_force_let_inline,
 )
+from tilelang.contrib import nvcc
 from tilelang.contrib.nvcc import have_pdl, have_tma
 from tilelang.transform import PassContext
+
+
+def lower_l2_persistent_for_target(mod: IRModule, target: Target) -> IRModule:
+    """Dispatch L2 annotation lowering to the matching backend registry."""
+    from tilelang.jit.adapter.utils import is_cuda_target, is_musa_target
+
+    if is_musa_target(target):
+        return tilelang.musa.transform.LowerL2Persistent()(mod)
+    if is_cuda_target(target):
+        return tilelang.cuda.transform.LowerL2Persistent()(mod)
+    return mod
+
+
+def allow_lower_musa_burst(target: Target, pass_ctx=None) -> bool:
+    from tilelang.jit.adapter.utils import is_musa_target
+    if not is_musa_target(target):
+        return False
+    from tilelang.musa.pipeline import allow_lower_musa_burst as musa_burst_enabled
+    return musa_burst_enabled(target, pass_ctx=pass_ctx)
+
+
+def persist_threadblock_for_target(mod: IRModule, target: Target) -> IRModule:
+    """Dispatch threadblock persistence lowering to the matching backend registry."""
+    from tilelang.jit.adapter.utils import is_cuda_target, is_musa_target
+
+    if is_musa_target(target):
+        return tilelang.musa.transform.PersistThreadblock()(mod)
+    if is_cuda_target(target):
+        return tilelang.cuda.transform.PersistThreadblock()(mod)
+    return mod
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:

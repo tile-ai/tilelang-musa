@@ -5,7 +5,6 @@
 
 #include "backend/musa/target_utils.h"
 
-#include <cstdlib>
 #include <string>
 
 #include <tvm/ffi/reflection/registry.h>
@@ -54,13 +53,8 @@ bool TargetMusaHasBulkCopy(Target target) {
 }
 
 int TargetMusaGetWarpSize(Target target) {
-  if (TargetIsQY2(target)) {
-    const char *mma_shape = std::getenv("TILELANG_MUSA_MP22_MMA_SHAPE");
-    const bool use_wave32_shape =
-        mma_shape != nullptr && (std::string(mma_shape) == "m16n16k16" ||
-                                 std::string(mma_shape) == "m8n32k16");
-    return use_wave32_shape ? 32 : 128;
-  }
+  if (TargetIsQY2(target))
+    return 128;
   return 32;
 }
 

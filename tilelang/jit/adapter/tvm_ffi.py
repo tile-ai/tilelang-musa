@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 from collections.abc import Callable
+from contextlib import nullcontext
 import sys
 import threading
 
 import torch
+import tvm_ffi
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
@@ -110,7 +112,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.kernel_global_source = self.device_kernel_source
         self.executable = None
-        self._executables_by_device: dict[int | str, tvm.runtime.Executable] = {}
+        self._executables_by_device: dict[torch.device | str, tvm.runtime.Executable] = {}
+        self._last_executable_by_device: tuple[torch.device | str, tvm.runtime.Executable] | None = None
         self._executable_lock = threading.Lock()
 
         self._post_init()
@@ -128,6 +131,50 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         if self.executable is not None:
             return self.executable
         return self._make_executable()
+
+    @staticmethod
+    def _resolve_device_key(out_device: torch.device | None) -> torch.device | str:
+        if isinstance(out_device, torch.device):
+            if out_device.type == "musa" and out_device.index is None:
+                return torch.device("musa", torch.musa.current_device())
+            if out_device.type == "cuda" and out_device.index is None:
+                return torch.device("cuda", torch.cuda.current_device())
+            return out_device
+
+        if hasattr(torch, "musa") and torch.musa.is_available():
+            return torch.device("musa", torch.musa.current_device())
+        if torch.cuda.is_available():
+            return torch.device("cuda", torch.cuda.current_device())
+        return "cpu"
+
+    def _get_executable(self, out_device: torch.device | None) -> tvm.runtime.Executable:
+        if self.executable is not None:
+            return self.executable
+
+        device_key = self._resolve_device_key(out_device)
+        last_executable = self._last_executable_by_device
+        if last_executable is not None and last_executable[0] == device_key:
+            return last_executable[1]
+
+        executable = self._executables_by_device.get(device_key)
+        if executable is None:
+            with self._executable_lock:
+                executable = self._executables_by_device.get(device_key)
+                if executable is None:
+                    if isinstance(device_key, torch.device) and device_key.type == "musa":
+                        with torch.musa.device(device_key):
+                            executable = self._make_executable()
+                    elif isinstance(device_key, torch.device) and device_key.type == "cuda":
+                        with torch.cuda.device(device_key):
+                            executable = self._make_executable()
+                    else:
+                        executable = self._make_executable()
+                    self._executables_by_device[device_key] = executable
+
+        # Replace the key/executable pair atomically so concurrent callers can
+        # never observe a device key paired with another device's executable.
+        self._last_executable_by_device = (device_key, executable)
+        return executable
 
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
@@ -165,7 +212,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Capture thunks that reflect Torch's current stream and device.
         # These are evaluated at call time to align TVM execution with the
         # caller's active PyTorch stream/device.
-        # current_stream_functor = self.get_current_stream_functor()
+        current_stream_functor = self.get_current_stream_functor()
         current_device_functor = self.get_current_device_functor()
 
         # Convert TVM types to native Python types during initialization
@@ -192,27 +239,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         dynamic_symbolic_map = self._process_dynamic_symbolic()
         set_device_packed = tvm.get_global_func("__tvm_set_device", allow_missing=True)
-
-        def get_executable():
-            if self.executable is not None:
-                return self.executable
-
-            device_key: int | str = "cpu"
-            if hasattr(torch, "musa") and torch.musa.is_available():
-                device_key = torch.musa.current_device()
-            elif torch.cuda.is_available():
-                device_key = torch.cuda.current_device()
-
-            executable = self._executables_by_device.get(device_key)
-            if executable is not None:
-                return executable
-
-            with self._executable_lock:
-                executable = self._executables_by_device.get(device_key)
-                if executable is None:
-                    executable = self._make_executable()
-                    self._executables_by_device[device_key] = executable
-                return executable
+        executable = self.executable
 
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
@@ -230,7 +257,12 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 expected_dtype_strs.append(None)
                 is_buffer_param.append(False)
 
-        def func(*inputs: torch.Tensor | Any):
+        def func(*inputs: torch.Tensor | Any, stream: int | None = None):
+            if stream is not None:
+                if isinstance(stream, bool) or not isinstance(stream, int):
+                    raise TypeError("stream must be a raw integer pointer")
+                if stream < 0:
+                    raise ValueError("stream must be non-negative")
             # Validate input count strictly
             expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
@@ -242,7 +274,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 (input.device for input in inputs if isinstance(input, torch.Tensor)),
                 None,
             )
-
             # Stitch the full positional argument list expected by the TVM executable
             ins_idx: int = 0
             tensor_list: list[torch.Tensor] = []
@@ -293,8 +324,27 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     dev_id = out_device.index if out_device.index is not None else torch.musa.current_device()
                     set_device_packed(tvm.musa(dev_id).dlpack_device_type(), dev_id)
 
-            executable = get_executable()
-            executable(*tensor_list)
+            stream_context = nullcontext()
+            if self.target.kind.name == "musa":
+                launch_device = out_device if out_device is not None else current_device_functor()
+                device_id = launch_device.index if launch_device.index is not None else torch.musa.current_device()
+                raw_stream = stream if stream is not None else current_stream_functor()
+                ffi_device = tvm_ffi.device("ext_dev", device_id)
+                stream_context = tvm_ffi.use_raw_stream(ffi_device, int(raw_stream))
+
+            # Scope argument conversion and execution to the selected stream.
+            # Restore the caller's FFI stream on both success and exceptions.
+            with stream_context:
+                call_args = tensor_list
+                if self.target.kind.name == "musa":
+                    call_args = [
+                        tvm_ffi.from_dlpack(tensor) if isinstance(tensor, torch.Tensor) and tensor.device.type == "musa" else tensor
+                        for tensor in tensor_list
+                    ]
+                if executable is not None:
+                    executable(*call_args)
+                else:
+                    self._get_executable(out_device)(*call_args)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -343,6 +393,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter.rt_mod = None
         adapter.executable = runtime.load_module(kernel_lib_path)
         adapter._executables_by_device = {}
+        adapter._last_executable_by_device = None
         adapter._executable_lock = threading.Lock()
         adapter._post_init()
         return adapter

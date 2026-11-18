@@ -12,8 +12,8 @@ tags: [MUSA, TileLang]
 ### 版本差异对照
 
 以下从接口和使用语义角度，对比两个 MUSA SDK 配套正式 release：历史正式版
-`v0.1.8+musa.3` 与当前正式版 `v0.1.12+musa.5`。GitHub 开源
-release 的差异请以对应 release notes 为准。
+`v0.1.8+musa.3` 与当前正式版 `v0.1.12+musa.5`。当前 GitHub 源码对应同版本
+tag；本节的 MUSA 架构范围为 PH1/MP31 与 QY2/MP22。
 
 | 能力项 | MUSA SDK 配套正式历史版 `v0.1.8+musa.3` | 当前 MUSA SDK 配套正式版 `v0.1.12+musa.5` |
 | --- | --- | --- |

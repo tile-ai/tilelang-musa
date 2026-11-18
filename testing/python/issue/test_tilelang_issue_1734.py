@@ -32,11 +32,12 @@ def test_issue_1734():
 
     mod = kernel.compile()
     source = mod.get_kernel_source()
-    # Verify that the if statement is hoisted outside the for loop
-    # After hoisting, we should see "if" before "for" pattern
+    # Verify that the loop-invariant if is hoisted.  The loop may be kept in
+    # the generated source or fully eliminated by vectorization.
     if_pos = source.find("if (")
     for_pos = source.find("for (")
-    assert if_pos < for_pos, "Loop-invariant if should be hoisted outside the loop"
+    assert if_pos >= 0, "Loop-invariant if should be present"
+    assert for_pos < 0 or if_pos < for_pos, "Loop-invariant if should be hoisted"
 
 
 if __name__ == "__main__":

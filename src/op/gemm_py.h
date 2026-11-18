@@ -82,6 +82,8 @@ public:
                                                          Target target) const;
   std::optional<std::array<int, 3>> SelectPH1WmmaInstShape(int block_size,
                                                            Target target) const;
+  std::optional<std::array<int, 3>> SelectQY2MmaInstShape(int block_size,
+                                                          Target target) const;
 
 private:
   mutable bool completed_ = false;

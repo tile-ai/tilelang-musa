@@ -77,8 +77,43 @@ public:
         prologue_stmts.push_back(desc_init.stmt);
       }
     }
+    for (const auto &[descriptor, conv_param] : substituter.conv_param_map_) {
+      (void)descriptor;
+      PrimExpr storage = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
+                              {StringImm("arg_tcode"), 3});
+      prologue_stmts.push_back(Bind(conv_param, storage));
+      auto args_it = substituter.conv_param_args_.find(conv_param);
+      ICHECK(args_it != substituter.conv_param_args_.end());
+      Array<PrimExpr> packed_args{
+          StringImm(tvm_musa_im2col_conv_param_create), conv_param};
+      packed_args.insert(packed_args.end(), args_it->second.begin(),
+                         args_it->second.end());
+      prologue_stmts.push_back(Evaluate(
+          Call(DataType::Int(32), builtin::tvm_call_packed(), packed_args)));
+    }
+    for (const auto &[descriptor, output_dim] : substituter.output_dim_map_) {
+      (void)descriptor;
+      const auto *pointer = output_dim->type_annotation.as<PointerTypeNode>();
+      ICHECK(pointer);
+      const auto *element = pointer->element_type.as<PrimTypeNode>();
+      ICHECK(element);
+      ICHECK(element->dtype.is_int() && element->dtype.bits() == 32);
+      PrimExpr storage = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
+                              {StringImm("arg_tcode"), element->dtype.lanes()});
+      prologue_stmts.push_back(Bind(output_dim, storage));
+      Array<PrimExpr> packed_args{
+          StringImm(tvm_musa_im2col_output_dim_create), output_dim};
+      auto values_it = substituter.output_dim_arg_map_.find(output_dim);
+      ICHECK(values_it != substituter.output_dim_arg_map_.end());
+      packed_args.insert(packed_args.end(), (*values_it).second.begin(),
+                         (*values_it).second.end());
+      prologue_stmts.push_back(Evaluate(
+          Call(DataType::Int(32), builtin::tvm_call_packed(), packed_args)));
+    }
     f = WithAttr(std::move(f), "tma_descriptor_args",
                  substituter.init_desc_arg_map_);
+    f = WithAttr(std::move(f), "tma_im2col_output_dim_args",
+                 substituter.output_dim_arg_map_);
 
     // Additionally, if L2 persistent cache annotations were lowered earlier,
     // materialize TVM FFI calls to set the stream access policy window.
@@ -195,6 +230,45 @@ public:
     bool is_tma_descriptor = call->op.same_as(create_tma_descriptor());
     bool is_tma_im2col_descriptor =
         call->op.same_as(create_tma_im2col_descriptor());
+    if (call->op.same_as(tma_load_im2col())) {
+      Array<PrimExpr> args;
+      args.reserve(call->args.size() + 1);
+      for (const PrimExpr &arg : call->args) {
+        args.push_back(VisitExpr(arg));
+      }
+      ICHECK_GE(args.size(), 13U);
+      Var descriptor = Downcast<Var>(args[0]);
+      size_t spatial_rank = (args.size() - 9) / 3;
+      ICHECK_GE(spatial_rank, 1U);
+      ICHECK_LE(spatial_rank, 3U);
+      size_t output_dim_start = args.size() - 3 - spatial_rank;
+      if (spatial_rank > 1) {
+        Var output_dim;
+        auto it = output_dim_map_.find(descriptor);
+        if (it == output_dim_map_.end()) {
+          output_dim =
+              Var(descriptor->name_hint + "_output_dim",
+                  PointerType(PrimType(DataType::Int(32, spatial_rank)),
+                              "grid_constant"));
+          output_dim_map_[descriptor] = output_dim;
+          Array<PrimExpr> values;
+          for (size_t i = 0; i < spatial_rank; ++i) {
+            values.push_back(args[output_dim_start + i]);
+          }
+          output_dim_arg_map_.Set(output_dim, values);
+        } else {
+          output_dim = it->second;
+        }
+        args.Set(output_dim_start, output_dim);
+        for (size_t i = 1; i < spatial_rank; ++i) {
+          args.erase(args.begin() + output_dim_start + 1);
+        }
+      }
+      auto conv_it = conv_param_map_.find(descriptor);
+      ICHECK(conv_it != conv_param_map_.end());
+      args.insert(args.end() - 3, conv_it->second);
+      return Call(call->dtype, call->op, args);
+    }
     if (!is_tma_descriptor && !is_tma_im2col_descriptor) {
       return StmtExprMutator::VisitExpr_(call);
     }
@@ -219,6 +293,28 @@ public:
           Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                         {StringImm("tl::prefetch_tma_descriptor"), var})));
     }
+    if (is_tma_im2col_descriptor) {
+      Var conv_param(
+          var->name_hint + "_conv_param",
+          PointerType(PrimType(DataType::Int(32, 3)), "grid_constant"));
+      conv_param_map_[var] = conv_param;
+      const auto *rank = call->args[1].as<IntImmNode>();
+      ICHECK(rank) << "MUSA im2col tensor rank must be static";
+      size_t tensor_rank = static_cast<size_t>(rank->value);
+      ICHECK_GE(tensor_rank, 3U);
+      ICHECK_LE(tensor_rank, 5U);
+      size_t conv_base = 3 + tensor_rank * 2;
+      ICHECK_GE(call->args.size(), conv_base + 15);
+      Array<PrimExpr> conv_args;
+      conv_args.push_back(call->args[conv_base + 11]); // num_spatial
+      for (size_t i = 0; i < 3; ++i)
+        conv_args.push_back(call->args[conv_base + i]); // padding
+      for (size_t i = 0; i < 3; ++i)
+        conv_args.push_back(call->args[conv_base + 6 + i]); // stride
+      for (size_t i = 0; i < 3; ++i)
+        conv_args.push_back(call->args[conv_base + 3 + i]); // dilation
+      conv_param_args_[conv_param] = conv_args;
+    }
     return var;
   }
 
@@ -226,9 +322,9 @@ private:
   static Array<PrimExpr> MakeInitDescArgs(const Call &call, const Var &var) {
     Array<PrimExpr> init_desc_args;
     if (call->op.same_as(create_tma_descriptor())) {
-      init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
+      init_desc_args.push_back(StringImm(tvm_musa_tensormap_create_tiled));
     } else if (call->op.same_as(create_tma_im2col_descriptor())) {
-      init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
+      init_desc_args.push_back(StringImm(tvm_musa_tensormap_create_im2col));
     } else {
       ICHECK(0) << call->op;
     }
@@ -252,6 +348,10 @@ private:
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
   std::vector<DescInit> desc_inits_;
   Map<Var, Array<PrimExpr>> init_desc_arg_map_;
+  std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual> conv_param_map_;
+  std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual> output_dim_map_;
+  Map<Var, Array<PrimExpr>> output_dim_arg_map_;
+  std::unordered_map<Var, Array<PrimExpr>, ObjectPtrHash, ObjectPtrEqual> conv_param_args_;
   LowerPHIntrin(bool disable_shuffle_elect, bool enable_tma_desc_prefetch)
       : disable_shuffle_elect_(disable_shuffle_elect),
         enable_tma_desc_prefetch_(enable_tma_desc_prefetch) {}

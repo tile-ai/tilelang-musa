@@ -74,6 +74,8 @@ TEST_CASES = [
 SPECIAL_CASES = [
     (1024, 1024, 1024, 32, 32, 32, "float16", "float32"),
     (1024, 1024, 1024, 32, 32, 32, "bfloat16", "float32"),
+    (256, 256, 256, 64, 64, 256, "float16", "float32"),
+    (256, 256, 256, 64, 64, 256, "bfloat16", "float32"),
     # over shared memory
     # (1024, 1024, 1024, 128, 128, 256, "float16", "float32"),
 ]

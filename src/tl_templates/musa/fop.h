@@ -8,7 +8,7 @@
 #define TL_HAS_MUSA_BUILTIN(x) 0
 #endif
 
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 310)
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
 #define TL_MUSA_ARCH_GE_310 1
 #else
 #define TL_MUSA_ARCH_GE_310 0
@@ -75,6 +75,22 @@ TL_DEVICE tl_f2 mul2(tl_f2 a, tl_f2 b) {
 #endif
 }
 
+TL_DEVICE tl_f2 mul2(tl_f2 a, float b) {
+#if TL_HAS_MUSA_BUILTIN_MP31(__musa_mul_f_bst2_sv)
+  return __musa_mul_f_bst2_sv(b, a);
+#else
+  return tl_f2{a[0] * b, a[1] * b};
+#endif
+}
+
+TL_DEVICE tl_f2 mul2(float a, tl_f2 b) {
+#if TL_HAS_MUSA_BUILTIN_MP31(__musa_mul_f_bst2_sv)
+  return __musa_mul_f_bst2_sv(a, b);
+#else
+  return tl_f2{a * b[0], a * b[1]};
+#endif
+}
+
 TL_DEVICE tl_f2 fma2(tl_f2 a, tl_f2 b, tl_f2 c) {
 #if TL_HAS_MUSA_BUILTIN_MP31(__musa_fma_f_bst2_vvv)
   return __musa_fma_f_bst2_vvv(a, b, c);
@@ -117,12 +133,37 @@ TL_DEVICE tl_f4 mul4(tl_f4 a, tl_f4 b) {
 #endif
 }
 
+TL_DEVICE tl_f4 mul4(tl_f4 a, float b) {
+#if TL_HAS_MUSA_BUILTIN_MP31(__musa_mul_f_bst4_sv)
+  return __musa_mul_f_bst4_sv(b, a);
+#else
+  return tl_f4{a[0] * b, a[1] * b, a[2] * b, a[3] * b};
+#endif
+}
+
+TL_DEVICE tl_f4 mul4(float a, tl_f4 b) {
+#if TL_HAS_MUSA_BUILTIN_MP31(__musa_mul_f_bst4_sv)
+  return __musa_mul_f_bst4_sv(a, b);
+#else
+  return tl_f4{a * b[0], a * b[1], a * b[2], a * b[3]};
+#endif
+}
+
 TL_DEVICE tl_f4 fma4(tl_f4 a, tl_f4 b, tl_f4 c) {
 #if TL_HAS_MUSA_BUILTIN_MP31(__musa_fma_f_bst4_vvv)
   return __musa_fma_f_bst4_vvv(a, b, c);
 #else
   return tl_f4{fmaf(a[0], b[0], c[0]), fmaf(a[1], b[1], c[1]),
                fmaf(a[2], b[2], c[2]), fmaf(a[3], b[3], c[3])};
+#endif
+}
+
+TL_DEVICE tl_f4 fma4(float a, tl_f4 b, float c) {
+#if TL_HAS_MUSA_BUILTIN_MP31(__musa_fma_f_bst4_svs)
+  return __musa_fma_f_bst4_svs(a, b, c);
+#else
+  return tl_f4{fmaf(a, b[0], c), fmaf(a, b[1], c), fmaf(a, b[2], c),
+               fmaf(a, b[3], c)};
 #endif
 }
 

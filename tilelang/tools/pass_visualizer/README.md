@@ -7,7 +7,7 @@ Where `pass_diff` shows a line-level diff of the **TVMScript text**, this tool
 renders the IR as an **`SBlock` structure tree** — the block nesting plus
 `reads` / `writes` / `alloc_buffers` / `annotations` fields — and expands every
 tile op by field name. It emits a single self-contained, interactive HTML file
-that steps through each CUDA lowering pass.
+that steps through each target-specific CUDA or MUSA lowering pass.
 
 Use it when debugging **structural** passes (layout inference, warp
 specialization, pipelining), where what matters is how the IR's block structure
@@ -27,6 +27,7 @@ and operator semantics change, not just which text lines moved.
 ```bash
 python -m tilelang.tools.pass_visualizer.viewer \
     tilelang/tools/pass_visualizer/examples/gemm_relu.py \
+    --target musa \
     --set M=1024 --set N=1024 --set K=1024 \
     --set block_M=128 --set block_N=128 --set block_K=32 \
     --out gemm_relu_passes.html
@@ -51,9 +52,9 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
 - **Right pane**: the structure tree for the selected pass, with lines **added**
   by that pass highlighted green and lines it **removed** shown ghosted red.
 - **Operator highlighting**: tile ops (`T.gemm`, `T.copy`, …), synchronization
-  primitives, and lowered hardware intrinsics (`ptx_mma`, `tma_load`, …) are
-  each colored distinctly, so you can follow a `T.copy` as it lowers into
-  TMA/PTX intrinsics.
+  primitives, and lowered backend intrinsics (`tl_gemm`, `ptx_mma`, `tma_load`,
+  …) are each colored distinctly, so you can follow high-level tile operations
+  into their CUDA or MUSA representation.
 
 ## Programmatic API
 
@@ -72,5 +73,5 @@ html = emit_html(name, stages)
 ## Files
 
 - `viewer.py` — CLI entry point; per-pass capture, diffing, and HTML/text emission.
-- `core.py` — kernel loading, the CUDA lowering pass pipeline, and the structure-tree renderer.
+- `core.py` — kernel loading, target-specific lowering pass pipelines, and the structure-tree renderer.
 - `examples/gemm_relu.py` — a small fused GEMM + bias + ReLU kernel used as demo input.

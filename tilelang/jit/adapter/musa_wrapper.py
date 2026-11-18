@@ -90,38 +90,57 @@ TMA_DESC_INIT_FUNC = """
 """
 
 TMA_IM2COL_DESC_INIT_FUNC = """
-\tMUtensorMap {0};
-\tMUtensorMapDataType {0}_type= (MUtensorMapDataType){1};
+\tMUtensorDescriptor {0};
+\tMUtensorDescriptorDataType {0}_type= (MUtensorDescriptorDataType){1};
 \tmuuint32_t {0}_tensorRank= {2};
 \tvoid *{0}_globalAddress= {3};
 \tmuuint64_t {0}_globalDim[{2}]= {{{4}}};
 \tmuuint64_t {0}_globalStride[{2}]= {{{5}}};
-\tmuuint32_t {0}_elementStrides[{2}]= {{{6}}};
-\tint {0}_lowerCorner[{2} - 2]= {{{7}}};
-\tint {0}_upperCorner[{2} - 2]= {{{8}}};
-\tmuuint32_t {0}_channelsPerPixel= {9};
-\tmuuint32_t {0}_pixelsPerColumn= {10};
-\tMUtensorMapInterleave {0}_interleave= (MUtensorMapInterleave){11};
-\tMUtensorMapSwizzle {0}_swizzle= (MUtensorMapSwizzle){12};
-\tMUtensorMapL2promotion {0}_l2Promotion= (MUtensorMapL2promotion){13};
-\tMUtensorMapFloatOOBfill {0}_oobFill= (MUtensorMapFloatOOBfill){14};
+\tMUtensorDescriptorInterleave {0}_interleave= (MUtensorDescriptorInterleave){6};
+\tmuuint64_t {0}_oobFill= {7};
 
-\tMUresult {0}_result = MUTLASS_MUSA_DRIVER_WRAPPER_CALL(muTensorMapEncodeIm2col)(
-    &{0}, {0}_type, {0}_tensorRank, {0}_globalAddress, {0}_globalDim, {0}_globalStride + 1,
-    {0}_lowerCorner, {0}_upperCorner, {0}_channelsPerPixel, {0}_pixelsPerColumn, {0}_elementStrides, {0}_interleave, {0}_swizzle, {0}_l2Promotion, {0}_oobFill);
-
-\tif ({0}_result != MUSA_SUCCESS) {{
+\tMUresult {0}_desc_result = muTensorDescriptorEncode(
+\t\t&{0}, {0}_type, {0}_tensorRank, {0}_globalAddress,
+\t\t{0}_globalDim, {0}_globalStride + 1, {0}_interleave, {0}_oobFill);
+\tif ({0}_desc_result != MUSA_SUCCESS) {{
 \t\tstd::stringstream ss;
-\t\tss << "Error: Failed to initialize the TMA descriptor {0}";
+\t\tss << "Error: Failed to initialize the TME descriptor {0}";
 \t\tsnprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
 \t\treturn -1;
 \t}}
+
+\tMUconvParamer {0}_mu_conv_param{{}};
+\tmuuint32_t {0}_numSpatial= {8};
+\tmuuint32_t {0}_lowerPad[3]= {{static_cast<muuint32_t>({9}), static_cast<muuint32_t>({10}), static_cast<muuint32_t>({11})}};
+\tmuuint32_t {0}_convStride[3]= {{static_cast<muuint32_t>({12}), static_cast<muuint32_t>({13}), static_cast<muuint32_t>({14})}};
+\tmuuint32_t {0}_dilation[3]= {{static_cast<muuint32_t>({15}), static_cast<muuint32_t>({16}), static_cast<muuint32_t>({17})}};
+\tMUresult {0}_conv_result = muTensorIm2colConvParamEncode(
+\t\t&{0}_mu_conv_param, {0}_numSpatial, {0}_lowerPad,
+\t\t{0}_convStride, {0}_dilation);
+\tif ({0}_conv_result != MUSA_SUCCESS) {{
+\t\tstd::stringstream ss;
+\t\tss << "Error: Failed to initialize the TME im2col conv param {0}";
+\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
+\t\treturn -1;
+\t}}
+\tint* {0}_conv_param_raw = reinterpret_cast<int*>(&{0}_mu_conv_param);
+\t__musa::tme_conv_param_t {0}_conv_param = {{{0}_conv_param_raw[0], {0}_conv_param_raw[1], {0}_conv_param_raw[2]}};
+"""
+
+TMA_IM2COL_OUTPUT_DIM_INIT_FUNC = """
+\t{0} {1} = {{{2}}};
+"""
+
+ROBUST_DESC_INIT_FUNC = """
+	tl::robust_param_desc_t {0} = tl::make_robust_desc(
+		{1}, static_cast<uint64_t>({2}));
 """
 
 
 class TLMUSASourceWrapper:
     _TYPE_MAP = {
         "float32": "float",
+        "custom[tfloat32]": "tfloat32_t",
         "float16": "half_t",
         "bfloat16": "bfloat16_t",
         "float8_e4m3": "fp8_e4_t",
@@ -164,6 +183,9 @@ class TLMUSASourceWrapper:
         self.block_info: list[int] | dict = [1, 1, 1]
         self.grid_info: list[int] | dict = [1, 1, 1]
         self.tma_descriptor_args: dict | None = None
+        self.tma_im2col_output_dim_args: dict | None = None
+        self.fast_divmod_host_args: dict | None = None
+        self.robust_descriptor_args: dict | None = None
         self.l2_persistent_map: dict[str, dict] | None = {}
         self.parse_source_information()
         self.srcpath: str | None = None
@@ -171,7 +193,7 @@ class TLMUSASourceWrapper:
         self.lib_code: str | None = self.update_lib_code(source)
 
     def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
-        return pythonic_expr(expr, self._TYPE_MAP)
+        return pythonic_expr(expr, self._TYPE_MAP, conditional_style="cpp")
 
     def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
@@ -220,25 +242,47 @@ class TLMUSASourceWrapper:
             function_params,
             desc_name_map: dict[str, str] | None = None,
             desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
+            fast_divmod_name_var_map: dict[str, tvm.tirx.PrimExpr] | None = None,
+            robust_desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
         ):
             # Extract the function call arguments matching the function definition
             def maybe_desc(name: str, matches: list[str], i: int):
                 match = matches[i]
                 if not (match == name + "_desc" or match.startswith(name + "_desc_")):
                     return False
-                desc_decls = []
-                if desc_name_map is not None:
+                # Types belong to a single comma-delimited kernel parameter.
+                # Looking at adjacent tokens can borrow the next parameter's
+                # descriptor type for an im2col output dimension.
+                is_descriptor = match in descriptor_names
+                if is_descriptor and desc_name_map is not None:
                     desc_name_map[match] = name
-                if i > 0:
-                    desc_decls.append(matches[i - 1])
-                if i < len(matches) - 1:
-                    desc_decls.append(matches[i + 1])
-                return any([decl == "MUtensorDescriptor" for decl in desc_decls])
+                return is_descriptor
 
             pattern = r"[,\s]*(?:\w+\s*\*+\s*__restrict__\s+)?(\w+)"
-            matches = re.findall(pattern, s)
+            # The caller supplies a complete kernel declaration, including its
+            # name and trailing body. Match types only inside the parameter list.
+            parameter_list = s[s.index("(") + 1 : s.rindex(")")] if "(" in s and ")" in s else s
+            matches = re.findall(pattern, parameter_list)
+            descriptor_names = {
+                decl.group(1)
+                for parameter in parameter_list.split(",")
+                if (decl := re.fullmatch(r"\s*MUtensorDescriptor\s+(\w+)\s*", parameter))
+            }
+            robust_desc_names = set(re.findall(r"tl::robust_param_desc_t\s+(\w+)", parameter_list))
             call_args = []
             for i, match in enumerate(matches):
+                if match.startswith("fast_div_multiplier_") or match.startswith("fast_div_shift_") or match in robust_desc_names:
+                    call_args.append(match)
+                    assert len(call_args) <= len(function_params), (
+                        f"Function {function_name} has {len(function_params)} parameters, but {len(call_args)} arguments"
+                    )
+                    if fast_divmod_name_var_map is not None and (
+                        match.startswith("fast_div_multiplier_") or match.startswith("fast_div_shift_")
+                    ):
+                        fast_divmod_name_var_map[match] = function_params[len(call_args) - 1]
+                    if robust_desc_name_var_map is not None and match in robust_desc_names:
+                        robust_desc_name_var_map[match] = function_params[len(call_args) - 1]
+                    continue
                 for arg in function_args:
                     if arg["name"] == match:
                         call_args.append(match)
@@ -248,6 +292,14 @@ class TLMUSASourceWrapper:
                             f"Function {function_name} has {len(function_params)} parameters, but {len(call_args)} arguments"
                         )
                         desc_name_var_map[match] = function_params[len(call_args) - 1]
+                if match.endswith("_conv_param") and match not in call_args:
+                    desc_handle = match[: -len("_conv_param")]
+                    if desc_handle in desc_name_map or any(match.startswith(name) for name in desc_name_map):
+                        call_args.append(match)
+                if match.endswith("_output_dim") and match not in call_args:
+                    desc_handle = match[: -len("_output_dim")]
+                    if desc_handle in desc_name_map or any(match.startswith(name) for name in desc_name_map):
+                        call_args.append(match)
 
             return call_args
 
@@ -262,6 +314,8 @@ class TLMUSASourceWrapper:
             kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE
         desc_name_map: dict[str, str] = {}
         desc_name_var_map: dict[str, tvm.tirx.Var] = {}
+        fast_divmod_name_var_map: dict[str, tvm.tirx.PrimExpr] = {}
+        robust_desc_name_var_map: dict[str, tvm.tirx.Var] = {}
         for function_name, function_info in function_informations.items():
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
@@ -272,7 +326,10 @@ class TLMUSASourceWrapper:
             index = match_declare_kernel(code, function_name + "(")
 
             # Analyze the function declaration to prepare for argument extraction
-            declaration = code[index:].split(";")[0]
+            # Restrict parsing to the signature: body calls can contain
+            # parentheses and names that resemble kernel parameters.
+            declaration_end = min(pos for token in (";", "{") if (pos := code.find(token, index)) != -1)
+            declaration = code[index:declaration_end]
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
@@ -288,7 +345,15 @@ class TLMUSASourceWrapper:
             kernel_launch_code += init_l2_persistent_map
 
             if self.use_cooperative_groups[function_name]:
-                args_list = func_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
+                args_list = func_call_args(
+                    declaration,
+                    function_args,
+                    function_params,
+                    desc_name_map,
+                    desc_name_var_map,
+                    fast_divmod_name_var_map,
+                    robust_desc_name_var_map,
+                )
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
@@ -300,7 +365,15 @@ class TLMUSASourceWrapper:
                     function_name, grid_str, block_str, function_name + "_args", smem_str
                 )
             else:
-                args_list = func_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
+                args_list = func_call_args(
+                    declaration,
+                    function_args,
+                    function_params,
+                    desc_name_map,
+                    desc_name_var_map,
+                    fast_divmod_name_var_map,
+                    robust_desc_name_var_map,
+                )
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
@@ -311,11 +384,44 @@ class TLMUSASourceWrapper:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
         init_tma_descriptor_args = self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
-        kernel_launch_code = init_tma_descriptor_args + kernel_launch_code
+        init_tma_output_dim_args = self.generate_tma_output_dim_args()
+        init_fast_divmod_host_args = self.generate_fast_divmod_host_args(fast_divmod_name_var_map)
+        init_robust_descriptor_args = self.generate_robust_descriptor_args(robust_desc_name_var_map)
+        kernel_launch_code = init_tma_descriptor_args + init_tma_output_dim_args + init_fast_divmod_host_args + init_robust_descriptor_args + kernel_launch_code
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC.format(def_args, kernel_launch_code)
         return host_func
+
+    def generate_fast_divmod_host_args(self, name_var_map: dict[str, tvm.tirx.PrimExpr]) -> str:
+        if self.fast_divmod_host_args is None:
+            return ""
+
+        def find_name(var: tvm.tirx.PrimExpr) -> str:
+            for name, mapped_var in name_var_map.items():
+                if mapped_var.same_as(var):
+                    return name
+            raise ValueError(f"Fast-divmod kernel parameter {var} was not found in the generated declaration")
+
+        init = ""
+        for index, (multiplier_var, args) in enumerate(self.fast_divmod_host_args.items()):
+            if len(args) != 2:
+                raise ValueError(f"Fast-divmod host args must be (divisor, shift_var), got {len(args)} entries")
+            divisor, shift_var = args
+            multiplier_name = find_name(multiplier_var)
+            shift_name = find_name(shift_var)
+            divisor_expr = self._pythonic_expr(divisor)
+            divisor_name = f"fast_div_divisor_{index}"
+            params_name = f"fast_divmod_host_{index}"
+            init += f"\tint32_t {divisor_name} = {divisor_expr};\n"
+            init += (
+                f"\tif ({divisor_name} <= 0) {{ snprintf(error_buf, ERROR_BUF_SIZE, "
+                f'"T.fast_div divisor must be strictly positive"); return -1; }}\n'
+            )
+            init += f"\tmutlass::FastDivmod {params_name}({divisor_name});\n"
+            init += f"\tuint32_t {multiplier_name} = {params_name}.multiplier;\n"
+            init += f"\tuint32_t {shift_name} = {params_name}.shift_right;\n"
+        return init
 
     def generate_l2_persistent_map(self, function_name: str) -> str:
         if function_name not in self.l2_persistent_map:
@@ -351,7 +457,7 @@ class TLMUSASourceWrapper:
 
             tma_create_str, _, dtype, tensor_rank, globalAddress, *remaining_args = args
 
-            is_img2col = tma_create_str.value == "__tvm_tensormap_create_im2col"
+            is_img2col = tma_create_str.value == "__tvm_musa_tensormap_create_im2col"
             dtype = self._pythonic_expr(dtype)
             tensor_rank = int(self._pythonic_expr(tensor_rank))
 
@@ -404,41 +510,44 @@ class TLMUSASourceWrapper:
                     oobFill,
                 )
             else:
-                # Calculate required length for remaining_args
-                expected_args_len = 5 * tensor_rank + 2
+                # MUSA im2col descriptors use the ordinary tensor descriptor
+                # plus a separately encoded convolution parameter.
+                expected_args_len = 2 * tensor_rank + 15
                 if len(remaining_args) < expected_args_len:
                     raise ValueError(
                         f"Insufficient remaining args: got {len(remaining_args)}, "
                         f"expected {expected_args_len} for tensor_rank {tensor_rank}"
                     )
 
-                # Extract dimensions and strides using list slicing
-                global_dim = remaining_args[:tensor_rank]
-                global_stride = remaining_args[tensor_rank : 2 * tensor_rank]
-                element_strides = remaining_args[2 * tensor_rank : 3 * tensor_rank]
-                lower_corner = remaining_args[3 * tensor_rank : 4 * tensor_rank - 2]
-                upper_corner = remaining_args[4 * tensor_rank - 2 : 5 * tensor_rank - 4]
-                global_dim = [self._pythonic_expr(i) for i in global_dim]
-                global_stride = [self._pythonic_expr(i) for i in global_stride]
-                element_strides = [self._pythonic_expr(i) for i in element_strides]
-                lower_corner = [self._pythonic_expr(i) for i in lower_corner]
-                upper_corner = [self._pythonic_expr(i) for i in upper_corner]
-
-                # Extract remaining parameters
+                global_dim = [self._pythonic_expr(i) for i in remaining_args[:tensor_rank]]
+                global_stride = [self._pythonic_expr(i) for i in remaining_args[tensor_rank : 2 * tensor_rank]]
+                tail = remaining_args[2 * tensor_rank :]
                 try:
-                    smem_box_pixel, smem_box_channel, interleave, swizzle, l2Promotion, oobFill = remaining_args[
-                        5 * tensor_rank - 4 : 5 * tensor_rank + 2
-                    ]
-                    smem_box_pixel = self._pythonic_expr(smem_box_pixel)
-                    smem_box_channel = self._pythonic_expr(smem_box_channel)
+                    (
+                        pad_w,
+                        pad_h,
+                        pad_d,
+                        dilation_w,
+                        dilation_h,
+                        dilation_d,
+                        stride_w,
+                        stride_h,
+                        stride_d,
+                        interleave,
+                        oob_fill,
+                        num_spatial,
+                        _smem_box_pixel,
+                        _smem_box_channel,
+                        _swizzle,
+                    ) = tail[:15]
                     interleave = self._pythonic_expr(interleave)
-                    swizzle = self._pythonic_expr(swizzle)
-                    l2Promotion = self._pythonic_expr(l2Promotion)
-                    oobFill = self._pythonic_expr(oobFill)
+                    oob_fill = self._pythonic_expr(oob_fill)
+                    num_spatial = self._pythonic_expr(num_spatial)
+                    pad_w, pad_h, pad_d = (self._pythonic_expr(v) for v in (pad_w, pad_h, pad_d))
+                    stride_w, stride_h, stride_d = (self._pythonic_expr(v) for v in (stride_w, stride_h, stride_d))
+                    dilation_w, dilation_h, dilation_d = (self._pythonic_expr(v) for v in (dilation_w, dilation_h, dilation_d))
                 except ValueError as e:
-                    raise ValueError(
-                        "Failed to unpack the final 6 TMA parameters (smem_box_pixel, smem_box_channel, interleave, swizzle, l2Promotion, oobFill)"
-                    ) from e
+                    raise ValueError("Failed to unpack MUSA im2col descriptor parameters") from e
 
                 tma_descripter_init += TMA_IM2COL_DESC_INIT_FUNC.format(
                     handle_name,
@@ -447,18 +556,84 @@ class TLMUSASourceWrapper:
                     globalAddress,
                     ",".join(global_dim),
                     ",".join(global_stride),
-                    ",".join(element_strides),
-                    ",".join(lower_corner),
-                    ",".join(upper_corner),
-                    smem_box_channel,
-                    smem_box_pixel,
                     interleave,
-                    swizzle,
-                    l2Promotion,
-                    oobFill,
+                    oob_fill,
+                    num_spatial,
+                    pad_w,
+                    pad_h,
+                    pad_d,
+                    stride_w,
+                    stride_h,
+                    stride_d,
+                    dilation_w,
+                    dilation_h,
+                    dilation_d,
                 )
 
         return tma_descripter_init
+
+    def generate_tma_output_dim_args(self) -> str:
+        output_dim_init = ""
+        if self.tma_im2col_output_dim_args is None:
+            return output_dim_init
+        for output_dim_var, args in self.tma_im2col_output_dim_args.items():
+            lanes = len(args)
+            if lanes == 2:
+                musa_type = "v2i32_t"
+            elif lanes == 3:
+                musa_type = "v3i32_t"
+            else:
+                raise ValueError(f"Unsupported im2col output-dimension lanes: {lanes}")
+            output_dim_init += TMA_IM2COL_OUTPUT_DIM_INIT_FUNC.format(
+                musa_type,
+                output_dim_var.name,
+                ", ".join(self._pythonic_expr(arg) for arg in args),
+            )
+        return output_dim_init
+
+    def _robust_pointer_expr(self, expr: tvm.tirx.PrimExpr) -> str:
+        if isinstance(expr, tvm.tirx.Var):
+            return expr.name
+        if isinstance(expr, tvm.tirx.Call) and getattr(expr.op, "name", "") in {
+            "tir.handle_add_byte_offset",
+            "tirx.handle_add_byte_offset",
+        }:
+            if len(expr.args) != 2:
+                raise ValueError(f"Unsupported robust descriptor byte offset: {expr}")
+            base = self._robust_pointer_expr(expr.args[0])
+            offset = self._pythonic_expr(expr.args[1])
+            return f"(reinterpret_cast<const char*>({base}) + ({offset}))"
+        if isinstance(expr, tvm.tirx.Call) and getattr(expr.op, "name", "") in {
+            "tir.address_of",
+            "tirx.address_of",
+        }:
+            if len(expr.args) != 1 or not isinstance(expr.args[0], tvm.tirx.BufferLoad):
+                raise ValueError(f"Unsupported robust descriptor address: {expr}")
+            load = expr.args[0]
+            if len(load.indices) != 1:
+                raise ValueError(f"Expected flattened robust descriptor address, got {expr}")
+            index = self._pythonic_expr(load.indices[0])
+            return f"(&({load.buffer.data.name}[{index}]))"
+        raise ValueError(f"Unsupported robust descriptor base pointer: {expr}")
+
+    def generate_robust_descriptor_args(self, desc_name_var_map: dict[str, tvm.tirx.Var]) -> str:
+        if self.robust_descriptor_args is None:
+            return ""
+
+        init = ""
+        for handle_name, desc_var in desc_name_var_map.items():
+            if desc_var not in self.robust_descriptor_args:
+                raise ValueError(f"Robust descriptor {desc_var} not found in {self.robust_descriptor_args}")
+            args = self.robust_descriptor_args[desc_var]
+            if len(args) != 4:
+                raise ValueError(f"Robust descriptor args must be (creator, desc, base, size), got {len(args)}")
+            _, _, base, size = args
+            init += ROBUST_DESC_INIT_FUNC.format(
+                handle_name,
+                self._robust_pointer_expr(base),
+                self._pythonic_expr(size),
+            )
+        return init
 
     def parse_source_information(self):
         if self.device_mod is None or self.host_mod is None:
@@ -511,6 +686,12 @@ class TLMUSASourceWrapper:
         for _, func in self.host_mod.functions.items():
             if "tma_descriptor_args" in func.attrs:
                 self.tma_descriptor_args = func.attrs["tma_descriptor_args"]
+            if "tma_im2col_output_dim_args" in func.attrs:
+                self.tma_im2col_output_dim_args = func.attrs["tma_im2col_output_dim_args"]
+            if "fast_divmod_host_args" in func.attrs:
+                self.fast_divmod_host_args = func.attrs["fast_divmod_host_args"]
+            if "robust_descriptor_args" in func.attrs:
+                self.robust_descriptor_args = func.attrs["robust_descriptor_args"]
             if "l2_persistent_map" in func.attrs:
                 self.l2_persistent_map[function_name] = func.attrs["l2_persistent_map"]
 

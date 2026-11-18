@@ -38,6 +38,22 @@ TVM_DLL BufferRegion NormalizeToBufferRegion(const PrimExpr &arg);
 TVM_DLL AccessRegion NormalizeToAccessRegion(
     const PrimExpr &arg, int default_access_mask = kAccessReadWrite);
 
+// Return whether any dimension of a region is provably empty. Simplifying
+// through the caller's analyzer also handles extents such as `n - n`.
+inline bool HasZeroExtentRegion(const ffi::Array<Range> &region,
+                                arith::Analyzer *analyzer) {
+  for (const Range &range : region) {
+    PrimExpr extent = range->extent;
+    if (analyzer != nullptr) {
+      extent = analyzer->Simplify(extent);
+    }
+    if (is_zero(extent)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Build a tvm_access_ptr(handle) from a BufferRegion.
 // - If `require_2d` is true, checks buffer ndim >= 2.
 // - For 1D regions (when allowed), offset=min, extent=extent.
@@ -111,17 +127,29 @@ inline bool IsLocalVarBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.var";
 }
 
+// Older public TVM versions do not define the unpacked FP4 storage type.
+// Keep the existing copy checks usable with both public datatype APIs.
+template <typename DType>
+inline auto IsUnpackedFP4Storage(DType dtype, int)
+    -> decltype(dtype.is_float4_e2m1_unpacked()) {
+  return dtype.is_float4_e2m1_unpacked();
+}
+template <typename DType>
+inline bool IsUnpackedFP4Storage(DType dtype, long) {
+  return dtype.code() == 131 && dtype.bits() == 8 && dtype.lanes() == 1;
+}
+
 // True when global packed FP4 is copied into f8f6f4/mxf8f6f4 unpacked FP4 SMEM.
 inline bool IsFP4PackedToUnpackedStorageCopy(DataType global_dtype,
                                              DataType shared_dtype) {
   return global_dtype.is_float4_e2m1fn() &&
-         shared_dtype.is_float4_e2m1_unpacked();
+         IsUnpackedFP4Storage(shared_dtype, 0);
 }
 
 inline bool IsValidTMALoadDtypePair(DataType global_dtype,
                                     DataType shared_dtype) {
-  if (global_dtype.is_float4_e2m1_unpacked() ||
-      shared_dtype.is_float4_e2m1_unpacked()) {
+  if (IsUnpackedFP4Storage(global_dtype, 0) ||
+      IsUnpackedFP4Storage(shared_dtype, 0)) {
     return IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype);
   }
   if (global_dtype == shared_dtype) {
@@ -133,7 +161,7 @@ inline bool IsValidTMALoadDtypePair(DataType global_dtype,
 inline bool IsValidTMAStoreDtypePair(DataType global_dtype,
                                      DataType shared_dtype) {
   return global_dtype == shared_dtype &&
-         !shared_dtype.is_float4_e2m1_unpacked();
+         !IsUnpackedFP4Storage(shared_dtype, 0);
 }
 
 inline bool IsValidTMADtypePair(bool is_load, DataType global_dtype,

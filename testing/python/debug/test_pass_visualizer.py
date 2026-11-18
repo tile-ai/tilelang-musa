@@ -6,8 +6,8 @@ Covers:
 - Structure-tree capture and per-pass diffing (build_pass_data via viewer)
 - HTML / text emission (emit_html, emit_txt)
 
-These run the CUDA lowering prologue on a small kernel. An explicit cuda target
-is passed so the pipeline does not depend on auto target detection.
+These run the MUSA lowering prologue on a small kernel. An explicit MUSA target
+is passed where auto target detection is not part of the behavior under test.
 """
 
 import tilelang
@@ -38,7 +38,6 @@ def _gemm_relu_kernel():
 
     @tilelang.jit(out_idx=[-1])
     def gemm_relu(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float32"):
-
         @T.prim_func
         def main(
             A: T.Tensor((M, K), dtype),
@@ -68,11 +67,11 @@ def _gemm_relu_kernel():
 
 
 def _build_small_module():
-    """Build an IRModule + resolved cuda target for the small kernel."""
+    """Build an IRModule and resolved MUSA target for the small kernel."""
     kernel = _gemm_relu_kernel()
     func = kernel.get_tir(M=128, N=128, K=128, block_M=64, block_N=64, block_K=32)
-    cuda_target = tvm.target.Target("cuda", host="llvm")
-    return build_module(func, target=cuda_target)
+    musa_target = tvm.target.Target("musa", host="llvm")
+    return build_module(func, target=musa_target)
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +79,7 @@ def _build_small_module():
 # ---------------------------------------------------------------------------
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_build_pass_stages_nonempty():
     """build_pass_stages returns an ordered list of (name, transform) pairs."""
     _mod, target = _build_small_module()
@@ -88,15 +87,20 @@ def test_build_pass_stages_nonempty():
 
     assert len(stages) > 0
     names = [name for name, _ in stages]
-    # The prologue must run LayoutInference and LowerTileOp.
+    assert names[0] == "BindTarget"
+    assert "LowerMUSAFastDivmod" in names
+    assert "LowerBlackwell2SM" not in names
     assert "LayoutInference" in names
     assert "LowerTileOp" in names
+    assert "LowerL2Persistent" in names
+    assert names.index("LayoutInference") < names.index("LowerTileOp")
+    assert names.index("LowerTileOp") < names.index("LowerL2Persistent")
     for name, transform in stages:
         assert isinstance(name, str)
         assert callable(transform)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_inspect_structure_renders_tree(capsys):
     """inspect_structure prints the SBlock tree with tile ops expanded by field."""
     mod, _target = _build_small_module()
@@ -110,7 +114,7 @@ def test_inspect_structure_renders_tree(capsys):
     assert "a_region" in out
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_capture_tree_returns_lines():
     """_capture_tree turns inspect_structure output into a list of text lines."""
     mod, _target = _build_small_module()
@@ -126,7 +130,7 @@ def test_capture_tree_returns_lines():
 # ---------------------------------------------------------------------------
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_musa
 def test_build_pass_data_and_emit(tmp_path):
     """End-to-end: run the example kernel through the pipeline and emit HTML/txt."""
     import os
@@ -140,7 +144,7 @@ def test_build_pass_data_and_emit(tmp_path):
         source = f.read()
 
     kwargs = {"M": 128, "N": 128, "K": 128, "block_M": 64, "block_N": 64, "block_K": 32}
-    name, stages = build_pass_data(kernel_path, None, "auto", kwargs, source)
+    name, stages = build_pass_data(kernel_path, None, "musa", kwargs, source)
 
     assert name == "gemm_relu"
     # source + (input) + at least one pass.
@@ -154,10 +158,13 @@ def test_build_pass_data_and_emit(tmp_path):
     html = emit_html(name, stages)
     assert "Pass browser" in html
     assert "gemm_relu" in html
+    assert "LowerMUSAFastDivmod" in html
+    assert "LowerBlackwell2SM" not in html
 
     txt = emit_txt(name, stages)
     assert "kernel: gemm_relu" in txt
     assert "T.gemm" in txt
+    assert "T.tl_gemm" in txt
 
 
 if __name__ == "__main__":

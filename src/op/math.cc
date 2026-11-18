@@ -92,5 +92,71 @@ TVM_REGISTER_OP("tl.round_ties_away_from_zero")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
                                round_ties_away_from_zero_op);
 
+const Op &fast_div() {
+  static const Op &op = Op::Get("tl.fast_div");
+  return op;
+}
+
+const Op &fast_mod() {
+  static const Op &op = Op::Get("tl.fast_mod");
+  return op;
+}
+
+const Op &musa_fast_div() {
+  static const Op &op = Op::Get("tl.musa_fast_div");
+  return op;
+}
+
+const Op &musa_fast_mod() {
+  static const Op &op = Op::Get("tl.musa_fast_mod");
+  return op;
+}
+
+const Op &musa_fast_div_device() {
+  static const Op &op = Op::Get("tl.musa_fast_div_device");
+  return op;
+}
+
+const Op &musa_fast_mod_device() {
+  static const Op &op = Op::Get("tl.musa_fast_mod_device");
+  return op;
+}
+
+TVM_REGISTER_OP("tl.fast_div")
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "fast_div");
+
+TVM_REGISTER_OP("tl.fast_mod")
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "fast_mod");
+
+TVM_REGISTER_OP("tl.musa_fast_div")
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "musa_fast_div");
+
+TVM_REGISTER_OP("tl.musa_fast_mod")
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "musa_fast_mod");
+
+TVM_REGISTER_OP("tl.musa_fast_div_device")
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "musa_fast_div_device");
+
+TVM_REGISTER_OP("tl.musa_fast_mod_device")
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "musa_fast_mod_device");
+
 } // namespace tl
 } // namespace tvm

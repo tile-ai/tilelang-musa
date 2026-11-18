@@ -293,7 +293,7 @@ def test_compile_timeout_env_parser_accepts_empty_zero_and_positive(monkeypatch)
 def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, capture_tilelang_logs):
     import tilelang.cache.kernel_cache as kernel_cache_mod
     from tilelang.cache.kernel_cache import KernelCache
-    from tilelang.env import env
+    from tilelang.env import CacheState, env
 
     cache_dir = tmp_path / "cache"
     tmp_dir = tmp_path / "tmp"
@@ -314,18 +314,28 @@ def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, c
 
     caplog.set_level(logging.INFO, logger="tilelang.jit.diagnostics")
     cache = KernelCache()
+    cache_state_was_enabled = CacheState.is_enabled()
+    # The MCC test runner disables the disk cache globally to avoid stale
+    # compiler artifacts. This test deliberately exercises the cache-miss
+    # diagnostics path, so override that environment setting locally.
+    monkeypatch.setenv("TILELANG_DISABLE_CACHE", "0")
+    env.enable_cache()
 
-    with pytest.raises(RuntimeError, match="compile failed"):
-        cache.cached(
-            _ScriptableFunc(),
-            out_idx=[],
-            target="cuda -arch=sm_120",
-            target_host=None,
-            execution_backend="tvm_ffi",
-            verbose=False,
-            pass_configs=None,
-            compile_flags=None,
-        )
+    try:
+        with pytest.raises(RuntimeError, match="compile failed"):
+            cache.cached(
+                _ScriptableFunc(),
+                out_idx=[],
+                target="cuda -arch=sm_120",
+                target_host=None,
+                execution_backend="tvm_ffi",
+                verbose=False,
+                pass_configs=None,
+                compile_flags=None,
+            )
+    finally:
+        if not cache_state_was_enabled:
+            env.disable_cache()
 
     messages = [record.getMessage() for record in caplog.records]
     assert any("TileLang JIT phase start: cache.compile" in message for message in messages)

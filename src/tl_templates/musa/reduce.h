@@ -169,6 +169,7 @@ struct SyncThreadsBarrier {
 
 template <int barrier_id> struct NamedBarrier {
   template <int stage = 0> static TL_DEVICE void sync() {
+    __syncwarp();
     auto phase = __musa_async_arrive(barrier_id + stage);
     __musa_async_wait(barrier_id + stage, phase);
   }
@@ -266,6 +267,90 @@ private:
     if constexpr (offset == scale) {
       return;
     } else {
+      Next::run_batch(x, red_buf);
+    }
+  }
+};
+
+// Reduces independently within each threadIdx.y lane. Each lane contains at
+// most one QY2 hardware warp and owns a disjoint workspace slice.
+template <class Reducer, int threads, int scale, int thread_offset = 0,
+          int subgroup_threads = threads, int batch_size = 1,
+          int workspace_stride = 0>
+struct AllReduceSubgroup {
+  static_assert(threads % scale == 0);
+  static_assert(subgroup_threads <= 128);
+
+  template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
+    if constexpr (threads == scale) {
+      return x;
+    } else {
+      return butterfly_reduce_scalar(x, red_buf);
+    }
+  }
+
+  template <typename T>
+  static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
+    if constexpr (threads != scale) {
+      butterfly_reduce_batch(x, red_buf);
+    }
+  }
+
+private:
+  using Next =
+      AllReduceSubgroup<Reducer, threads / 2, scale, thread_offset,
+                        subgroup_threads, batch_size, workspace_stride>;
+
+  static TL_DEVICE int workspace_base() {
+    constexpr int workspace_size =
+        workspace_stride > 0 ? workspace_stride * batch_size : subgroup_threads;
+    return static_cast<int>(threadIdx.y) * workspace_size;
+  }
+
+  template <typename T>
+  static TL_DEVICE T butterfly_reduce_scalar(T x, T *red_buf) {
+    constexpr int offset = threads / 2;
+    if constexpr (offset >= 32) {
+      T *subgroup_buf = red_buf + workspace_base();
+      __syncwarp();
+      subgroup_buf[threadIdx.x - thread_offset] = x;
+      __syncwarp();
+      x = Reducer()(x, subgroup_buf[(threadIdx.x - thread_offset) ^ offset]);
+    } else {
+      x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
+    }
+    if constexpr (offset == scale) {
+      return x;
+    } else {
+      return Next::run(x, red_buf);
+    }
+  }
+
+  template <typename T>
+  static TL_DEVICE void butterfly_reduce_batch(T *x, T *red_buf) {
+    constexpr int offset = threads / 2;
+    if constexpr (offset >= 32) {
+      T *subgroup_buf = red_buf + workspace_base();
+      __syncwarp();
+#pragma unroll
+      for (int i = 0; i < batch_size; ++i) {
+        subgroup_buf[(threadIdx.x - thread_offset) + i * workspace_stride] =
+            x[i];
+      }
+      __syncwarp();
+#pragma unroll
+      for (int i = 0; i < batch_size; ++i) {
+        x[i] = Reducer()(x[i],
+                         subgroup_buf[((threadIdx.x - thread_offset) ^ offset) +
+                                      i * workspace_stride]);
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < batch_size; ++i) {
+        x[i] = Reducer()(x[i], tl::shfl_xor_sync(uint32_t(-1), x[i], offset));
+      }
+    }
+    if constexpr (offset != scale) {
       Next::run_batch(x, red_buf);
     }
   }

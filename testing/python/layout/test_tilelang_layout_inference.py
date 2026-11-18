@@ -133,5 +133,40 @@ def test_copy_readback_from_fully_replicated_fragment_uses_rep_guard():
     _assert_single_thread_replicated_readback(src)
 
 
+@pytest.mark.parametrize("arch", ["mp_31"])
+def test_annotated_fragment_uses_consumer_thread_range(arch):
+    producer_threads = 128
+    consumer_threads = 512
+
+    @T.prim_func
+    def main(Out: T.Tensor((producer_threads + consumer_threads,), T.float32)):
+        with T.Kernel(1, threads=producer_threads + consumer_threads):
+            tid = T.get_thread_binding()
+            if tid < producer_threads:
+                Out[tid] = T.float32(0)
+            else:
+                fragment = T.alloc_fragment((consumer_threads,), T.float32)
+                T.annotate_layout({fragment: T.Fragment(fragment.shape, lambda i: (i, 0))})
+                T.fill(fragment, T.float32(1))
+                for i in T.Parallel(consumer_threads):
+                    fragment[i] = fragment[i] + T.float32(1)
+                for i in T.Parallel(consumer_threads):
+                    Out[producer_threads + i] = fragment[i]
+
+    target = Target({"kind": "musa", "arch": arch})
+    with target:
+        artifact = tilelang.lower(
+            main,
+            target=target,
+            enable_device_compile=False,
+        )
+    source = str(artifact.kernel_source)
+    consumer_branch = source.index("} else {")
+    consumer_source = source[consumer_branch:]
+
+    assert "threadIdx.x) < 512" not in consumer_source
+    assert "Out[((int)threadIdx.x)] = fragment[0]" in consumer_source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

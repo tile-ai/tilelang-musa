@@ -25,7 +25,6 @@ def require_musa():
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS)
 def kernel_with_vectorized_scalar_force_async_copy_to_shared():
-
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -42,7 +41,6 @@ def kernel_with_vectorized_scalar_force_async_copy_to_shared():
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS_DISABLE_THREAD_STORAGE_SYNC)
 def kernel_with_vectorized_scalar_force_async_copy_to_shared_disable_thread_storage_sync():
-
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -59,7 +57,6 @@ def kernel_with_vectorized_scalar_force_async_copy_to_shared_disable_thread_stor
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS)
 def kernel_with_robust_load():
-
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -76,8 +73,42 @@ def kernel_with_robust_load():
 
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS)
-def kernel_with_robust_async_copy():
+def kernel_with_fp16_robust_load():
+    @T.prim_func
+    def main(
+        src: T.Tensor([4], T.float16),
+        out: T.Tensor([4], T.float16),
+    ):
+        with T.Kernel(1, threads=4) as _:
+            tid = T.get_thread_binding()
+            src_local = T.alloc_local([1], T.float16)
+            robust_desc = T.make_robust_desc(T.address_of(src[1]), 4)
+            T.copy(src[tid], src_local, src_robust_desc=robust_desc)
+            out[tid] = src_local[0]
 
+    return main
+
+
+@tilelang.jit(target="musa", execution_backend="cython", out_idx=[1], pass_configs=PASS_CONFIGS)
+def kernel_with_select_robust_size():
+    @T.prim_func
+    def main(
+        src: T.Tensor([4], T.float32),
+        out: T.Tensor([4], T.float32),
+        n: T.int32,
+    ):
+        with T.Kernel(1, threads=4) as _:
+            tid = T.get_thread_binding()
+            src_local = T.alloc_local([1], T.float32)
+            robust_desc = T.make_robust_desc(T.address_of(src[1]), T.Select(n > 0, 8, 4))
+            T.copy(src[tid], src_local, src_robust_desc=robust_desc)
+            out[tid] = src_local[0]
+
+    return main
+
+
+@tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS)
+def kernel_with_robust_async_copy():
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -94,7 +125,6 @@ def kernel_with_robust_async_copy():
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS)
 def kernel_with_zero_sized_robust_async_copy():
-
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -111,7 +141,6 @@ def kernel_with_zero_sized_robust_async_copy():
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS)
 def kernel_with_scalar_robust_copy_to_shared():
-
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -129,7 +158,6 @@ def kernel_with_scalar_robust_copy_to_shared():
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS)
 def kernel_with_scalar_robust_force_async_copy_to_shared():
-
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -147,7 +175,6 @@ def kernel_with_scalar_robust_force_async_copy_to_shared():
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS)
 def kernel_with_vectorized_scalar_robust_force_async_copy_to_shared():
-
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -165,7 +192,6 @@ def kernel_with_vectorized_scalar_robust_force_async_copy_to_shared():
 
 @tilelang.jit(target="musa", out_idx=[1], pass_configs=PASS_CONFIGS_DISABLE_THREAD_STORAGE_SYNC)
 def kernel_with_vectorized_scalar_robust_force_async_copy_to_shared_disable_thread_storage_sync():
-
     @T.prim_func
     def main(
         src: T.Tensor([4], T.float32),
@@ -207,6 +233,24 @@ def test_robust_copy_numerical(kernel_builder):
 
 
 @tilelang.testing.requires_musa_compute_version_ge(2, 2)
+def test_fp16_robust_copy_numerical():
+    require_musa()
+
+    src = torch.tensor([1.0, -2.0, 3.0, -4.0], device="musa", dtype=torch.float16)
+    expected = torch.tensor([0.0, -2.0, 3.0, 0.0], device="musa", dtype=torch.float16)
+    out = kernel_with_fp16_robust_load()(src)
+
+    torch.testing.assert_close(out, expected, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_musa_compute_version_ge(2, 2)
+def test_cython_robust_descriptor_select_size_compiles():
+    # Compilation exercises the generated host wrapper, including the C++
+    # conditional expression used to construct the descriptor.
+    kernel_with_select_robust_size()
+
+
+@tilelang.testing.requires_musa_compute_version_ge(2, 2)
 def test_scalar_robust_copy_to_shared_get_tir():
     func = kernel_with_scalar_robust_copy_to_shared.get_tir()
     assert func is not None
@@ -216,7 +260,9 @@ def test_scalar_robust_copy_to_shared_get_tir():
 def test_scalar_robust_force_async_copy_to_shared_source():
     code = kernel_with_scalar_robust_force_async_copy_to_shared().get_kernel_source()
 
+    assert "__attribute__((grid_constant)) const tl::robust_param_desc_t src_robust_desc_0" in code
     assert "tl::cp_async_gs_robust<4>" in code
+    assert "tl::make_robust_desc(" not in code
     assert "tl::robust_load" not in code
 
 

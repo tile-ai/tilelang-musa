@@ -25,8 +25,10 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -38,10 +40,6 @@ using namespace tirx;
 using namespace ffi;
 
 namespace {
-
-PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
-  return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
-}
 
 PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
   PrimExpr elements_i64 = cast(DataType::Int(64), elements);
@@ -111,6 +109,10 @@ bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
 }
 
+bool GetIsLsuCacheHint(const CopyNode &op) {
+  return GetBoolAnnotation(op, "lsu_cache_hint");
+}
+
 int GetEvictionPolicy(const CopyNode &op) {
   if (auto val = op.annotations.Get("eviction_policy")) {
     if (auto int_val = val->as<IntImmNode>()) {
@@ -137,6 +139,58 @@ int GetOuterCachePolicy(const CopyNode &op) {
   }
   return 2; // default: cache_normal
 }
+
+int GetLsuChrnt(const CopyNode &op) {
+  if (auto val = op.annotations.Get("lsu_chrnt")) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value;
+    }
+  }
+  return 0;
+}
+
+int GetLsuL2Policy(const CopyNode &op) {
+  if (auto val = op.annotations.Get("lsu_l2")) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value;
+    }
+  }
+  return 0;
+}
+
+bool GetLsuVolatile(const CopyNode &op) {
+  return GetBoolAnnotation(op, "lsu_volatile");
+}
+
+class LsuCacheHintInjector : public StmtExprMutator {
+public:
+  LsuCacheHintInjector(Buffer source, int inner, int outer, int chrnt, int l2,
+                       bool is_volatile)
+      : source_(std::move(source)), inner_(inner), outer_(outer), chrnt_(chrnt),
+        l2_(l2), is_volatile_(is_volatile) {}
+
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    if (!op->buffer->data.same_as(source_->data)) {
+      return StmtExprMutator::VisitExpr_(op);
+    }
+    PrimExpr load = GetRef<PrimExpr>(op);
+    const Op &intrin =
+        is_volatile_ ? lsu_ld_volatile_cache_hint() : lsu_ld_cache_hint();
+    return Call(op->dtype, intrin,
+                {load, IntImm(DataType::Int(32), inner_),
+                 IntImm(DataType::Int(32), outer_),
+                 IntImm(DataType::Int(32), chrnt_),
+                 IntImm(DataType::Int(32), l2_)});
+  }
+
+private:
+  Buffer source_;
+  int inner_;
+  int outer_;
+  int chrnt_;
+  int l2_;
+  bool is_volatile_;
+};
 
 bool GetForceAsyncCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "force_async_copy");
@@ -181,6 +235,27 @@ PrimExpr GetLeaderScopeThreads(const CopyNode &op, const LowerArgs &T) {
     return IntImm(DataType::Int(32), int_val->value);
   }
   return T.thread_bounds->extent;
+}
+
+// Im2Col does not carry a CopyNode annotation contract. Preserve develop's
+// extent-scoped election for that path while ordinary TMA copies use the
+// annotation-aware overload below.
+PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
+  return Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent});
+}
+
+PrimExpr MakeTmaLeaderCondition(const CopyNode &op, const LowerArgs &T) {
+  // The default TMA contract needs one leader for the current lowering thread
+  // domain.  Use its statically known first thread, matching the historical
+  // MUSA lowering and avoiding a costly active-lane election in large
+  // producer/consumer kernels.  An explicit leader scope requests multiple
+  // independently elected leaders (for example, one leader per warp), so keep
+  // shuffle election for that opt-in case.
+  if (op.annotations.Get("leader_scope_threads")) {
+    return Call(DataType::Bool(), tl_shuffle_elect(),
+                {GetLeaderScopeThreads(op, T)});
+  }
+  return T.thread_var == T.thread_bounds->min;
 }
 
 int to_MUtensorDescriptorDataType(DataType dtype) {
@@ -293,6 +368,46 @@ Optional<TValue> GetLayoutHintByKey(const Map<Layout, TValue> &hint_map,
   return Optional<TValue>();
 }
 
+static bool CanProbeCanonicalSqmmaLayout(int mat_stride, int mat_continuous,
+                                         int element_size, bool k_inner,
+                                         int swizzle_granularity) {
+  if (mat_stride <= 0 || mat_continuous <= 0) {
+    return false;
+  }
+  if (element_size != 4 && element_size != 8 && element_size != 16 &&
+      element_size != 32) {
+    return false;
+  }
+  int sg = k_inner ? 16 : std::max(16, element_size * 2);
+  if (swizzle_granularity != 0) {
+    if (!(!k_inner && element_size == 16)) {
+      if (swizzle_granularity != sg) {
+        return false;
+      }
+    } else {
+      sg = swizzle_granularity;
+    }
+  }
+  if (sg <= 0 || sg > 256 || 256 % sg != 0) {
+    return false;
+  }
+  const int64_t max_chunk_cols = 256LL * 8 / element_size;
+  const int64_t chunk_cols =
+      (mat_continuous < max_chunk_cols) ? mat_continuous : max_chunk_cols;
+  if (chunk_cols <= 0 || mat_continuous % chunk_cols != 0) {
+    return false;
+  }
+  const int64_t chunk_bits =
+      static_cast<int64_t>(mat_stride) * chunk_cols * element_size;
+  if (chunk_bits % 8 != 0) {
+    return false;
+  }
+  const int64_t swizzle_bytes = chunk_bits / 8;
+  const int64_t swizzle_cycle_bytes = (256 / sg) * 256LL;
+  return swizzle_bytes >= swizzle_cycle_bytes ||
+         (swizzle_bytes > 0 && swizzle_cycle_bytes % swizzle_bytes == 0);
+}
+
 Optional<bool> GetLayoutKMajor(const LowerArgs &T, const Buffer &buf) {
   auto layout = GetActiveLayout(T, buf);
   if (!layout.defined()) {
@@ -301,6 +416,37 @@ Optional<bool> GetLayoutKMajor(const LowerArgs &T, const Buffer &buf) {
   auto k_major = GetLayoutHintByKey(T.layout_k_major, layout.value());
   if (k_major.has_value()) {
     return Optional<bool>(k_major.value()->value);
+  }
+  if (TargetIsPH1(T.target)) {
+    for (const auto &[sibling, sibling_layout] : T.layout_map) {
+      if (!sibling->data.same_as(buf->data) || sibling->shape.size() != 2) {
+        continue;
+      }
+      auto stride = as_const_int(sibling->shape[0]);
+      auto continuous = as_const_int(sibling->shape[1]);
+      if (stride == nullptr || continuous == nullptr || *stride <= 0 ||
+          *stride > std::numeric_limits<int>::max() || *continuous <= 0 ||
+          *continuous > std::numeric_limits<int>::max() ||
+          sibling->dtype.lanes() != 1) {
+        continue;
+      }
+      int swizzle_granularity = 0;
+      for (bool candidate_k_major : {true, false}) {
+        if (!CanProbeCanonicalSqmmaLayout(
+                static_cast<int>(*stride), static_cast<int>(*continuous),
+                sibling->dtype.bits(), candidate_k_major,
+                swizzle_granularity)) {
+          continue;
+        }
+        auto candidate = MakeSqmmaABLayout(
+            static_cast<int>(*stride), static_cast<int>(*continuous),
+            static_cast<int>(*continuous), sibling->dtype.bits(),
+            candidate_k_major);
+        if (StructuralEqual()(sibling_layout, candidate)) {
+          return Optional<bool>(candidate_k_major);
+        }
+      }
+    }
   }
   return Optional<bool>();
 }
@@ -340,11 +486,15 @@ namespace musa {
 struct TMAIm2ColDesc {
   size_t rank;
   int data_type;
+  bool is_musa{true};
   Array<PrimExpr> global_shape;
   Array<PrimExpr> global_stride;
   Array<PrimExpr> elem_stride;
   Array<PrimExpr> lower_corner;
   Array<PrimExpr> upper_corner;
+  Array<PrimExpr> conv_padding;
+  Array<PrimExpr> conv_dilation;
+  Array<PrimExpr> conv_stride;
   PrimExpr global_addr;
   int smem_box_pixel;
   int smem_box_channel;
@@ -355,8 +505,6 @@ struct TMAIm2ColDesc {
 
   Array<PrimExpr> EncodeCallArgs() const {
     Array<PrimExpr> args;
-    args.reserve(rank * 5 + 5);
-
     args.push_back(data_type);
     args.push_back(static_cast<int>(rank));
     args.push_back(global_addr);
@@ -364,18 +512,36 @@ struct TMAIm2ColDesc {
       args.push_back(e);
     for (auto e : global_stride)
       args.push_back(e);
-    for (auto e : elem_stride)
-      args.push_back(e);
-    for (auto e : lower_corner)
-      args.push_back(e);
-    for (auto e : upper_corner)
-      args.push_back(e);
-    args.push_back(smem_box_pixel);
-    args.push_back(smem_box_channel);
-    args.push_back(interleave);
-    args.push_back(swizzle);
-    args.push_back(l2_promotion);
-    args.push_back(oob_fill);
+    if (is_musa) {
+      ICHECK_EQ(conv_padding.size(), 3U);
+      ICHECK_EQ(conv_dilation.size(), 3U);
+      ICHECK_EQ(conv_stride.size(), 3U);
+      for (auto e : conv_padding)
+        args.push_back(e);
+      for (auto e : conv_dilation)
+        args.push_back(e);
+      for (auto e : conv_stride)
+        args.push_back(e);
+      args.push_back(interleave);
+      args.push_back(oob_fill);
+      args.push_back(static_cast<int>(rank) - 2);
+      args.push_back(smem_box_pixel);
+      args.push_back(smem_box_channel);
+      args.push_back(swizzle);
+    } else {
+      for (auto e : elem_stride)
+        args.push_back(e);
+      for (auto e : lower_corner)
+        args.push_back(e);
+      for (auto e : upper_corner)
+        args.push_back(e);
+      args.push_back(smem_box_pixel);
+      args.push_back(smem_box_channel);
+      args.push_back(interleave);
+      args.push_back(swizzle);
+      args.push_back(l2_promotion);
+      args.push_back(oob_fill);
+    }
 
     return args;
   }
@@ -663,6 +829,7 @@ Stmt Copy::Lower(const CopyNode &op, const LowerArgs &T,
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
   }
+  return Stmt();
 }
 
 Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
@@ -799,6 +966,14 @@ Stmt Copy::LowerNormal(const CopyNode &op, const LowerArgs &T,
     }
 
     Stmt body = lowered_body;
+    if (GetIsLsuCacheHint(node)) {
+      ICHECK_EQ(node.src.scope(), "global")
+          << "LSU cache hints require a global-memory source.";
+      LsuCacheHintInjector injector(
+          node.src, GetInnerCachePolicy(node), GetOuterCachePolicy(node),
+          GetLsuChrnt(node), GetLsuL2Policy(node), GetLsuVolatile(node));
+      body = injector(body);
+    }
     PrimExpr src_robust_desc = GetSourceRobustDesc(node);
     if (src_robust_desc.defined()) {
       ICHECK(TargetIsMusa(T.target))
@@ -1774,8 +1949,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
     // Thread-gated block: expect_tx + tma_load (+ optional arrive)
     Stmt producer =
-        IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
-                   SeqStmt(producer_seq));
+        IfThenElse(MakeTmaLeaderCondition(op, T), SeqStmt(producer_seq));
 
     // tma_copy (from T.tma_copy()) is fire-and-forget: only emit the
     // producer (expect_tx + tma_load). The user manages synchronization
@@ -1793,8 +1967,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
-                        tma_copy);
+  tma_copy = IfThenElse(MakeTmaLeaderCondition(op, T), tma_copy);
 
   return tma_copy;
 }
@@ -1940,8 +2113,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     }
 
     Stmt producer =
-        IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
-                   SeqStmt(producer_seq));
+        IfThenElse(MakeTmaLeaderCondition(op, T), SeqStmt(producer_seq));
 
     // tma_copy (from T.tma_copy()) is fire-and-forget: only emit the
     // producer (expect_tx + tma_load). The user manages synchronization
@@ -1959,9 +2131,282 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
-                        tma_copy);
+  tma_copy = IfThenElse(MakeTmaLeaderCondition(op, T), tma_copy);
   return tma_copy;
+}
+
+int GetIm2ColCachePolicy(const Im2ColOpNode &op, const char* key) {
+  if (auto val = op.annotations_.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value;
+    }
+  }
+  // Keep the im2col path aligned with tma_copy() when only the legacy
+  // eviction_policy argument is supplied.
+  switch (op.eviction_policy_) {
+    case 1:
+      return 1;  // cache_once
+    case 2:
+      return 3;  // cache_persist
+    default:
+      return 2;  // cache_normal
+  }
+}
+
+int GetIm2ColInnerCachePolicy(const Im2ColOpNode &op) {
+  return GetIm2ColCachePolicy(op, "inner_cache_policy");
+}
+
+int GetIm2ColOuterCachePolicy(const Im2ColOpNode &op) {
+  return GetIm2ColCachePolicy(op, "outer_cache_policy");
+}
+
+Stmt LowerIm2Col(const Im2ColOpNode &op, const LowerArgs &T,
+                 arith::Analyzer *analyzer) {
+  auto fallback = [&]() { return LowerIm2ColFallback(op, T, analyzer); };
+  if (op.spatial_rank_ < 1 || op.spatial_rank_ > 3) {
+    return fallback();
+  }
+  const Buffer &src = op.src_;
+  const Buffer &dst_unmapped = op.dst_;
+  if (src.scope() != "global" ||
+      (dst_unmapped.scope() != "shared" &&
+       dst_unmapped.scope() != "shared.dyn") ||
+      src->dtype != dst_unmapped->dtype ||
+      src->shape.size() != static_cast<size_t>(op.spatial_rank_ + 2)) {
+    return fallback();
+  }
+  if (!analyzer->CanProveEqual(FloorMod(op.dim_c_ * src->dtype.bytes(), 16),
+                               0)) {
+    LOG(WARNING) << "MUSA TME im2col requires dim_c * element_bytes to be "
+                    "16-byte aligned; falling back to SIMT.";
+    return fallback();
+  }
+
+  Buffer dst = dst_unmapped;
+  Layout shared_layout;
+  if (auto active_layout = GetActiveLayout(T, dst_unmapped)) {
+    shared_layout = active_layout.value();
+  }
+  if (T.buffer_remap.count(dst_unmapped)) {
+    dst = T.buffer_remap.at(dst_unmapped);
+  }
+
+  TMAIm2ColDesc desc;
+  desc.rank = src->shape.size();
+  desc.data_type = to_MUtensorDescriptorDataType(src->dtype);
+  desc.global_addr = src->data;
+  desc.global_shape = ReverseArray(src->shape).Map([](PrimExpr e) {
+    return cast(DataType::UInt(64), e);
+  });
+  if (!src->strides.empty()) {
+    desc.global_stride = ReverseArray(src->strides);
+  } else {
+    PrimExpr stride = 1;
+    for (const PrimExpr &shape : ReverseArray(src->shape)) {
+      desc.global_stride.push_back(stride);
+      stride *= shape;
+    }
+  }
+  ICHECK(is_one(desc.global_stride[0]));
+  desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
+    return cast(DataType::UInt(64), e) * src->dtype.bytes();
+  });
+  for (int axis = 0; axis < 3; ++axis) {
+    desc.conv_padding.push_back(axis < op.spatial_rank_ ? op.paddings_[axis]
+                                                        : PrimExpr(0));
+    desc.conv_dilation.push_back(axis < op.spatial_rank_ ? op.dilations_[axis]
+                                                         : PrimExpr(0));
+    desc.conv_stride.push_back(axis < op.spatial_rank_ ? op.strides_[axis]
+                                                       : PrimExpr(0));
+  }
+  desc.smem_box_pixel = 0;
+  desc.smem_box_channel = 0;
+  desc.interleave = static_cast<int>(MU_TENSOR_DESCRIPTOR_INTERLEAVE_NONE);
+  desc.oob_fill = 0;
+  desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_NONE);
+
+  bool linear_layout =
+      !shared_layout.defined() || IsMatrixLinearLayout(shared_layout);
+  if (!linear_layout) {
+    auto k_major = GetLayoutKMajor(T, dst_unmapped);
+    if (!k_major.has_value()) {
+      LOG(WARNING) << "Cannot determine shared layout for MUSA TME im2col; "
+                      "falling back to SIMT.";
+      return fallback();
+    }
+    int elem_bytes = dst->dtype.bytes();
+    if (elem_bytes == 1 || k_major.value()) {
+      desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_B16);
+    } else if (elem_bytes == 2) {
+      desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_B32);
+    } else if (elem_bytes == 4) {
+      desc.swizzle = static_cast<int>(MU_SMEM_SWIZZLE_GRANULARITY_B64);
+    } else {
+      return fallback();
+    }
+  }
+
+  int split_count = 1;
+  PrimExpr split_size_expr = op.dim_c_;
+  PrimExpr split_stride = 0;
+  auto dim_c = as_const_int(op.dim_c_);
+  int elem_bytes =
+      std::max(1, static_cast<int>(TMABytesFromElements(1, dst->dtype)));
+  // MP31 cannot select an im2col TME load whose channel row is wider than
+  // 256 bytes. Split only the affected SQMMA layout into TME-compatible
+  // chunks; other architectures keep their original single-load path.
+  if (TargetIsPH1(T.target) && dim_c != nullptr &&
+      (*dim_c) * elem_bytes > 256) {
+    auto sqmma_opt = GetLayoutSQMMA(T, dst);
+    auto k_major_opt = GetLayoutKMajor(T, dst);
+    if (!sqmma_opt.has_value() && !dst.same_as(dst_unmapped)) {
+      sqmma_opt = GetLayoutSQMMA(T, dst_unmapped);
+    }
+    if (!k_major_opt.has_value() && !dst.same_as(dst_unmapped)) {
+      k_major_opt = GetLayoutKMajor(T, dst_unmapped);
+    }
+    if (!sqmma_opt.value_or(false) || !k_major_opt.has_value()) {
+      LOG(WARNING) << "Cannot split oversized MUSA TME im2col channel tile; "
+                      "falling back to SIMT.";
+      return fallback();
+    }
+
+    int split_size = -1;
+    if (!k_major_opt.value()) {
+      split_size = GetLayoutSqmmaInstSplit(T, dst).value_or(-1);
+      if (split_size < 0 && !dst.same_as(dst_unmapped)) {
+        split_size = GetLayoutSqmmaInstSplit(T, dst_unmapped).value_or(-1);
+      }
+    } else {
+      split_size = 256 / elem_bytes;
+    }
+    if (split_size <= 0 || (*dim_c) <= split_size ||
+        ((*dim_c) % split_size) != 0) {
+      LOG(WARNING) << "MUSA TME im2col channel tile " << *dim_c
+                   << " cannot be split for the active SQMMA layout; "
+                      "falling back to SIMT.";
+      return fallback();
+    }
+    split_count = (*dim_c) / split_size;
+    split_size_expr = IntImm(DataType::Int(32), split_size);
+    split_stride = analyzer->Simplify(split_size_expr * op.dim_nx_);
+  }
+
+  PrimExpr shared_offset = 0;
+  PrimExpr shared_stride = 1;
+  std::vector<PrimExpr> shared_strides(dst_unmapped->shape.size());
+  for (size_t i = 0; i < dst_unmapped->shape.size(); ++i) {
+    size_t axis = dst_unmapped->shape.size() - 1 - i;
+    shared_strides[axis] = shared_stride;
+    shared_stride *= dst_unmapped->shape[axis];
+  }
+  ICHECK_EQ(op.dstRegion_->region.size(), shared_strides.size());
+  for (size_t i = 0; i < shared_strides.size(); ++i) {
+    shared_offset += op.dstRegion_->region[i]->min * shared_strides[i];
+  }
+  shared_offset = analyzer->Simplify(shared_offset);
+
+  Call create_desc = Call(DataType::Handle(), create_tma_im2col_descriptor(),
+                          desc.EncodeCallArgs());
+  PrimExpr mbar_handle;
+  bool user_managed_barrier = false;
+  if (auto user_barrier = op.annotations_.Get("barrier")) {
+    mbar_handle = Downcast<PrimExpr>(user_barrier.value());
+    user_managed_barrier = true;
+  } else if (T.alloc_mbarrier) {
+    int barrier_id =
+        T.alloc_mbarrier(1, SanitizeIdentifierPart(src->name) + "_im2col_" +
+                                SanitizeIdentifierPart(dst_unmapped->name));
+    mbar_handle = BufferLoad(T.mbarrier_buffer->value(),
+                             {IntImm(DataType::Int(32), barrier_id)});
+  }
+  PrimExpr barrier_arg =
+      mbar_handle.defined() ? mbar_handle : IntImm(DataType::Int(32), 0);
+
+  PrimExpr tile_elements = analyzer->Simplify(op.dim_c_ * op.dim_nx_);
+  auto emit_loads = [&](PrimExpr load_barrier) -> Stmt {
+    auto emit_load = [&](PrimExpr shared_addr, const Array<PrimExpr> &coords,
+                         PrimExpr dim_c) -> Stmt {
+      Array<PrimExpr> args{create_desc, load_barrier, shared_addr};
+      for (const PrimExpr &coord : coords)
+        args.push_back(coord);
+      args.push_back(op.coord_n_);
+      for (const PrimExpr &position : op.kernel_positions_)
+        args.push_back(position);
+      args.push_back(dim_c);
+      args.push_back(op.dim_nx_);
+      for (const PrimExpr &output_dim : op.output_dims_)
+        args.push_back(output_dim);
+      args.push_back(op.eviction_policy_);
+      args.push_back(GetIm2ColInnerCachePolicy(op));
+      args.push_back(GetIm2ColOuterCachePolicy(op));
+      return Evaluate(
+          Call(DataType::Handle(), tma_load_im2col(), std::move(args)));
+    };
+
+    if (split_count > 1) {
+      Var split_var("im2col_split");
+      Array<PrimExpr> coords = op.coords_;
+      coords.Set(0, coords[0] + split_size_expr * split_var);
+      PrimExpr chunk_elements =
+          analyzer->Simplify(split_size_expr * op.dim_nx_);
+      PrimExpr shared_addr = dst.access_ptr(
+          2, DataType::Handle(), 1, shared_offset + split_stride * split_var,
+          chunk_elements);
+      return For(split_var, 0, split_count, ForKind::kUnrolled,
+                 emit_load(shared_addr, coords, split_size_expr));
+    }
+
+    PrimExpr shared_addr =
+        dst.access_ptr(2, DataType::Handle(), 1, shared_offset, tile_elements);
+    return emit_load(shared_addr, op.coords_, op.dim_c_);
+  };
+
+  Stmt load = emit_loads(barrier_arg);
+  const auto *barrier_load = barrier_arg.as<BufferLoadNode>();
+  if (TargetIsPH1(T.target) && barrier_load != nullptr &&
+      barrier_load->indices.size() == 1 &&
+      barrier_load->buffer->shape.size() == 1 &&
+      as_const_int(barrier_load->indices[0]) == nullptr) {
+    const int64_t *stage_count = as_const_int(barrier_load->buffer->shape[0]);
+    if (stage_count != nullptr && *stage_count > 0) {
+      // Current mtcc cannot select the MP31 im2col TME intrinsic when its
+      // barrier ID is dynamic. Dispatch over the actual pipeline stages so each
+      // intrinsic sees an immediate ID while preserving the staged pipeline.
+      Stmt dispatch = Evaluate(0);
+      for (int64_t stage = *stage_count - 1; stage >= 0; --stage) {
+        PrimExpr stage_imm = IntImm(barrier_load->indices[0].dtype(), stage);
+        PrimExpr fixed_barrier = BufferLoad(barrier_load->buffer, {stage_imm});
+        dispatch = IfThenElse(barrier_load->indices[0] == stage_imm,
+                              emit_loads(fixed_barrier), dispatch);
+      }
+      load = dispatch;
+    }
+  }
+
+  Array<Stmt> producer_seq;
+  if (mbar_handle.defined()) {
+    PrimExpr total_bytes =
+        analyzer->Simplify(tile_elements * dst->dtype.bytes());
+    producer_seq.push_back(Evaluate(Call(
+        DataType::Handle(), mbarrier_expect_tx(), {mbar_handle, total_bytes})));
+  }
+  producer_seq.push_back(load);
+  if (mbar_handle.defined() && !user_managed_barrier) {
+    producer_seq.push_back(Evaluate(Call(
+        DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle})));
+  }
+  Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
+                             SeqStmt(std::move(producer_seq)));
+  producer = AttrStmt(dst->data, "tl.tma_copy_write_buffer",
+                      IntImm(DataType::Int(32), 1), producer);
+  if (!mbar_handle.defined() || user_managed_barrier) {
+    return producer;
+  }
+  Stmt wait = Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
+                            {mbar_handle, T.mbar_phase_expr}));
+  return SeqStmt({producer, wait});
 }
 
 } // namespace musa
@@ -1977,6 +2422,12 @@ bool RegisterMUSACopy() {
       100,
       musa::Copy::InferLayout,
       musa::Copy::Lower,
+  });
+  RegisterIm2ColImpl(Im2ColImpl{
+      "musa.Im2Col",
+      MatchMUSACopyTarget,
+      100,
+      musa::LowerIm2Col,
   });
   return true;
 }

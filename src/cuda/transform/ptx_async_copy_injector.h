@@ -21,7 +21,8 @@ PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const tvm::tirx::Stmt &body, bool enable_auto_async_copy,
                    bool async_without_async_commit_wait,
                    bool disable_force_async_wait = false,
-                   bool sync_inside_conditionals = false);
+                   bool sync_inside_conditionals = false,
+                   bool disable_predicated_async_copy = false);
 
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const tvm::tirx::Stmt &body,

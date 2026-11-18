@@ -104,8 +104,8 @@ def run_autotune(M, N, K, M_value=None, N_value=None, K_value=None, return_kerne
     actual_N = _resolve(N, N_value, "N")
     actual_K = _resolve(K, K_value, "K")
 
-    a = torch.randn(actual_M, actual_K, dtype=torch.float16).cuda()
-    b = torch.randn(actual_N, actual_K, dtype=torch.float16).cuda()
+    a = torch.randn(actual_M, actual_K, dtype=torch.float16, device="musa")
+    b = torch.randn(actual_N, actual_K, dtype=torch.float16, device="musa")
 
     if return_kernel:
         with set_autotune_inputs([a, b]):

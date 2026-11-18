@@ -23,8 +23,9 @@ def tma_add_one_1d(A, dim0, dtype="float32"):
         T.tma_copy(A[0], tile, barrier=mbar)
         T.barrier_arrive(mbar)
         T.mbarrier_wait_parity(mbar, 0)
-        for i in T.grid(dim0):
+        for i in T.Parallel(dim0):
             tile[i] = tile[i] + 1
+        T.sync_threads()
         T.copy(tile, C[0])
 
     return C
@@ -42,8 +43,9 @@ def tma_add_one_2d(A, dim0, dim1, dtype="float32"):
         T.tma_copy(A[0, 0], tile, barrier=mbar)
         T.barrier_arrive(mbar)
         T.mbarrier_wait_parity(mbar, 0)
-        for i, j in T.grid(dim0, dim1):
+        for i, j in T.Parallel(dim0, dim1):
             tile[i, j] = tile[i, j] + 1
+        T.sync_threads()
         T.copy(tile, C[0, 0])
 
     return C
@@ -61,8 +63,9 @@ def tma_add_one_3d(A, dim0, dim1, dim2, dtype="float32"):
         T.tma_copy(A[i, 0, 0], tile, barrier=mbar)
         T.barrier_arrive(mbar)
         T.mbarrier_wait_parity(mbar, 0)
-        for j, k in T.grid(dim1, dim2):
+        for j, k in T.Parallel(dim1, dim2):
             tile[j, k] = tile[j, k] + 1
+        T.sync_threads()
         T.copy(tile, C[i, 0, 0])
 
     return C
@@ -80,8 +83,9 @@ def tma_add_one_4d(A, dim0, dim1, dim2, dim3, dtype="float32"):
         T.tma_copy(A[i, j, 0, 0], tile, barrier=mbar)
         T.barrier_arrive(mbar)
         T.mbarrier_wait_parity(mbar, 0)
-        for k, l in T.grid(dim2, dim3):
+        for k, l in T.Parallel(dim2, dim3):
             tile[k, l] = tile[k, l] + 1
+        T.sync_threads()
         T.copy(tile, C[i, j, 0, 0])
 
     return C
@@ -99,8 +103,9 @@ def tma_add_one_5d(A, dim0, dim1, dim2, dim3, dim4, dtype="float32"):
         T.tma_copy(A[i, j, k, 0, 0], tile, barrier=mbar)
         T.barrier_arrive(mbar)
         T.mbarrier_wait_parity(mbar, 0)
-        for l, m in T.grid(dim3, dim4):
+        for l, m in T.Parallel(dim3, dim4):
             tile[l, m] = tile[l, m] + 1
+        T.sync_threads()
         T.copy(tile, C[i, j, k, 0, 0])
 
     return C

@@ -117,6 +117,9 @@ struct LowerArgs {
   // cluster). Used by TMA copy lowering to scale expect_tx bytes for cluster
   // barriers.
   int cluster_size = 1;
+  // Extent of threadIdx.y at the current TileOp. QY2 uses this to lower
+  // independent threadIdx.x subgroups without cross-lane synchronization.
+  PrimExpr thread_y_extent = IntImm(DataType::Int(32), 1);
 
   // Callbacks used by op lowerings to request pass-owned resources or report
   // metadata that later passes need.

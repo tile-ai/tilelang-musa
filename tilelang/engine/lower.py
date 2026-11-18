@@ -121,8 +121,9 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         # (`[&]<typename T>(T) { ... }`) which require C++20.
         "-std=c++20",
         "-I" + TILELANG_TEMPLATE_PATH,
-        "-I" + CUTLASS_INCLUDE_DIR,
     ]
+    if CUTLASS_INCLUDE_DIR is not None:
+        options.append("-I" + CUTLASS_INCLUDE_DIR)
     # Merge extra device compiler flags from pass config, if provided
     extra_flags = cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS, None)
     if extra_flags:
@@ -162,6 +163,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 @tvm_ffi.register_global_func("tilelang_callback_musa_compile", override=True)
 def tilelang_callback_musa_compile(code, target, pass_config=None):
     target_arch = mcc.get_musa_arch(mcc.get_musa_compute_version(target))
+    mcc.check_musa_compiler_compatibility(code)
 
     cfg = pass_config or {}
     enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
@@ -170,6 +172,7 @@ def tilelang_callback_musa_compile(code, target, pass_config=None):
     options = [
         "-std=c++17",
         "-Wno-error=address-of-temporary",
+        "-Wno-error=c++11-narrowing",
         "-I" + TILELANG_TEMPLATE_PATH,
         "-I" + MUTLASS_INCLUDE_DIR,
         f"-D__MUSA_ARCH_LIST__={musa_arch_macro}",

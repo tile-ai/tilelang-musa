@@ -64,6 +64,14 @@ class PassConfigKey(str, Enum):
         if enabled, --use_fast_math will be passed to nvcc
     """
 
+    TL_ENABLE_FMA_CONTRACTION = "tl.enable_fma_contraction"
+    """Enable implicit multiply-add/subtract contraction in codegen. Default: False.
+
+    When enabled, supported backends may contract expressions such as
+    ``a * b + c`` or ``a * b - c`` into fused multiply-add instructions.
+    Explicit FMA intrinsics and GEMM FMA implementations are unaffected.
+    """
+
     TL_PTXAS_REGISTER_USAGE_LEVEL = "tl.ptxas_register_usage_level"
     """The PTXAS register usage level in [0, 10], which controls the
     aggressiveness of optimizations that affect register usage. Default: None"""
@@ -124,8 +132,32 @@ class PassConfigKey(str, Enum):
     intended zero-fill / out-of-bounds semantics.
     """
 
+    TL_DISABLE_PREDICATED_ASYNC_COPY = "tl.disable_predicated_async_copy"
+    """Disable predicated MUSA automatic global-to-shared async copies.
+
+    The default is True because a predicate that selects only part of the
+    producer thread range can violate the MUSA async-copy group protocol. Set
+    this to False only for kernels whose complete production input domain has
+    verified copy participation and zero-fill semantics. Explicit async-copy
+    operations are unaffected.
+    """
+
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
+
+    TL_DISABLE_FRAGMENT_VECTORIZE = "tl.disable_fragment_vectorize"
+    """Disable automatic vectorization of fragment-only loops.
+
+    When omitted on MUSA, defaults to True for MTCC versions before 5.3
+    and False for MTCC 5.3 or newer. An explicit True or False takes priority.
+    If the compiler version cannot be determined, defaults to True with a warning.
+    When switching toolchains, use a fresh kernel cache or set this option explicitly.
+
+    Controls automatic vectorization in LowerTileOp for T.Parallel loops
+    that access only fragment buffers. Loops that also access local or
+    global/shared buffers retain their normal vectorization behavior.
+    The independent TL_ENABLE_MUSA_BURST optimization is unaffected.
+    """
 
     TL_ENABLE_ASYNC_COPY = "tl.enable_async_copy"
     """Enable lowering eligible global->shared copies to PTX `cp.async`.
@@ -330,8 +362,8 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_SQMMA = "tl.disable_sqmma"
     """Disable usage of PH1 SQMMA. Default: False"""
 
-    TL_DISABLE_PH1_WMMA = "tl.disable_ph1_wmma"
-    """Disable usage of PH1 WMMA. Default: False"""
+    TL_DISABLE_WMMA = "tl.disable_wmma"
+    """Disable usage of WMMA. Default: False"""
 
     TL_ENABLE_MUSA_BURST = "tl.enable_musa_burst"
     """Enable MUSA burst SIMD vectorization when True. Default: False"""

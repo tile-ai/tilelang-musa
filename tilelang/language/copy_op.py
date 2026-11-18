@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import Literal, Any
-from tilelang._typing import BufferLikeType
+from tilelang._typing import BarrierType, BufferLikeType
 from tilelang.language.frame import get_let_value, has_let_value
 from tilelang.utils.language import (
     to_buffer_region,
@@ -11,11 +11,19 @@ from tilelang.utils.language import (
 from tilelang.language.utils import get_extent, buffer_region_to_tile_region
 from tilelang.utils.deprecated import deprecated
 import tvm
-from tvm import ir, tirx
+from tvm import arith, ir, tirx
 
 
 EvictionPolicy = Literal["evict_normal", "evict_first", "evict_last"]
 CachePolicy = Literal["cache_none", "cache_once", "cache_normal", "cache_persist"]
+LsuInnerCachePolicy = Literal[
+    "cache_none",
+    "cache_once",
+    "cache_normal",
+    "cache_persist",
+    "no_override",
+    "last_use",
+]
 _EVICTION_POLICY_MAP = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
 _CACHE_POLICY_MAP = {
     "cache_none": 0,
@@ -23,6 +31,22 @@ _CACHE_POLICY_MAP = {
     "cache_normal": 2,
     "cache_persist": 3,
 }
+_LSU_INNER_CACHE_POLICY_MAP = {
+    "cache_none": 0,
+    "cache_once": 1,
+    "cache_normal": 2,
+    "cache_persist": 3,
+    "no_override": 4,
+    "last_use": 5,
+}
+_LSU_OUTER_CACHE_POLICY_MAP = {
+    "cache_none": 0,
+    "cache_once": 1,
+    "cache_normal": 2,
+    "cache_persist": 3,
+}
+_LSU_CHRNT_MAP = {"mcu": 0, "slc": 1, "l1": 0, "l2_l3": 1}
+_LSU_L2_POLICY_MAP = {"new_alloc": 0, "new": 0, "bypass": 1}
 _EVICTION_TO_CACHE_POLICY = {
     _EVICTION_POLICY_MAP["evict_normal"]: _CACHE_POLICY_MAP["cache_normal"],
     _EVICTION_POLICY_MAP["evict_first"]: _CACHE_POLICY_MAP["cache_once"],
@@ -41,6 +65,102 @@ def _set_tma_cache_annotations(ann: dict) -> None:
         ann["inner_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
     if "outer_cache_policy" not in ann:
         ann["outer_cache_policy"] = _EVICTION_TO_CACHE_POLICY[ann["eviction_policy"]]
+
+
+def _check_copy_tile_not_larger_than_buffer(
+    data: BufferLikeType,
+    extents: list[tirx.PrimExpr],
+    role: str,
+) -> None:
+    """Reject a copy tile that cannot fit in the underlying buffer."""
+    if not isinstance(data, (tirx.Buffer, tirx.BufferLoad, tirx.BufferRegion)):
+        return
+
+    buffer = data if isinstance(data, tirx.Buffer) else data.buffer
+    shape = list(buffer.shape)
+    extents = list(extents)
+    if len(extents) < len(shape):
+        extents = [tirx.IntImm("int32", 1)] * (len(shape) - len(extents)) + extents
+    if len(extents) != len(shape):
+        return
+
+    analyzer = arith.Analyzer()
+    for dim, (extent, shape_dim) in enumerate(zip(extents, shape)):
+        if analyzer.can_prove(extent > shape_dim):
+            raise ValueError(
+                "T.copy tile extent is larger than the whole "
+                f"{role} buffer on dim {dim}: buffer `{buffer.name}` "
+                f"has shape {shape}, but copy tile extents are {extents}."
+            )
+def _normalize_lsu_policy(
+    value: str | int,
+    name: str,
+    mapping: dict[str, int],
+    maximum: int,
+) -> int:
+    if isinstance(value, tirx.IntImm):
+        value = int(value.value)
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer immediate or policy string")
+    if isinstance(value, str):
+        if value not in mapping:
+            choices = ", ".join(sorted(mapping))
+            raise ValueError(f"Unsupported {name} {value!r}; expected one of: {choices}")
+        value = mapping[value]
+    if not isinstance(value, int) or value < 0 or value > maximum:
+        raise ValueError(f"{name} must be in [0, {maximum}], got {value}")
+    return value
+
+
+def _set_lsu_cache_annotations(
+    ann: dict,
+    inner_cache_policy: LsuInnerCachePolicy | int | None,
+    outer_cache_policy: CachePolicy | int | None,
+    chrnt: str | int | None,
+    l2: str | int | None,
+    is_volatile: bool | None,
+) -> bool:
+    inner_cache_policy = ann.get("inner_cache_policy", inner_cache_policy)
+    outer_cache_policy = ann.get("outer_cache_policy", outer_cache_policy)
+    chrnt = ann.get("lsu_chrnt", ann.get("chrnt", chrnt))
+    l2 = ann.get("lsu_l2", ann.get("l2", l2))
+    is_volatile = ann.get("lsu_volatile", ann.get("is_volatile", is_volatile))
+    lsu_mode = (
+        bool(ann.get("lsu_cache_hint", False))
+        or chrnt is not None
+        or l2 is not None
+        or is_volatile is not None
+        or inner_cache_policy in ("no_override", "last_use", 4, 5)
+    )
+    if not lsu_mode:
+        return False
+    ann["lsu_cache_hint"] = tirx.IntImm("int32", 1)
+    ann["inner_cache_policy"] = _normalize_lsu_policy(
+        4 if inner_cache_policy is None else inner_cache_policy,
+        "inner_cache_policy",
+        _LSU_INNER_CACHE_POLICY_MAP,
+        5,
+    )
+    ann["outer_cache_policy"] = _normalize_lsu_policy(
+        2 if outer_cache_policy is None else outer_cache_policy,
+        "outer_cache_policy",
+        _LSU_OUTER_CACHE_POLICY_MAP,
+        3,
+    )
+    ann["lsu_chrnt"] = _normalize_lsu_policy(
+        0 if chrnt is None else chrnt, "chrnt", _LSU_CHRNT_MAP, 1
+    )
+    ann["lsu_l2"] = _normalize_lsu_policy(
+        0 if l2 is None else l2, "l2", _LSU_L2_POLICY_MAP, 1
+    )
+    if isinstance(is_volatile, tirx.IntImm):
+        if is_volatile.value not in (0, 1):
+            raise ValueError("is_volatile immediate must be 0 or 1")
+        is_volatile = bool(is_volatile.value)
+    if is_volatile is not None and not isinstance(is_volatile, bool):
+        raise TypeError("is_volatile must be bool")
+    ann["lsu_volatile"] = tirx.IntImm("int32", int(bool(is_volatile)))
+    return True
 
 
 def _normalize_copy_regions(
@@ -73,6 +193,8 @@ def _normalize_copy_regions(
     # Align and broadcast extents from the right (tail) side.
     # This is majorly for supporting some syntactic sugar, not the whole broadcasting ability of copy op.
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
+    _check_copy_tile_not_larger_than_buffer(src, src_extent, "source")
+    _check_copy_tile_not_larger_than_buffer(dst, dst_extent, "destination")
 
     # Use legalized extents for src and dst respectively.
     src = to_buffer_region(src, access_type="r", extents=src_extent)
@@ -88,8 +210,11 @@ def copy(
     disable_tma: bool = False,
     force_async_copy: bool = False,
     eviction_policy: EvictionPolicy | None = None,
-    inner_cache_policy: CachePolicy | None = None,
-    outer_cache_policy: CachePolicy | None = None,
+    inner_cache_policy: LsuInnerCachePolicy | int | None = None,
+    outer_cache_policy: CachePolicy | int | None = None,
+    chrnt: str | int | None = None,
+    l2: str | int | None = None,
+    is_volatile: bool | None = None,
     src_robust_desc: tirx.PrimExpr | None = None,
     prefer_instruction: str | None = None,
     annotations: dict | None = None,
@@ -106,6 +231,9 @@ def copy(
         eviction_policy (Optional[str], keyword-only): Cache eviction policy. Defaults to None.
         inner_cache_policy (Optional[str], keyword-only): MUSA inner-cache policy.
         outer_cache_policy (Optional[str], keyword-only): MUSA outer-cache policy.
+        chrnt (Optional[Union[str, int]], keyword-only): MUSA LSU coherence hierarchy hint.
+        l2 (Optional[Union[str, int]], keyword-only): MUSA LSU L2 allocation policy.
+        is_volatile (Optional[bool], keyword-only): Select the volatile LSU load intrinsic.
         src_robust_desc (Optional[tirx.PrimExpr], keyword-only): MUSA robust source descriptor
             created by `T.make_robust_desc(addr, size_bytes)`.
         prefer_instruction (Optional[str], keyword-only): Backend-specific preferred lowering
@@ -154,18 +282,6 @@ def copy(
         and len(src_robust_desc.args) == 2
     ):
         raise ValueError("src_robust_desc must be created by T.make_robust_desc(addr, size_bytes)")
-    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
-        body: tirx.Stmt = tirx.BufferStore(dst.buffer, src, dst.indices)
-        if src_robust_desc is not None:
-            body = tirx.AttrStmt(src.buffer.data, "tl.source_robust_desc", src_robust_desc, body)
-        if force_async_copy:
-            body = tirx.AttrStmt(
-                tirx.IntImm("int32", 0),
-                "tl.force_async_copy",
-                tirx.IntImm("int32", 1),
-                body,
-            )
-        return body
 
     # Build annotations dict
     ann = annotations.copy() if annotations else {}
@@ -181,11 +297,17 @@ def copy(
         ann["src_robust_desc"] = src_robust_desc
     if "eviction_policy" not in ann and eviction_policy is not None:
         ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
-    if "inner_cache_policy" not in ann and inner_cache_policy is not None:
-        ann["inner_cache_policy"] = _CACHE_POLICY_MAP[inner_cache_policy]
-    if "outer_cache_policy" not in ann and outer_cache_policy is not None:
-        ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
-    _set_tma_cache_annotations(ann)
+    lsu_mode = _set_lsu_cache_annotations(
+        ann, inner_cache_policy, outer_cache_policy, chrnt, l2, is_volatile
+    )
+    if lsu_mode and "eviction_policy" in ann:
+        raise ValueError("LSU cache hints cannot be combined with TME-only options")
+    if not lsu_mode:
+        if "inner_cache_policy" not in ann and inner_cache_policy is not None:
+            ann["inner_cache_policy"] = _CACHE_POLICY_MAP[inner_cache_policy]
+        if "outer_cache_policy" not in ann and outer_cache_policy is not None:
+            ann["outer_cache_policy"] = _CACHE_POLICY_MAP[outer_cache_policy]
+        _set_tma_cache_annotations(ann)
     if "prefer_instruction" not in ann and prefer_instruction is not None:
         ann["prefer_instruction"] = prefer_instruction
     if isinstance(ann.get("prefer_instruction"), str):
@@ -194,6 +316,55 @@ def copy(
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
+
+    if lsu_mode:
+        effective_async = ann.get("force_async_copy", False)
+        if isinstance(effective_async, tirx.IntImm):
+            effective_async = effective_async.value
+        if not isinstance(effective_async, (bool, int)) or effective_async not in (0, 1):
+            raise ValueError("LSU force_async_copy must be a constant boolean")
+        effective_instruction = ann.get("prefer_instruction", None)
+        if isinstance(effective_instruction, tirx.StringImm):
+            effective_instruction = effective_instruction.value
+        if effective_async or effective_instruction not in (None, "sync"):
+            raise ValueError("LSU cache hints require normal synchronous copy")
+        if "src_robust_desc" in ann:
+            raise ValueError("LSU cache hints cannot be combined with a source robust descriptor")
+        # Region copies encode their source BufferLoad in tl.region's first argument.
+        source_load = src.args[0] if isinstance(src, tirx.Call) else src
+        if source_load.buffer.scope() != "global":
+            raise ValueError("LSU cache hints require a global-memory source")
+        # Scalar AttrStmt generation must use the merged annotation value too.
+        force_async_copy = bool(effective_async)
+
+    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
+        value: tirx.PrimExpr = src
+        if lsu_mode:
+            op_name = (
+                "tl.lsu_ld_volatile_cache_hint"
+                if ann["lsu_volatile"].value
+                else "tl.lsu_ld_cache_hint"
+            )
+            value = tirx.call_intrin(
+                str(src.dtype),
+                tirx.op.Op.get(op_name),
+                src,
+                ann["inner_cache_policy"],
+                ann["outer_cache_policy"],
+                ann["lsu_chrnt"],
+                ann["lsu_l2"],
+            )
+        body: tirx.Stmt = tirx.BufferStore(dst.buffer, value, dst.indices)
+        if src_robust_desc is not None:
+            body = tirx.AttrStmt(src.buffer.data, "tl.source_robust_desc", src_robust_desc, body)
+        if force_async_copy:
+            body = tirx.AttrStmt(
+                tirx.IntImm("int32", 0),
+                "tl.force_async_copy",
+                tirx.IntImm("int32", 1),
+                body,
+            )
+        return body
 
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
 
@@ -682,4 +853,188 @@ def c2d_im2col(
         dilation,
         pad,
         eviction_policy,
+    )
+
+
+def _explicit_im2col_call(
+    op_name: str,
+    img: BufferLikeType,
+    col: BufferLikeType,
+    args: tuple[Any, ...],
+    eviction_policy: EvictionPolicy | None,
+    barrier: BarrierType | None,
+    annotations: dict | None,
+) -> tirx.PrimExpr:
+    img_region = to_buffer_region(img, access_type="r")
+    col_region = to_buffer_region(col, access_type="w")
+    img_region = buffer_region_to_tile_region(img_region, "r", [r.extent for r in img_region.region])
+    col_region = buffer_region_to_tile_region(col_region, "w", [r.extent for r in col_region.region])
+    ann = annotations.copy() if annotations else {}
+    if barrier is not None and "barrier" not in ann:
+        from .builtin import _mbar_to_buffer_load
+
+        ann["barrier"] = _mbar_to_buffer_load(barrier)
+    # Keep explicit im2col TMA copies consistent with tma_copy(): encode the
+    # eviction hint and derive MUSA cache policies unless annotations override.
+    if "eviction_policy" not in ann and eviction_policy is not None:
+        ann["eviction_policy"] = _EVICTION_POLICY_MAP[eviction_policy]
+    _set_tma_cache_annotations(ann)
+    eviction = ann["eviction_policy"]
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get(op_name),
+        img_region,
+        col_region,
+        *args,
+        eviction,
+        annotations=ann if ann else None,
+    )
+
+
+def c2d_im2col_1d(
+    img: BufferLikeType,
+    col: BufferLikeType,
+    coord_c: tirx.PrimExpr,
+    coord_w: tirx.PrimExpr,
+    coord_n: tirx.PrimExpr,
+    dim_c: tirx.PrimExpr,
+    dim_nw: tirx.PrimExpr,
+    offset_s: tirx.PrimExpr,
+    output_w: tirx.PrimExpr,
+    kernel: int,
+    stride: int,
+    dilation: int,
+    pad: int,
+    eviction_policy: EvictionPolicy | None = None,
+    *,
+    barrier: BarrierType | None = None,
+    annotations: dict | None = None,
+) -> tirx.PrimExpr:
+    """Load a 1-D im2col tile, using MUSA TME when legal."""
+    return _explicit_im2col_call(
+        "tl.tileop.c2d_im2col_1d",
+        img,
+        col,
+        (coord_c, coord_w, coord_n, dim_c, dim_nw, offset_s, output_w, kernel, stride, dilation, pad),
+        eviction_policy,
+        barrier,
+        annotations,
+    )
+
+
+def c2d_im2col_2d(
+    img: BufferLikeType,
+    col: BufferLikeType,
+    coord_c: tirx.PrimExpr,
+    coord_w: tirx.PrimExpr,
+    coord_h: tirx.PrimExpr,
+    coord_n: tirx.PrimExpr,
+    dim_c: tirx.PrimExpr,
+    dim_nhw: tirx.PrimExpr,
+    offset_h: tirx.PrimExpr,
+    offset_w: tirx.PrimExpr,
+    output_w: tirx.PrimExpr,
+    output_h: tirx.PrimExpr,
+    stride_w: int,
+    stride_h: int,
+    dilation_w: int,
+    dilation_h: int,
+    pad_w: int,
+    pad_h: int,
+    eviction_policy: EvictionPolicy | None = None,
+    *,
+    barrier: BarrierType | None = None,
+    annotations: dict | None = None,
+) -> tirx.PrimExpr:
+    """Load a 2-D im2col tile, using MUSA TME when legal."""
+    return _explicit_im2col_call(
+        "tl.tileop.c2d_im2col_2d",
+        img,
+        col,
+        (
+            coord_c,
+            coord_w,
+            coord_h,
+            coord_n,
+            dim_c,
+            dim_nhw,
+            offset_h,
+            offset_w,
+            output_w,
+            output_h,
+            stride_w,
+            stride_h,
+            dilation_w,
+            dilation_h,
+            pad_w,
+            pad_h,
+        ),
+        eviction_policy,
+        barrier,
+        annotations,
+    )
+
+
+def c2d_im2col_3d(
+    img: BufferLikeType,
+    col: BufferLikeType,
+    coord_c: tirx.PrimExpr,
+    coord_w: tirx.PrimExpr,
+    coord_h: tirx.PrimExpr,
+    coord_d: tirx.PrimExpr,
+    coord_n: tirx.PrimExpr,
+    dim_c: tirx.PrimExpr,
+    dim_nhwd: tirx.PrimExpr,
+    offset_d: tirx.PrimExpr,
+    offset_h: tirx.PrimExpr,
+    offset_w: tirx.PrimExpr,
+    output_w: tirx.PrimExpr,
+    output_h: tirx.PrimExpr,
+    output_d: tirx.PrimExpr,
+    stride_w: int,
+    stride_h: int,
+    stride_d: int,
+    dilation_w: int,
+    dilation_h: int,
+    dilation_d: int,
+    pad_w: int,
+    pad_h: int,
+    pad_d: int,
+    eviction_policy: EvictionPolicy | None = None,
+    *,
+    barrier: BarrierType | None = None,
+    annotations: dict | None = None,
+) -> tirx.PrimExpr:
+    """Load a 3-D im2col tile, using MUSA TME when legal."""
+    return _explicit_im2col_call(
+        "tl.tileop.c2d_im2col_3d",
+        img,
+        col,
+        (
+            coord_c,
+            coord_w,
+            coord_h,
+            coord_d,
+            coord_n,
+            dim_c,
+            dim_nhwd,
+            offset_d,
+            offset_h,
+            offset_w,
+            output_w,
+            output_h,
+            output_d,
+            stride_w,
+            stride_h,
+            stride_d,
+            dilation_w,
+            dilation_h,
+            dilation_d,
+            pad_w,
+            pad_h,
+            pad_d,
+        ),
+        eviction_policy,
+        barrier,
+        annotations,
     )

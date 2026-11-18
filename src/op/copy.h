@@ -33,6 +33,7 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
+  Optional<PrimExpr> dst_block; // Destination block index for CUDA cluster copy
   Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
   // Common SIMT annotation keys:
   //   - "coalesced_width": IntImm, width for coalesced memory access.
@@ -51,6 +52,7 @@ public:
         .def_ro("dst", &CopyNode::dst)
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
+        .def_ro("dst_block", &CopyNode::dst_block)
         .def_ro("annotations", &CopyNode::annotations);
   }
 
@@ -176,14 +178,27 @@ class Im2ColOpNode : public TileOperatorNode {
 public:
   BufferRegion srcRegion_, dstRegion_;
   Buffer src_,
-      dst_;      // Source (input feature map) and destination (im2col matrix)
-  int stride_;   // Stride for convolution
-  int padding_;  // Padding amount
-  int dilation_; // Dilation factor
-  int kernel_;   // Kernel size
-  int eviction_policy_;                // Cache eviction policy
-  PrimExpr nhw_step_;                  // Step size in NHW dimensions
-  PrimExpr c_step_;                    // Step size in channel dimension
+      dst_;        // Source (input feature map) and destination (im2col matrix)
+  int stride_{0};  // Stride for convolution
+  int padding_{0}; // Padding amount
+  int dilation_{0};        // Dilation factor
+  int kernel_{0};          // Kernel size
+  int eviction_policy_{0}; // Cache eviction policy
+  PrimExpr nhw_step_;      // Step size in NHW dimensions
+  PrimExpr c_step_;        // Step size in channel dimension
+  // Explicit N-D im2col coordinates used by the MUSA TME path.  The legacy
+  // 2-D `T.im2col` surface leaves these arrays empty and uses the scalar
+  // fields above; `T.c2d_im2col_{1,2,3}d` fills them directly.
+  int spatial_rank_{0};
+  Array<PrimExpr> coords_; // channel first, then W/H/D coordinates
+  PrimExpr coord_n_;
+  PrimExpr dim_c_;
+  PrimExpr dim_nx_;
+  Array<PrimExpr> kernel_positions_;   // S/R/T order
+  Array<PrimExpr> output_dims_;        // W/H/D order
+  Array<PrimExpr> strides_;            // W/H/D order
+  Array<PrimExpr> dilations_;          // W/H/D order
+  Array<PrimExpr> paddings_;           // W/H/D order
   Map<String, ObjectRef> annotations_; // Annotations from Call node
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Im2Col", Im2ColOpNode,
@@ -200,7 +215,18 @@ public:
         .def_ro("padding", &Im2ColOpNode::padding_)
         .def_ro("dilation", &Im2ColOpNode::dilation_)
         .def_ro("kernel", &Im2ColOpNode::kernel_)
-        .def_ro("eviction_policy", &Im2ColOpNode::eviction_policy_);
+        .def_ro("eviction_policy", &Im2ColOpNode::eviction_policy_)
+        .def_ro("spatial_rank", &Im2ColOpNode::spatial_rank_)
+        .def_ro("coords", &Im2ColOpNode::coords_)
+        .def_ro("coord_n", &Im2ColOpNode::coord_n_)
+        .def_ro("dim_c", &Im2ColOpNode::dim_c_)
+        .def_ro("dim_nx", &Im2ColOpNode::dim_nx_)
+        .def_ro("kernel_positions", &Im2ColOpNode::kernel_positions_)
+        .def_ro("output_dims", &Im2ColOpNode::output_dims_)
+        .def_ro("strides", &Im2ColOpNode::strides_)
+        .def_ro("dilations", &Im2ColOpNode::dilations_)
+        .def_ro("paddings", &Im2ColOpNode::paddings_)
+        .def_ro("annotations", &Im2ColOpNode::annotations_);
   }
 
   /*!
@@ -232,6 +258,9 @@ struct Im2ColImpl {
 };
 
 void RegisterIm2ColImpl(Im2ColImpl impl);
+
+Stmt LowerIm2ColFallback(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                         arith::Analyzer *analyzer);
 
 class Im2ColOp : public TileOperator {
 public:

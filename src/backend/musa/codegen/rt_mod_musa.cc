@@ -1,4 +1,5 @@
 #include "codegen_musa.h"
+#include "op/builtin.h"
 #include "runtime/musa/musa_module.h"
 #include "runtime/pack_args.h"
 #include "support/check.h"
@@ -11,6 +12,12 @@ namespace tvm {
 namespace codegen {
 
 using namespace ffi;
+
+static bool IsFMAContractionEnabled() {
+  tvm::transform::PassContext pass_ctx = tvm::transform::PassContext::Current();
+  return pass_ctx->GetConfig<Bool>(tl::kEnableFMAContraction, Bool(false))
+      .value();
+}
 
 static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
   Map<String, runtime::FunctionInfo> fmap;
@@ -67,7 +74,7 @@ static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
 
 ffi::Module BuildTileLangMUSA(IRModule mod, Target target) {
   bool output_ssa = false;
-  CodeGenTileLangMUSA cg;
+  CodeGenTileLangMUSA cg(IsFMAContractionEnabled());
   cg.Init(output_ssa);
 
   for (auto kv : mod->functions) {
@@ -105,7 +112,7 @@ ffi::Module BuildTileLangMUSA(IRModule mod, Target target) {
 
 ffi::Module BuildTileLangMUSAWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
-  CodeGenTileLangMUSA cg;
+  CodeGenTileLangMUSA cg(IsFMAContractionEnabled());
   cg.Init(output_ssa);
 
   for (auto kv : mod->functions) {

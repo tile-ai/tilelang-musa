@@ -5,6 +5,7 @@
 
 #include "op/gemm_sp.h"
 
+#include "op/utils.h"
 #include "support/check.h"
 #include "backend/common/target_utils.h"
 
@@ -26,6 +27,7 @@ namespace musa {
 namespace {
 
 constexpr const char *kMusaMMASP = "musa.mma.sp";
+constexpr const char *kMusaFMASP = "musa.fma.sp";
 
 bool CheckMMASP(const GemmSPNode &op) {
   if (op.C->dtype == DataType::Float(16) ||
@@ -51,8 +53,8 @@ bool CheckMMASP(const GemmSPNode &op) {
 }
 
 void FatalUnavailable(const GemmSPNode &op, Target target) {
-  LOG(FATAL) << "T.gemm_sp on MUSA currently requires QY2 sparse MMA "
-                "lowering. Got target="
+  LOG(FATAL) << "T.gemm_sp on MUSA currently supports QY2 sparse MMA/FMA or "
+                "PH1 sparse FMA lowering. Got target="
              << target << ", A(scope=" << op.A.scope()
              << ", dtype=" << op.A->dtype << "), E(scope=" << op.E.scope()
              << ", dtype=" << op.E->dtype << "), B(scope=" << op.B.scope()
@@ -62,8 +64,8 @@ void FatalUnavailable(const GemmSPNode &op, Target target) {
 }
 
 std::pair<int, int>
-ComputeDefaultWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
-                            int num_warps) {
+ComputeQY2SparseWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
+                              int num_warps) {
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16;
   constexpr int kNPerWarp = 8;
@@ -133,38 +135,80 @@ ComputeDefaultWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
   return {m_warp, n_warp};
 }
 
+std::pair<int, int>
+ComputeFmaWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
+                        int num_warps) {
+  int m_warp = 1, n_warp = 1;
+  policy.m_warp = m_warp;
+  policy.n_warp = n_warp;
+  return {m_warp, n_warp};// ph1 gemm_sp only support FMA
+}
+
 } // namespace
 
 struct GemmSP {
   static String SelectInst(const GemmSPNode &op, int block_size,
                            Target target) {
-    if (op.isWgmma_ || op.isTcgen05_ || !TargetIsQY2(target) ||
-        !CheckMMASP(op)) {
-      FatalUnavailable(op, target);
+    (void)block_size;
+    if (TargetIsQY2(target)) {
+      ICHECK(!op.isWgmma_ && !op.isTcgen05_)
+          << "T.gemm_sp on QY2 only supports synchronous sparse lowering.";
+      ICHECK(IsSharedBuffer(op.A) && IsSharedBuffer(op.B) &&
+             IsSharedBuffer(op.E))
+          << "T.gemm_sp on QY2 requires A/E/B in shared scope, got A="
+          << op.A.scope() << ", E=" << op.E.scope() << ", B=" << op.B.scope();
+      ICHECK(IsFragmentBuffer(op.C))
+          << "T.gemm_sp on QY2 requires C in local.fragment scope, got "
+          << op.C.scope();
+      return kMusaFMASP;
     }
-    return kMusaMMASP;
+    if (TargetIsPH1(target)) {
+      ICHECK(!op.isWgmma_ && !op.isTcgen05_)
+          << "T.gemm_sp on PH1 only supports the synchronous sparse FMA path.";
+      ICHECK(IsSharedBuffer(op.A) && IsSharedBuffer(op.B) && IsSharedBuffer(op.E))
+          << "T.gemm_sp on PH1 requires A/E/B in shared scope, got A="
+          << op.A.scope() << ", E=" << op.E.scope() << ", B=" << op.B.scope();
+      ICHECK(IsFragmentBuffer(op.C))
+          << "T.gemm_sp on PH1 requires C in local.fragment scope, got "
+          << op.C.scope();
+      return kMusaFMASP;
+    }
+    FatalUnavailable(op, target);
+    return String();
   }
 
   static std::pair<int, int>
   ComputeWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, String gemm_inst) {
-    ICHECK(TargetIsQY2(target))
-        << "MUSA sparse MMA is only enabled for QY2 targets.";
-    ICHECK(gemm_inst == kMusaMMASP)
-        << "Unknown MUSA sparse GEMM instruction: " << gemm_inst;
     constexpr int kSparseMMAWarpSize = 32;
     ICHECK_EQ(block_size % kSparseMMAWarpSize, 0)
         << "block_size must be divisible by warp size.";
-    return ComputeDefaultWarpPartition(policy, M, N,
-                                       block_size / kSparseMMAWarpSize);
+    int num_warps = block_size / kSparseMMAWarpSize;
+
+    if (gemm_inst == kMusaMMASP) {
+      ICHECK(TargetIsQY2(target))
+          << "MUSA sparse MMA is only enabled for QY2 targets.";
+      return ComputeQY2SparseWarpPartition(policy, M, N, num_warps);
+    }
+    if (gemm_inst == kMusaFMASP) {
+      ICHECK(TargetIsQY2(target) || TargetIsPH1(target))
+          << "MUSA sparse FMA is only enabled for QY2/PH1 targets.";
+      return ComputeFmaWarpPartition(policy, M, N, num_warps);
+    }
+    ICHECK(0) << "Unknown MUSA sparse GEMM instruction: " << gemm_inst;
+    return {0, 0};
   }
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
-    ICHECK(gemm_inst == kMusaMMASP)
-        << "Unknown MUSA sparse GEMM instruction: " << gemm_inst;
-    return true;
+    if (gemm_inst == kMusaMMASP) {
+      return true;
+    }
+    if (gemm_inst == kMusaFMASP) {
+      return false;
+    }
+    ICHECK(0) << "Unknown MUSA sparse GEMM instruction: " << gemm_inst;
+    return false;
   }
-
 };
 
 } // namespace musa

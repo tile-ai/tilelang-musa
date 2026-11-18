@@ -70,6 +70,7 @@ def pointer_table_multi_copy_test(G, N, dtype=T.float16):
 def pointer_table_grouped_matmul_test(batch_sizes_list, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     batch_count = len(batch_sizes_list)
     max_M = max(batch_sizes_list)
+    padded_M = (max_M + block_M - 1) // block_M * block_M
     total_m_blocks = sum(math.ceil(size / block_M) for size in batch_sizes_list)
 
     @T.prim_func
@@ -94,9 +95,9 @@ def pointer_table_grouped_matmul_test(batch_sizes_list, N, K, block_M, block_N, 
                 cur_tile_offset = T.if_then_else(in_cur_batch_idx, batch_tile_offsets[i], cur_tile_offset)
 
             m_start = (bx - cur_tile_offset) * block_M
-            A = T.make_tensor(a_ptrs[cur_batch_idx], (max_M, K), dtype)
+            A = T.make_tensor(a_ptrs[cur_batch_idx], (padded_M, K), dtype)
             B = T.make_tensor(b_ptrs[cur_batch_idx], (K, N), dtype)
-            C = T.make_tensor(c_ptrs[cur_batch_idx], (max_M, N), dtype)
+            C = T.make_tensor(c_ptrs[cur_batch_idx], (padded_M, N), dtype)
 
             T.clear(C_local)
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):
@@ -173,6 +174,7 @@ def run_pointer_table_grouped_matmul(batch_sizes_list, N, K, block_M, block_N, b
     torch_dtype = T.dtype(dtype).as_torch()
     torch_accum_dtype = T.dtype(accum_dtype).as_torch()
     max_M = max(batch_sizes_list)
+    padded_M = (max_M + block_M - 1) // block_M * block_M
     batch_tile_offsets = [0]
     for size in batch_sizes_list[:-1]:
         batch_tile_offsets.append(batch_tile_offsets[-1] + math.ceil(size / block_M))
@@ -183,8 +185,8 @@ def run_pointer_table_grouped_matmul(batch_sizes_list, N, K, block_M, block_N, b
     ref = [(a @ b).to(torch_accum_dtype) for a, b in zip(a_exact, b_list)]
 
     def build_backend_buffers():
-        a_list = [torch.zeros(max_M, K, device=device, dtype=torch_dtype) for _ in batch_sizes_list]
-        c_list = [torch.empty(max_M, N, device=device, dtype=torch_dtype) for _ in batch_sizes_list]
+        a_list = [torch.zeros(padded_M, K, device=device, dtype=torch_dtype) for _ in batch_sizes_list]
+        c_list = [torch.empty(padded_M, N, device=device, dtype=torch_dtype) for _ in batch_sizes_list]
         for buf, src in zip(a_list, a_exact):
             buf[: src.shape[0]].copy_(src)
         return (

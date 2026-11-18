@@ -1,3 +1,5 @@
+import re
+
 import pytest
 import tilelang
 from tilelang import tvm as tvm
@@ -5,9 +7,10 @@ import tilelang.testing
 
 
 @pytest.fixture(autouse=True)
-def disable_tilelang_cache():
+def disable_tilelang_cache(monkeypatch):
     cache_enabled = tilelang.is_cache_enabled()
     tilelang.disable_cache()
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
     yield
     if cache_enabled:
         tilelang.enable_cache()
@@ -20,6 +23,63 @@ TRANSPOSE_CASES = [
     (True, False, "tn"),
     (True, True, "tt"),
 ]
+
+
+def _uses_inst_shape(kernel_source, op_name, inst_shape):
+    shape = r",\s*".join(str(value) for value in inst_shape)
+    return re.search(rf"tl::{op_name}<[^;]*,\s*{shape}>", kernel_source)
+
+
+def _uses_warp_partition(kernel_source, op_name, block_shape, warp_partition):
+    block = r",\s*".join(str(value) for value in block_shape)
+    warp = r",\s*".join(str(value) for value in warp_partition)
+    return re.search(rf"tl::{op_name}<\s*{block},\s*{warp},", kernel_source)
+
+
+def _uses_qy2_subgroup(kernel_source, op_name, inst_shape, subgroup_size):
+    shape = r",\s*".join(str(value) for value in inst_shape)
+    return re.search(
+        rf"tl::{op_name}<[^;]*,\s*{shape},\s*{subgroup_size},\s*0>",
+        kernel_source,
+    )
+
+
+@pytest.mark.parametrize(
+    "mma_shape", [None, "m8n32k16", "m16n16k16", "m32n32k16"]
+)
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_qy2_target_uses_default_wave128(monkeypatch, mma_shape):
+    if mma_shape is None:
+        monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    else:
+        monkeypatch.setenv("TILELANG_MUSA_MP22_MMA_SHAPE", mma_shape)
+    target = tvm.target.Target({"kind": "musa", "arch": "mp_22"})
+    assert int(tilelang._ffi_api.TargetGetWarpSize(target)) == 128
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_gemm_rejects_invalid_mma_shape(monkeypatch):
+    monkeypatch.setenv("TILELANG_MUSA_MP22_MMA_SHAPE", "m16n16k61")
+    program = matmul(
+        128,
+        128,
+        16,
+        128,
+        128,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        128,
+    )
+    with pytest.raises(
+        Exception,
+        match="Invalid TILELANG_MUSA_MP22_MMA_SHAPE: m16n16k61",
+    ):
+        tilelang.compile(program, out_idx=[2])
 
 
 def matmul(
@@ -173,6 +233,403 @@ def test_gemm_f16f16f32(trans_A, trans_B, layout_tag, num_threads):
         0,
         num_threads,
     )
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_gemm_auto_m8_fallback(monkeypatch):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        8,
+        128,
+        16,
+        8,
+        128,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        128,
+    )
+    kernel_source = tilelang.compile(program, out_idx=[2]).get_kernel_source()
+    assert _uses_warp_partition(kernel_source, "gemm_ss", (8, 128, 16), (1, 4))
+    assert _uses_inst_shape(kernel_source, "gemm_ss", (8, 32, 16))
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+@pytest.mark.parametrize("block_m, block_n", [(16, 64), (64, 16)])
+def test_gemm_auto_m16_fallback(monkeypatch, block_m, block_n):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        block_m,
+        block_n,
+        16,
+        block_m,
+        block_n,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        128,
+    )
+    kernel_source = tilelang.compile(program, out_idx=[2]).get_kernel_source()
+    expected_partition = (1, 4) if block_m == 16 else (4, 1)
+    assert _uses_warp_partition(
+        kernel_source,
+        "gemm_ss",
+        (block_m, block_n, 16),
+        expected_partition,
+    )
+    assert _uses_inst_shape(kernel_source, "gemm_ss", (16, 16, 16))
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+@pytest.mark.parametrize("num_threads", [32, 64])
+def test_gemm_auto_m16_fallback_for_small_thread_block(monkeypatch, num_threads):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        128,
+        128,
+        16,
+        128,
+        128,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        num_threads,
+    )
+    kernel_source = tilelang.compile(program, out_idx=[2]).get_kernel_source()
+    assert _uses_inst_shape(kernel_source, "gemm_ss", (16, 16, 16))
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_gemm_auto_m16_fallback_when_m32_cannot_partition(monkeypatch):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        32,
+        32,
+        16,
+        32,
+        32,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        64,
+    )
+    kernel_source = tilelang.compile(program, out_idx=[2]).get_kernel_source()
+    assert _uses_inst_shape(kernel_source, "gemm_ss", (16, 16, 16))
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+@pytest.mark.parametrize("num_threads", [32, 64])
+def test_gemm_auto_m8_fallback_for_small_thread_block(monkeypatch, num_threads):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        8,
+        128,
+        16,
+        8,
+        128,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        num_threads,
+    )
+    kernel_source = tilelang.compile(program, out_idx=[2]).get_kernel_source()
+    assert _uses_inst_shape(kernel_source, "gemm_ss", (8, 32, 16))
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+@pytest.mark.parametrize(
+    "block_m, expected_shape",
+    [(16, (16, 16, 16)), (8, (8, 32, 16))],
+)
+def test_gemm_bf16_auto_fallback(monkeypatch, block_m, expected_shape):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        block_m,
+        128,
+        16,
+        block_m,
+        128,
+        16,
+        False,
+        False,
+        "bfloat16",
+        "bfloat16",
+        "float32",
+        0,
+        32,
+    )
+    kernel_source = tilelang.compile(program, out_idx=[2]).get_kernel_source()
+    assert _uses_inst_shape(kernel_source, "gemm_ss", expected_shape)
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_gemm_auto_rejects_unsupported_shape(monkeypatch):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        8,
+        16,
+        16,
+        8,
+        16,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        32,
+    )
+    with pytest.raises(Exception, match="No QY2 MMA instruction shape supports"):
+        tilelang.compile(program, out_idx=[2])
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+@pytest.mark.parametrize(
+    "block_m, block_n, num_threads",
+    [
+        (16, 16, 128),
+        (32, 32, 256),
+    ],
+)
+def test_gemm_auto_rejects_unpartitionable_thread_block(
+    monkeypatch, block_m, block_n, num_threads
+):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        block_m,
+        block_n,
+        16,
+        block_m,
+        block_n,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        num_threads,
+    )
+    with pytest.raises(Exception, match="No QY2 MMA instruction shape supports"):
+        tilelang.compile(program, out_idx=[2])
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+@pytest.mark.parametrize("mma_shape", ["m16n16k16", "m8n32k16"])
+def test_gemm_explicit_wave32_rejects_incompatible_threads(monkeypatch, mma_shape):
+    monkeypatch.setenv("TILELANG_MUSA_MP22_MMA_SHAPE", mma_shape)
+    program = matmul(
+        32,
+        32,
+        16,
+        32,
+        32,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        16,
+    )
+    with pytest.raises(Exception, match=rf"Explicit QY2 MMA shape {mma_shape} is incompatible"):
+        tilelang.compile(program, out_idx=[2])
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+@pytest.mark.parametrize(
+    "mma_shape, block_m, block_n, num_threads",
+    [
+        ("m32n32k16", 32, 32, 256),
+        ("m16n16k16", 16, 16, 128),
+        ("m8n32k16", 8, 32, 128),
+    ],
+)
+def test_gemm_explicit_shape_rejects_unpartitionable_thread_block(
+    monkeypatch, mma_shape, block_m, block_n, num_threads
+):
+    monkeypatch.setenv("TILELANG_MUSA_MP22_MMA_SHAPE", mma_shape)
+    program = matmul(
+        block_m,
+        block_n,
+        16,
+        block_m,
+        block_n,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        num_threads,
+    )
+    with pytest.raises(
+        Exception,
+        match=rf"Explicit QY2 MMA shape {mma_shape} is incompatible",
+    ):
+        tilelang.compile(program, out_idx=[2])
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_gemm_uses_qy2_python_lowering(monkeypatch):
+    from tilelang.musa.op.gemm.gemm_qy2_mma import GemmQY2MMA
+
+    calls = 0
+    original_lower = GemmQY2MMA.lower
+
+    def traced_lower(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_lower(self, *args, **kwargs)
+
+    monkeypatch.setattr(GemmQY2MMA, "lower", traced_lower)
+    program = matmul(
+        32,
+        32,
+        16,
+        32,
+        32,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        128,
+    )
+    tilelang.compile(program, out_idx=[2])
+    assert calls > 0
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_qy2_thread_y_gemm_uses_subgroup_lowering(monkeypatch):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        128,
+        128,
+        16,
+        128,
+        128,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        (128, 4),
+    )
+    target = tvm.target.Target({"kind": "musa", "arch": "mp_22"})
+    with target:
+        kernel_source = tilelang.lower(program, target=target).kernel_source
+
+    assert _uses_qy2_subgroup(
+        kernel_source,
+        "gemm_ss",
+        (32, 32, 16),
+        128,
+    )
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_ph1_thread_y_gemm_does_not_use_qy2_subgroup_lowering():
+    program = matmul(
+        128,
+        128,
+        16,
+        128,
+        128,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        (128, 4),
+    )
+    target = tvm.target.Target({"kind": "musa", "arch": "mp_31"})
+    with target:
+        kernel_source = tilelang.lower(program, target=target).kernel_source
+
+    assert not _uses_qy2_subgroup(
+        kernel_source,
+        "gemm_ss",
+        (32, 32, 16),
+        128,
+    )
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_gemm_m32_uses_wave128(monkeypatch):
+    monkeypatch.delenv("TILELANG_MUSA_MP22_MMA_SHAPE", raising=False)
+    program = matmul(
+        128,
+        128,
+        16,
+        128,
+        128,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        128,
+    )
+    kernel_source = tilelang.compile(program, out_idx=[2]).get_kernel_source()
+    assert _uses_warp_partition(
+        kernel_source, "gemm_ss", (128, 128, 16), (1, 1)
+    )
+    assert not _uses_inst_shape(kernel_source, "gemm_ss", (8, 32, 16))
+    assert not _uses_inst_shape(kernel_source, "gemm_ss", (16, 16, 16))
+
+
+@tilelang.testing.requires_musa_compute_version_eq(2, 2)
+def test_gemm_explicit_m32_disables_m16_fallback(monkeypatch):
+    monkeypatch.setenv("TILELANG_MUSA_MP22_MMA_SHAPE", "m32n32k16")
+    program = matmul(
+        16,
+        64,
+        16,
+        16,
+        64,
+        16,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        0,
+        128,
+    )
+    with pytest.raises(Exception, match="Explicit QY2 MMA shape m32n32k16 is incompatible"):
+        tilelang.compile(program, out_idx=[2])
 
 
 @tilelang.testing.requires_musa_compute_version_eq(2, 2)

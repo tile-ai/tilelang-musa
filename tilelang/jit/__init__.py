@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import inspect
+import weakref
 from typing import (
     Any,
     Generic,
@@ -21,6 +22,7 @@ from collections.abc import Iterable
 
 from tilelang import tvm as tvm
 from tilelang.language.eager import PrimFunc, prim_func, JITFunc
+from tilelang.language.eager.builder import _freeze_jit_key_part
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
@@ -41,6 +43,7 @@ _Ret = TypeVar("_Ret")
 TargetLike = str | dict[str, object] | Target
 _CallFormKey = tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]]
 _CALL_FORM_CACHE_MISS = object()
+_EAGER_CALL_CACHE_MISS = object()
 
 
 @dataclass
@@ -86,6 +89,162 @@ class _CallFormCache:
     def store(self, call_form_key: _CallFormKey, kernel: Kernel) -> None:
         self.entries[call_form_key] = kernel
         self._remember(call_form_key, kernel)
+
+
+def _runtime_buffer_metadata(value: Any) -> tuple[Any, ...] | None:
+    """Return metadata that can affect eager lowering or runtime validation."""
+    try:
+        shape = tuple(value.shape)
+        stride = getattr(value, "stride", None)
+        if callable(stride):
+            stride = stride()
+        else:
+            stride = value.strides
+        return type(value), tuple(shape), tuple(stride), value.dtype, getattr(value, "device", None)
+    except (AttributeError, RuntimeError, TypeError):
+        return None
+
+
+def _runtime_buffer_state(value: Any) -> tuple[weakref.ReferenceType[Any], int] | None:
+    """Track tensor identity and in-place metadata changes without retaining storage."""
+    try:
+        return weakref.ref(value), value._version
+    except (AttributeError, RuntimeError, TypeError):
+        return None
+
+
+@dataclass
+class _EagerCallEntry:
+    func: JITFunc
+    key: tuple[Any, ...]
+    kernel: Kernel
+    arg_count: int
+    runtime_indices: tuple[int, ...]
+    compile_indices: tuple[int, ...]
+    compile_key: tuple[Any, ...]
+    buffer_indices: tuple[int, ...]
+    buffer_metadata: tuple[tuple[Any, ...], ...]
+    buffer_state: tuple[tuple[weakref.ReferenceType[Any], int], ...] | None
+
+
+@dataclass
+class _EagerCallCache:
+    """Cache the last full-positional eager call without retaining runtime tensors."""
+
+    entry: _EagerCallEntry | None = None
+
+    def clear(self) -> None:
+        self.entry = None
+
+    @staticmethod
+    def _compile_key(args: tuple[Any, ...], indices: tuple[int, ...]) -> tuple[Any, ...]:
+        return tuple(_freeze_jit_key_part(args[index]) for index in indices)
+
+    @staticmethod
+    def _buffer_metadata(args: tuple[Any, ...], indices: tuple[int, ...]) -> tuple[tuple[Any, ...], ...] | None:
+        metadata = tuple(_runtime_buffer_metadata(args[index]) for index in indices)
+        if any(item is None for item in metadata):
+            return None
+        return metadata  # type: ignore[return-value]
+
+    @staticmethod
+    def _buffer_state(args: tuple[Any, ...], indices: tuple[int, ...]) -> tuple[tuple[weakref.ReferenceType[Any], int], ...] | None:
+        state = tuple(_runtime_buffer_state(args[index]) for index in indices)
+        if any(item is None for item in state):
+            return None
+        return state  # type: ignore[return-value]
+
+    @staticmethod
+    def _matches_buffer_state(
+        args: tuple[Any, ...],
+        indices: tuple[int, ...],
+        state: tuple[tuple[weakref.ReferenceType[Any], int], ...] | None,
+    ) -> bool:
+        if state is None:
+            return False
+        return all(
+            buffer_ref() is args[index] and getattr(args[index], "_version", None) == version
+            for index, (buffer_ref, version) in zip(indices, state)
+        )
+
+    def lookup(
+        self,
+        func: JITFunc,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[Kernel, tuple[Any, ...]] | object:
+        entry = self.entry
+        if entry is None or kwargs or entry.func is not func or len(args) != entry.arg_count:
+            return _EAGER_CALL_CACHE_MISS
+
+        if entry.compile_indices:
+            try:
+                if self._compile_key(args, entry.compile_indices) != entry.compile_key:
+                    return _EAGER_CALL_CACHE_MISS
+            except TypeError:
+                return _EAGER_CALL_CACHE_MISS
+
+        if not self._matches_buffer_state(args, entry.buffer_indices, entry.buffer_state):
+            buffer_metadata = self._buffer_metadata(args, entry.buffer_indices)
+            if buffer_metadata != entry.buffer_metadata:
+                return _EAGER_CALL_CACHE_MISS
+            # A different tensor with identical lowering metadata can reuse the
+            # kernel; remember its identity so the next call avoids tuple(shape).
+            entry.buffer_state = self._buffer_state(args, entry.buffer_indices)
+
+        if len(entry.runtime_indices) == entry.arg_count:
+            return entry.kernel, args
+        return entry.kernel, tuple(args[index] for index in entry.runtime_indices)
+
+    def store(
+        self,
+        func: JITFunc,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        key: tuple[Any, ...],
+        kernel: Kernel,
+    ) -> None:
+        binder = func._argument_binder
+        if (
+            kwargs
+            or binder.use_signature_bind
+            or len(args) != len(binder.param_names)
+            or binder.positional_param_count != len(binder.param_names)
+        ):
+            self.clear()
+            return
+
+        runtime_indices = tuple(index for index, name in enumerate(binder.param_names) if name in binder.tensor_arg_names)
+        if not runtime_indices:
+            self.clear()
+            return
+        compile_indices = tuple(index for index in range(len(args)) if index not in runtime_indices)
+        # Eager annotations may initially hold placeholder Vars even for buffers,
+        # so identify runtime buffers from the actual call values.
+        buffer_indices = tuple(index for index in runtime_indices if hasattr(args[index], "shape") and hasattr(args[index], "dtype"))
+        buffer_metadata = self._buffer_metadata(args, buffer_indices)
+        if buffer_metadata is None:
+            self.clear()
+            return
+
+        try:
+            compile_key = self._compile_key(args, compile_indices)
+        except TypeError:
+            self.clear()
+            return
+
+        self.entry = _EagerCallEntry(
+            func=func,
+            key=key,
+            kernel=kernel,
+            arg_count=len(args),
+            runtime_indices=runtime_indices,
+            compile_indices=compile_indices,
+            compile_key=compile_key,
+            buffer_indices=buffer_indices,
+            buffer_metadata=buffer_metadata,
+            buffer_state=self._buffer_state(args, buffer_indices),
+        )
 
 
 def compile(
@@ -356,6 +515,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
                 self.debug_root_path = path.abspath(self.debug_root_path)
         self._kernel_cache: dict[tuple, Kernel] = {}
         self._call_form_cache: _CallFormCache = _CallFormCache()
+        self._eager_call_cache: _EagerCallCache = _EagerCallCache()
         self._tuner_cache: dict[tuple, Kernel] = {}
 
     def get_tir(self, *args: _P.args, **kwargs: _P.kwargs) -> PrimFunc[_KP, _T]:
@@ -541,6 +701,12 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             if kernel is not _CALL_FORM_CACHE_MISS:
                 return kernel
 
+        if self.mode == "eager" and not has_tune_params:
+            cached_call = self._eager_call_cache.lookup(self.func, args, kwargs)
+            if cached_call is not _EAGER_CALL_CACHE_MISS:
+                kernel, kernel_args = cached_call
+                return kernel(*kernel_args)
+
         key, kernel_args = self.func.parse_args(*args, **kwargs)
         kernel = self._kernel_cache.get(key, None)
         if kernel is None:
@@ -553,6 +719,8 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         # eager mode: execute kernel immediately and return result
         # lazy mode: return kernel object for manual invocation
         if self.mode == "eager":
+            if not has_tune_params:
+                self._eager_call_cache.store(self.func, args, kwargs, key, kernel)
             return kernel(*kernel_args.values())
         else:
             return kernel

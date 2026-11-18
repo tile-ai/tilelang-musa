@@ -30,6 +30,8 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace tvm {
@@ -296,7 +298,63 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 
 } // namespace reduce
 
+template <typename Impl, typename = void>
+struct HasThreadYReduceHooks : std::false_type {};
+
+template <typename Impl>
+struct HasThreadYReduceHooks<
+    Impl, std::void_t<decltype(Impl::MakeBatchAllReduceWithThreadY(
+                          std::declval<std::string>(), 0, 0,
+                          std::declval<PrimExpr>(), std::declval<PrimExpr>(), 0,
+                          0, std::declval<Target>(), std::declval<PrimExpr>())),
+                      decltype(Impl::MakeScalarAllReduceWithThreadY(
+                          std::declval<std::string>(), 0, 0,
+                          std::declval<PrimExpr>(), std::declval<PrimExpr>(),
+                          std::declval<Target>(), std::declval<PrimExpr>())),
+                      decltype(Impl::GetThreadYWorkspaceMultiplier(
+                          std::declval<Target>(), std::declval<PrimExpr>(),
+                          std::declval<PrimExpr>()))>> : std::true_type {};
+
 template <typename Impl> struct ReduceLowerer {
+  static std::string MakeBatchAllReduce(std::string reducer,
+                                        int reducing_threads, int scale,
+                                        PrimExpr thread_offset,
+                                        PrimExpr all_threads, int batch,
+                                        int workspace_stride, Target target,
+                                        PrimExpr thread_y_extent) {
+    if constexpr (HasThreadYReduceHooks<Impl>::value) {
+      return Impl::MakeBatchAllReduceWithThreadY(
+          std::move(reducer), reducing_threads, scale, thread_offset,
+          all_threads, batch, workspace_stride, target, thread_y_extent);
+    }
+    return Impl::MakeBatchAllReduce(std::move(reducer), reducing_threads, scale,
+                                    thread_offset, all_threads, batch,
+                                    workspace_stride, target);
+  }
+
+  static std::string MakeScalarAllReduce(std::string reducer,
+                                         int reducing_threads, int scale,
+                                         PrimExpr thread_offset,
+                                         PrimExpr all_threads, Target target,
+                                         PrimExpr thread_y_extent) {
+    if constexpr (HasThreadYReduceHooks<Impl>::value) {
+      return Impl::MakeScalarAllReduceWithThreadY(
+          std::move(reducer), reducing_threads, scale, thread_offset,
+          all_threads, target, thread_y_extent);
+    }
+    return Impl::MakeScalarAllReduce(std::move(reducer), reducing_threads,
+                                     scale, thread_offset, all_threads, target);
+  }
+
+  static int GetWorkspaceMultiplier(Target target, PrimExpr thread_y_extent,
+                                    PrimExpr all_threads) {
+    if constexpr (HasThreadYReduceHooks<Impl>::value) {
+      return Impl::GetThreadYWorkspaceMultiplier(target, thread_y_extent,
+                                                 all_threads);
+    }
+    return 1;
+  }
+
   static Stmt Lower(const ReduceOpNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     if (op.nan_propagate &&
@@ -591,6 +649,29 @@ template <typename Impl> struct ReduceLowerer {
           int reducing_threads = (*extent) * (*scale);
           auto thread_offset = lower_args.thread_bounds->min;
 
+          // MUSA PH1 reductions may execute in a predicated subset of
+          // the CTA. Allocate a pair of async barriers for the two phases of
+          // the butterfly reduction and pass the runtime barrier handle to
+          // the backend-specific AllReduce policy.
+          const bool use_sync_barrier =
+              Impl::UseSyncBarrier(lower_args.target, reducing_threads);
+          Buffer sync_barrier;
+          int sync_barrier_id = 0;
+          if (use_sync_barrier) {
+            ICHECK(lower_args.alloc_mbarrier)
+                << "reduce requires an mbarrier allocator for partial "
+                   "AllReduce synchronization";
+            ICHECK(lower_args.mbarrier_buffer != nullptr);
+            sync_barrier_id = lower_args.alloc_mbarrier(
+                reducing_threads, std::nullopt);
+            int sync_barrier_next_id = lower_args.alloc_mbarrier(
+                reducing_threads, std::nullopt);
+            ICHECK_EQ(sync_barrier_next_id, sync_barrier_id + 1)
+                << "reduce requires consecutive named barrier IDs";
+            sync_barrier = lower_args.mbarrier_buffer->value();
+            ICHECK(sync_barrier.defined());
+          }
+
           int vsize = Impl::GetPreferedVectorizedSize(clear_buffer->dtype,
                                                       lower_args.target);
           bool can_batch_pack =
@@ -600,10 +681,10 @@ template <typename Impl> struct ReduceLowerer {
           std::string reducer =
               reduce::MakeCodegenReducer(op, can_batch_pack ? vsize : 1)
                   .value();
-          std::string allreduce = Impl::MakeBatchAllReduce(
+          std::string allreduce = MakeBatchAllReduce(
               reducer, reducing_threads, *scale, thread_offset,
               lower_args.thread_bounds->extent, eff_batch, reducing_threads,
-              lower_args.target);
+              lower_args.target, lower_args.thread_y_extent);
 
           DataType ws_dtype = can_batch_pack
                                   ? clear_buffer->dtype.with_lanes(vsize)
@@ -611,7 +692,10 @@ template <typename Impl> struct ReduceLowerer {
           PrimExpr workspace;
           bool need_workspace = reducing_threads > 32;
           if (need_workspace) {
-            int ws_size = reducing_threads * eff_batch;
+            int ws_size = reducing_threads * eff_batch *
+                          GetWorkspaceMultiplier(
+                              lower_args.target, lower_args.thread_y_extent,
+                              lower_args.thread_bounds->extent);
             workspace = lower_args.add_workspace(ws_size, ws_dtype);
           }
 
@@ -671,6 +755,12 @@ template <typename Impl> struct ReduceLowerer {
                   Call(DataType::Handle(), builtin::address_of(),
                        {BufferLoad(pack_buf, {Integer(0)})});
               Array<PrimExpr> args = {StringImm(allreduce), packed_ptr};
+              if (use_sync_barrier) {
+                PrimExpr barrier_id = BufferLoad(
+                    sync_barrier,
+                    {IntImm(DataType::Int(32), sync_barrier_id)});
+                args.push_back(barrier_id);
+              }
               if (need_workspace) {
                 args.push_back(workspace);
               }
@@ -716,6 +806,12 @@ template <typename Impl> struct ReduceLowerer {
                                   {BufferLoad(clear_buffer, chunk_indices)});
 
               Array<PrimExpr> args = {StringImm(allreduce), ptr};
+              if (use_sync_barrier) {
+                PrimExpr barrier_id = BufferLoad(
+                    sync_barrier,
+                    {IntImm(DataType::Int(32), sync_barrier_id)});
+                args.push_back(barrier_id);
+              }
               if (need_workspace) {
                 args.push_back(workspace);
               }
@@ -784,15 +880,42 @@ template <typename Impl> struct ReduceLowerer {
 
           int reducing_threads = (*extent) * (*scale);
           auto thread_offset = lower_args.thread_bounds->min;
-          std::string allreduce = Impl::MakeScalarAllReduce(
+          const bool use_sync_barrier =
+              Impl::UseSyncBarrier(lower_args.target, reducing_threads);
+          Buffer sync_barrier;
+          int sync_barrier_id = 0;
+          if (use_sync_barrier) {
+            ICHECK(lower_args.alloc_mbarrier)
+                << "reduce requires an mbarrier allocator for partial "
+                   "AllReduce synchronization";
+            ICHECK(lower_args.mbarrier_buffer != nullptr);
+            sync_barrier_id = lower_args.alloc_mbarrier(
+                reducing_threads, std::nullopt);
+            int sync_barrier_next_id = lower_args.alloc_mbarrier(
+                reducing_threads, std::nullopt);
+            ICHECK_EQ(sync_barrier_next_id, sync_barrier_id + 1)
+                << "reduce requires consecutive named barrier IDs";
+            sync_barrier = lower_args.mbarrier_buffer->value();
+            ICHECK(sync_barrier.defined());
+          }
+          std::string allreduce = MakeScalarAllReduce(
               reduce::MakeCodegenReducer(op).value(), reducing_threads, *scale,
               thread_offset, lower_args.thread_bounds->extent,
-              lower_args.target);
+              lower_args.target, lower_args.thread_y_extent);
           Array<PrimExpr> thread_reduce_args = {
               StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
+          if (use_sync_barrier) {
+            PrimExpr barrier_id = BufferLoad(
+                sync_barrier,
+                {IntImm(DataType::Int(32), sync_barrier_id)});
+            thread_reduce_args.push_back(barrier_id);
+          }
           if (reducing_threads > 32) {
             int workspace_size = static_cast<int>(
                 *as_const_int(lower_args.thread_bounds->extent));
+            workspace_size *= GetWorkspaceMultiplier(
+                lower_args.target, lower_args.thread_y_extent,
+                lower_args.thread_bounds->extent);
             PrimExpr workspace =
                 lower_args.add_workspace(workspace_size, clear_buffer->dtype);
             thread_reduce_args.push_back(workspace);
