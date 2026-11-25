@@ -20,7 +20,9 @@ class PassPipeline:
         self._lower = lower
 
     def lower(self, mod: IRModule, target: Target) -> IRModule:
-        return self._lower(mod, target)
+        # Host compiler helpers consult Target.current() during lowering.
+        with target:
+            return self._lower(mod, target)
 
 
 _PIPELINES: dict[str, PassPipeline] = {}
