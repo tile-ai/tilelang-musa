@@ -266,7 +266,9 @@ class TLMUSASourceWrapper:
             descriptor_names = {
                 decl.group(1)
                 for parameter in parameter_list.split(",")
-                if (decl := re.fullmatch(r"\s*MUtensorDescriptor\s+(\w+)\s*", parameter))
+                # Codegen can prefix descriptors with grid_constant and const.
+                # Keep the end anchor so adjacent scalar parameters stay scalar.
+                if (decl := re.search(r"\bMUtensorDescriptor\s+(\w+)\s*$", parameter))
             }
             robust_desc_names = set(re.findall(r"tl::robust_param_desc_t\s+(\w+)", parameter_list))
             call_args = []
