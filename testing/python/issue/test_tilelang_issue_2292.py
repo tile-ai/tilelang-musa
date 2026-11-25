@@ -2,6 +2,7 @@ import torch
 
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 
 
 @tilelang.jit(
@@ -57,10 +58,12 @@ def _assert_accepts_packed_fp4_storage(kernel):
     _assert_runs_packed_fp4_storage(kernel, torch.float4_e2m1fn_x2)
 
 
+@tilelang.testing.requires_cuda
 def test_eager_jit_binds_logical_shape_for_packed_fp4_tensor():
     _assert_accepts_packed_fp4_storage(_fp4_eager_kernel)
 
 
+@tilelang.testing.requires_cuda
 def test_lazy_jit_accepts_packed_fp4_tensor():
     _assert_accepts_packed_fp4_storage(_fp4_lazy_kernel())
 
