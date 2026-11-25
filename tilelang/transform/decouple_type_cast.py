@@ -10,6 +10,8 @@ intermediate stage, allowing optimal vectorization for both computation and
 memory access.
 
 Mixed-precision is detected by the presence of Cast nodes in the loop body.
+Independent scalar shared updates with strided local operands are first grouped
+in physical address order so that they can use the same staging transformation.
 
 Two cases are handled:
 
@@ -40,6 +42,7 @@ After:
 
 from __future__ import annotations
 
+from tvm import arith
 from tvm import ir as tvm_ir
 from tvm import tirx
 from tvm.ir import Op
@@ -62,7 +65,7 @@ from tvm.tirx import (
     Stmt,
     Var,
 )
-from tvm.tirx.stmt_functor import post_order_visit, substitute
+from tvm.tirx.stmt_functor import ir_transform, post_order_visit, substitute
 from tvm.tirx.transform import prim_func_pass
 
 # Cache the Op for if_then_else to avoid repeated lookups
@@ -318,6 +321,145 @@ def _find_cast_entry(
     return None
 
 
+def _shared_update_vector_loop(op: For, body: Stmt) -> For | None:
+    """Expose contiguous shared copies without changing thread ownership.
+
+    A scalar shared RMW can be limited by strided fragment operands even when
+    the thread owns a contiguous group of shared elements. Reorder only a
+    proven independent iteration space, then let the existing cast decoupler
+    stage each group. LegalizeVectorizedLoop still checks all three stages.
+    """
+    if (
+        op.kind not in (ForKind.SERIAL, ForKind.UNROLLED)
+        or not isinstance(op.extent, IntImm)
+        or op.extent.value <= 1
+        or not isinstance(op.min, IntImm)
+        or op.min.value != 0
+        or (op.step is not None and (not isinstance(op.step, IntImm) or op.step.value != 1))
+        or op.thread_binding is not None
+        or any(key != "pragma_unroll_explicit" for key in op.annotations)
+        or not isinstance(body, BufferStore)
+        or not is_shared(body.buffer)
+        or body.buffer.dtype not in ("float16", "bfloat16")
+        or body.predicate is not None
+        or not _has_cast(body)
+    ):
+        return None
+
+    loads = []
+    unsafe = False
+
+    def check(node):
+        nonlocal unsafe
+        if isinstance(node, Call):
+            unsafe = True
+        elif isinstance(node, BufferLoad):
+            loads.append(node)
+            if node.predicate is not None:
+                unsafe = True
+            if node.buffer.data.same_as(body.buffer.data) and not _buf_indices_match(
+                body.buffer, list(body.indices), node.buffer, list(node.indices)
+            ):
+                unsafe = True
+
+    post_order_visit(body.value, check)
+    if unsafe or not any(load.buffer.same_as(body.buffer) for load in loads):
+        return None
+
+    # Indirect addresses could depend on a previous store. Separated physical
+    # axes also need a different contiguity proof.
+    for access in [body] + loads:
+        if access.buffer.axis_separators:
+            return None
+        indirect = []
+        for index in access.indices:
+            post_order_visit(index, lambda node, found=indirect: found.append(node) if isinstance(node, (BufferLoad, Call)) else None)
+        if indirect:
+            return None
+
+    analyzer = arith.Analyzer()
+    extent = op.extent.value
+    offset = analyzer.simplify(body.buffer.offset_of(body.indices)[0])
+    mapping = arith.normalize_to_iter_sum(offset, {op.loop_var: tvm_ir.Range(0, extent)})
+    if _expr_depends_on_var(mapping.base, op.loop_var):
+        return None
+    splits = []
+    for split in mapping.args:
+        if not split.source.source.same_as(op.loop_var):
+            return None
+        values = (split.lower_factor, split.extent, split.scale)
+        if not all(isinstance(value, IntImm) and value.value > 0 for value in values):
+            return None
+        splits.append(tuple(value.value for value in values))
+
+    # Every digit of the original iteration variable must occur exactly once.
+    covered = 1
+    for factor, size, _ in sorted(splits):
+        if factor != covered:
+            return None
+        covered *= size
+    if covered != extent:
+        return None
+
+    # Sorting by physical stride must also be injective, including any gaps.
+    splits.sort(key=lambda split: split[2])
+    span = 0
+    for _, size, stride in splits:
+        if stride <= span:
+            return None
+        span += (size - 1) * stride
+    if not splits or splits[0][2] != 1:
+        return None
+    width = 8  # At most 128 bits of FP16/BF16 shared memory per copy.
+    while splits[0][1] % width:
+        width //= 2
+    if width == 1 or body.buffer.data_alignment % (width * 2):
+        return None
+
+    group = Var(f"{op.loop_var.name}_group", op.loop_var.dtype)
+    lane = Var(f"{op.loop_var.name}_lane", op.loop_var.dtype)
+    linear = group * width + lane
+    reordered = tirx.const(0, op.loop_var.dtype)
+    divisor = 1
+    for factor, size, _ in splits:
+        reordered += linear // divisor % size * factor
+        divisor *= size
+    analyzer.bind(group, tvm_ir.Range(0, extent // width))
+    analyzer.bind(lane, tvm_ir.Range(0, width))
+    reordered = analyzer.simplify(reordered)
+
+    def lane_offset(access):
+        return analyzer.simplify(substitute(access.buffer.offset_of(access.indices)[0], {op.loop_var: reordered}))
+
+    store_offset = lane_offset(body)
+    base = analyzer.simplify(substitute(store_offset, {lane: 0}))
+    if not analyzer.can_prove(store_offset == base + lane) or not analyzer.can_prove(base % width == 0):
+        return None
+
+    # Avoid adding staging to updates whose local operands already vectorize.
+    strided_local = False
+    for load in loads:
+        if is_local_buffer(load.buffer):
+            index = lane_offset(load)
+            first = analyzer.simplify(substitute(index, {lane: 0}))
+            if not analyzer.can_prove(index == first) and not analyzer.can_prove(index == first + lane):
+                strided_local = True
+    if not strided_local:
+        return None
+
+    def simplify_indices(node):
+        if isinstance(node, BufferLoad):
+            return BufferLoad(node.buffer, [analyzer.simplify(index) for index in node.indices])
+        if isinstance(node, BufferStore):
+            return BufferStore(node.buffer, node.value, [analyzer.simplify(index) for index in node.indices])
+        return None
+
+    # Remove lane variables from broadcasts before the access collector runs.
+    vector_body = ir_transform(substitute(body, {op.loop_var: reordered}), None, simplify_indices)
+    vector_loop = For(lane, 0, width, ForKind.VECTORIZED, vector_body)
+    return For(group, 0, extent // width, op.kind, vector_loop, annotations=op.annotations)
+
+
 # ---------------------------------------------------------------------------
 # Mutator
 # ---------------------------------------------------------------------------
@@ -363,6 +505,11 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         """Visit For nodes, transforming vectorized loops with mixed-type stores."""
         # Recursively visit body to handle nested loops
         new_body = self.visit_stmt(op.body)
+
+        if op.kind in (ForKind.SERIAL, ForKind.UNROLLED):
+            grouped = _shared_update_vector_loop(op, new_body)
+            if grouped is not None:
+                return self._make_for(grouped, self.visit_stmt(grouped.body))
 
         # Only transform vectorized loops with static extent
         if op.kind != ForKind.VECTORIZED:

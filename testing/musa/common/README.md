@@ -8,6 +8,8 @@ The `common` directory contains architecture-agnostic MUSA test cases that valid
 - `test_add_fragment.py`: Verifies elementwise add through fragment-local accumulation followed by copy-out.
 - `test_copy_to_local.py`: Verifies `T.copy` to local buffer lowering avoids buggy thread-partitioned writes and matches numerical reference.
 - `test_finalize_reducer.py`: Verifies `T.finalize_reducer` cross-warp lowering uses named barriers correctly and produces correct row-wise sums.
+- `test_fast_divmod.py`: Verifies `T.fast_div`, `T.fast_mod`, and `T.fast_divmod` exactly match integer division and modulo for constant, host-scalar, and per-thread device divisors.
 - `test_fma.py`: Verifies a manual shared-memory + local-tile FMA matmul with fused ReLU output.
 - `test_reduce_sum.py`: Verifies cross-warp `T.reduce_sum` lowers to `AllReduce` with expected named-barrier initialization and correct results.
 - `test_unroll_factor.py`: Verifies `T.unroll(..., unroll_factor=4)` emits `#pragma unroll 4` and preserves numerical correctness.
+- `test_uint8x16_codegen.py`: Verifies direct uint8x16 codegen emits the expected `uint4` vector type.

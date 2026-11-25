@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import warnings
 from tilelang.env import (
     ENV_FALSE_VALUES,
     ENV_TRUE_VALUES,
@@ -394,6 +395,24 @@ def get_musa_version(musa_path=None):
         version_str = release_fields[-1]
         return tuple(int(field) for field in version_str.split("."))
     raise RuntimeError("Cannot read musa version file")
+
+
+def check_musa_compiler_compatibility(code: str) -> None:
+    """Warn about MUSA source features unsupported by the installed mcc."""
+    if "tl::sched_boundary();" not in code:
+        return
+
+    try:
+        version = get_musa_version()
+    except (IndexError, OSError, RuntimeError, ValueError):
+        return
+
+    if version < (5, 3, 0):
+        warnings.warn(
+            "T.sched_boundary is disabled: MTCC 5.3.0 or newer is required",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 @tvm_ffi.register_global_func("tvm.contrib.mcc.get_compute_version", override=True)

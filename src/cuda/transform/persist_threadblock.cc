@@ -21,11 +21,11 @@ constexpr const char *kUseCooperativeGroups = "use_cooperative_groups";
 
 using namespace tirx;
 
-class PersistThreadblock : public StmtExprMutator {
+class PersistThreadblockCudaBackend : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f) {
     PrimFuncNode *fptr = f.CopyOnWrite();
-    PersistThreadblock substituter;
+    PersistThreadblockCudaBackend substituter;
     // Trace the buffer map for tvm_access_ptr
     fptr->body = substituter.VisitStmt(f->body);
     if (substituter.has_sync_grid_) {
@@ -45,15 +45,15 @@ public:
   }
 
 private:
-  PersistThreadblock() = default;
+  PersistThreadblockCudaBackend() = default;
   bool has_sync_grid_ = false;
 };
 
 using namespace tirx::transform;
 
-tvm::transform::Pass PersistThreadblock() {
+tvm::transform::Pass PersistThreadblockCudaBackend() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return PersistThreadblock::Substitute(f);
+    return PersistThreadblockCudaBackend::Substitute(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.PersistThreadblock", {});
 }
@@ -61,7 +61,7 @@ tvm::transform::Pass PersistThreadblock() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.cuda.transform.PersistThreadblock",
-                        PersistThreadblock);
+                        PersistThreadblockCudaBackend);
 }
 
 } // namespace tl

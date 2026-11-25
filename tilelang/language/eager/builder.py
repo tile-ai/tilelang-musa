@@ -1037,7 +1037,7 @@ class TirTemplate(Generic[_P, _T]):
 
     name: str
     prim_func: PrimFunc[_P, _T]
-    matcher: dict[Var, tuple[tvm.tirx.Var, str, int, str]] | None = None
+    matcher: dict[Var, tuple[str, str, int, str, Buffer, bool]] | None = None
     constexprs: set[Var] = None
     is_lazy_style: bool = False  # True if from lazy-style (returns PrimFunc directly)
     ir_gen: IRGenerator[_P, _T] | None = None
@@ -1050,10 +1050,24 @@ class TirTemplate(Generic[_P, _T]):
         for k, v in prim_func.buffer_map.items():
             for i, s in enumerate(v.shape):
                 if s in constexpr and s not in matcher:
-                    matcher[s] = (k.name, "shape", i, s.name)
+                    matcher[s] = (
+                        k.name,
+                        "shape",
+                        i,
+                        s.name,
+                        v,
+                        _dtype_total_bits(v.dtype) < 8,
+                    )
             for i, s in enumerate(v.strides):
                 if s in constexpr and s not in matcher:
-                    matcher[s] = (k.name, "stride", i, s.name)
+                    matcher[s] = (
+                        k.name,
+                        "stride",
+                        i,
+                        s.name,
+                        v,
+                        _dtype_total_bits(v.dtype) < 8,
+                    )
         for s in constexpr:
             if s not in matcher:
                 shapes = {k: v.shape for k, v in prim_func.buffer_map.items()}
@@ -1078,17 +1092,21 @@ class TirTemplate(Generic[_P, _T]):
         if self.matcher is None:
             return ()
         result = []
-        buffers = {param.name: buffer for param, buffer in self.prim_func.buffer_map.items()}
-        for k, ty, i, name in self.matcher.values():
+        for k, ty, i, name, buffer, is_packed in self.matcher.values():
             if name in kwargs:
                 result.append(kwargs.get(name))
             elif k in kwargs:
                 value = kwargs[k]
-                buffer = buffers[k]
                 if ty == "shape":
-                    result.append(_logical_shape_value(value, buffer, i))
+                    shape = value.shape[i]
+                    if is_packed and i == len(buffer.shape) - 1:
+                        shape *= _packed_storage_factor(buffer, value)
+                    result.append(shape)
                 elif ty == "stride":
-                    result.append(_logical_stride_value(value, buffer, i))
+                    stride = value.strides[i] if isinstance(value, Buffer) else value.stride()[i]
+                    if is_packed and i != len(buffer.strides) - 1:
+                        stride *= _packed_storage_factor(buffer, value)
+                    result.append(stride)
             else:
                 raise ValueError(
                     f"Cannot find value for constexpr variable `{name}`\n"

@@ -78,5 +78,18 @@ def test_tilelang_kernel_gemm_with_stride():
     run_gemm_with_stride_ss(128, 128, 64, 32, 32, 32)
 
 
+def test_stride_selects_supported_musa_instruction():
+    import re
+
+    target = tilelang.tvm.target.Target({"kind": "musa", "arch": "mp_31"})
+    with tilelang.tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}):
+        artifact = tilelang.lower(matmul(128, 128, 64, 32, 32, 32), target=target)
+    calls = re.findall(r"tl::gemm_ss<([^>]+)>", artifact.kernel_source)
+    assert calls
+    for call in calls:
+        args = [arg.strip() for arg in call.split(",")]
+        assert args[10:13] == ["32", "0", "false"]
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -195,6 +195,12 @@ struct GemmImpl {
   std::optional<std::array<int, 3>> (*select_inst_shape)(
       const GemmNode &op, int block_size, Target target,
       String gemm_inst) = nullptr;
+
+  bool (*can_reuse_existing_shared_layout)(const GemmNode &op,
+                                           const LayoutMap &layout_map,
+                                           const Buffer &buffer, int block_size,
+                                           Target target,
+                                           String gemm_inst) = nullptr;
 };
 
 void RegisterGemmImpl(GemmImpl impl);

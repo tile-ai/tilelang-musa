@@ -55,6 +55,30 @@ using namespace tirx;
 // 2. Until the first AttrStmtNode with tvm::attr::kTarget.
 // 3. Call SplitDeviceFunc, which will create a new device function and replace
 //    the original body with a call to that function.
+class DuplicateDeclBufferFreshener final : public tirx::StmtExprMutator {
+protected:
+  tirx::Stmt VisitStmt_(const tirx::DeclBufferNode *op) final {
+    tirx::Buffer buffer = op->buffer;
+    if (defined_buffers_.insert(buffer.get()).second) {
+      return tirx::StmtExprMutator::VisitStmt_(op);
+    }
+
+    // StorageRewrite may coalesce branch-local fragment buffers onto the same
+    // physical storage and emit the same DeclBuffer object more than once.
+    // Buffer objects are SSA values in tirx, so keep the shared data pointer
+    // but give every repeated declaration a fresh Buffer identity.  The base
+    // mutator then remaps following buffer accesses to this declaration.
+    ffi::ObjectPtr<tirx::BufferNode> fresh_node =
+        ffi::make_object<tirx::BufferNode>(*buffer.get());
+    tirx::Buffer fresh(fresh_node);
+    buffer_remap_.Set(buffer, fresh);
+    return tirx::DeclBuffer(fresh, op->span);
+  }
+
+private:
+  std::unordered_set<const tirx::BufferNode *> defined_buffers_;
+};
+
 class HostDeviceSplitter : public tirx::StmtMutator {
 public:
   explicit HostDeviceSplitter(IRModule *device_mod,
@@ -449,6 +473,11 @@ private:
 
 tirx::PrimFunc SplitHostDevice(tirx::PrimFunc func, IRModule *device_mod,
                                std::function<GlobalVar()> var_supply) {
+  if (tirx::Stmt body = DuplicateDeclBufferFreshener()(func->body);
+      !body.same_as(func->body)) {
+    func.CopyOnWrite()->body = std::move(body);
+  }
+
   HostDeviceSplitter splitter(device_mod, std::move(var_supply), func);
   splitter.SetHostFuncSignature(func);
   // Propagate non-restrict parameter list from host func to device kernels

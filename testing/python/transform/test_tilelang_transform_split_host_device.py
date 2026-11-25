@@ -78,6 +78,41 @@ def get_param_by_name(func: tvm.tirx.PrimFunc, name: str):
     return None
 
 
+def test_split_host_device_freshens_duplicate_decl_buffer():
+    """Storage-rewritten branch-local views must remain valid buffer SSA."""
+    scratch = tirx.decl_buffer((1,), "float32", name="scratch", scope="local")
+    device_body = tirx.SeqStmt(
+        [
+            tirx.DeclBuffer(scratch),
+            tirx.BufferStore(scratch, tirx.const(1, "float32"), [0]),
+            tirx.DeclBuffer(scratch),
+            tirx.BufferStore(scratch, tirx.const(2, "float32"), [0]),
+        ]
+    )
+    device_region = tirx.AttrStmt(tvm.target.Target("cuda"), "target", 0, device_body)
+    func = tirx.PrimFunc([], device_region).with_attr("global_symbol", "main")
+    mod = tl.transform.SplitHostDevice()(tvm.IRModule({"main": func}))
+
+    device_func = get_device_func(mod)
+    assert device_func is not None
+    declarations = []
+    stores = []
+
+    def collect_decl_buffer(stmt):
+        if isinstance(stmt, tirx.DeclBuffer):
+            declarations.append(stmt.buffer)
+        if isinstance(stmt, tirx.BufferStore):
+            stores.append(stmt.buffer)
+
+    tirx.stmt_functor.post_order_visit(device_func.body, collect_decl_buffer)
+    assert len(declarations) == 2
+    assert len(stores) == 2
+    assert not declarations[0].same_as(declarations[1])
+    assert declarations[0].data.same_as(declarations[1].data)
+    assert stores[0].same_as(declarations[0])
+    assert stores[1].same_as(declarations[1])
+
+
 @tilelang.testing.requires_cuda
 def test_split_host_device_with_user_assume():
     """Test that user-defined assumes are correctly copied to device function

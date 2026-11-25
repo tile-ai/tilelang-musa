@@ -12,6 +12,7 @@
 
 #include <cmath>
 
+#include "backend/common/target_utils.h"
 #include "layout.h"
 
 namespace tvm {
@@ -256,6 +257,22 @@ Fragment MakePHSqmmaFragmentC(const int block_m, const int block_n,
   return block_layout;
 }
 
+Fragment MakeSqmmaFragmentC(const int block_m, const int block_n,
+                            const int warp_m, const int warp_n,
+                            const int element_size,
+                            const std::array<int, 3> &inst_shape) {
+  Target target = Target::Current();
+  ICHECK(target.defined())
+      << "Target::Current() is undefined for SQMMA C fragment layout.";
+  if (TargetIsPH1(target)) {
+    return MakePHSqmmaFragmentC(block_m, block_n, warp_m, warp_n, element_size,
+                                inst_shape);
+  }
+  ICHECK(0) << "Unsupported target for SQMMA C fragment layout: "
+            << target->str();
+  return Fragment();
+}
+
 Fragment MakePH1WmmaCLayout(const int block_m, const int block_n,
                             const int warp_m, const int warp_n,
                             const int element_size,
@@ -271,6 +288,22 @@ Fragment MakePH1WmmaCLayout(const int block_m, const int block_n,
   auto block_layout = warp_layout->Repeat(
       {block_m / warp_m / inst_m, block_n / warp_n / inst_n}, false, false);
   return block_layout;
+}
+
+Fragment MakeWmmaFragmentC(const int block_m, const int block_n,
+                           const int warp_m, const int warp_n,
+                           const int element_size,
+                           const std::array<int, 3> &inst_shape) {
+  Target target = Target::Current();
+  ICHECK(target.defined())
+      << "Target::Current() is undefined for WMMA C fragment layout.";
+  if (TargetIsPH1(target)) {
+    return MakePH1WmmaCLayout(block_m, block_n, warp_m, warp_n, element_size,
+                              inst_shape);
+  }
+  ICHECK(0) << "Unsupported target for WMMA C fragment layout: "
+            << target->str();
+  return Fragment();
 }
 
 Fragment MakePH1WmmaFragmentA(const int block_m, const int block_n,
@@ -345,6 +378,24 @@ Fragment MakePH1WmmaFragmentB(const int block_m, const int block_n,
   }
 }
 
+Fragment MakeWmmaFragmentA(const int block_m, const int block_n,
+                           const int block_k, const int warp_m,
+                           const int warp_n, const int element_size,
+                           bool transposed,
+                           const std::array<int, 3> &inst_shape) {
+  return MakePH1WmmaFragmentA(block_m, block_n, block_k, warp_m, warp_n,
+                              element_size, transposed, inst_shape);
+}
+
+Fragment MakeWmmaFragmentB(const int block_m, const int block_n,
+                           const int block_k, const int warp_m,
+                           const int warp_n, const int element_size,
+                           bool transposed,
+                           const std::array<int, 3> &inst_shape) {
+  return MakePH1WmmaFragmentB(block_m, block_n, block_k, warp_m, warp_n,
+                              element_size, transposed, inst_shape);
+}
+
 Layout MakePH1WmmaABLayout(int mat_stride, int mat_continuous, int continuity,
                            int element_size, bool k_inner) {
   // Keep a dedicated PH1 WMMA hook even though we currently stage A/B with a
@@ -355,6 +406,12 @@ Layout MakePH1WmmaABLayout(int mat_stride, int mat_continuous, int continuity,
   static_cast<void>(k_inner);
   return MakeLinearLayout(
       Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
+}
+
+Layout MakeWmmaABLayout(int mat_stride, int mat_continuous, int continuity,
+                        int element_size, bool k_inner) {
+  return MakePH1WmmaABLayout(mat_stride, mat_continuous, continuity,
+                             element_size, k_inner);
 }
 
 Fragment MakeGemmQY2FragmentC(const int block_m, const int block_n,
@@ -1427,32 +1484,41 @@ Layout MakeGemmABLayoutPH1(int mat_stride, int mat_continuous, int continuity,
     return Layout(Array<PrimExpr>{mat_stride, mat_continuous}, {i, j});
   }
 
-  ICHECK(swizzle_bytes * 2 == swizzle_cycle_bytes);
+  ICHECK_EQ(swizzle_bytes % SL, 0)
+      << "PH1 chunked swizzle requires whole swizzle lines per chunk";
 
-  PrimExpr cycle_id = FloorMod(chunk_id, 2);
-  PrimExpr global_cycle_linear;
-  for (int index = 0; index < 2; ++index) {
-    int swizzle_offset = index * swizzle_bytes;
-    auto chunk_swizzle = MakeGemmABSwizzlePH1(
-        mat_stride, chunk_cols, elem_bytes, SG, SS, SL, swizzle_offset);
-    Array<PrimExpr> chunk_out = chunk_swizzle->Forward({row, col_in_chunk});
-    PrimExpr chunk_linear = chunk_out[0] * chunk_cols + chunk_out[1];
-    PrimExpr global_block_linear =
-        index * (mat_stride * chunk_cols) + chunk_linear;
-    PrimExpr pred = (cycle_id == index);
-    if (index == 0) {
-      global_cycle_linear = global_block_linear;
-    } else {
-      global_cycle_linear =
-          Select(pred, global_block_linear, global_cycle_linear);
-    }
-  }
-  PrimExpr global_linear =
-      FloorDiv(chunk_id, 2) * (2 * mat_stride * chunk_cols) +
-      global_cycle_linear;
+  ICHECK_EQ(swizzle_cycle_bytes % swizzle_bytes, 0)
+      << "PH1 chunked swizzle requires chunk byte size to divide the swizzle "
+         "cycle, swizzle_bytes="
+      << swizzle_bytes << ", swizzle_cycle_bytes=" << swizzle_cycle_bytes;
+  const int chunks_per_cycle = swizzle_cycle_bytes / swizzle_bytes;
+  PrimExpr cycle_id = FloorMod(chunk_id, chunks_per_cycle);
+  PrimExpr addr = (row * chunk_cols + col_in_chunk) * elem_bytes;
+  PrimExpr line_id = FloorDiv(addr, SL);
+  PrimExpr line_offset = FloorMod(addr, SL);
+  PrimExpr sg_per_sl = FloorDiv(SL, SG);
+  PrimExpr offset_line_id = FloorDiv(cycle_id * swizzle_bytes, SL);
+  PrimExpr cycle_line_id = FloorMod(line_id + offset_line_id, sg_per_sl);
+  PrimExpr sg_id = FloorDiv(line_offset, SG);
+  PrimExpr sg_offset = FloorMod(line_offset, SG);
+  PrimExpr target_sg_id = sg_id ^ cycle_line_id;
+  PrimExpr target_line_offset = target_sg_id * SG + sg_offset;
+  PrimExpr target_addr = line_id * SL + target_line_offset;
+  PrimExpr chunk_linear = FloorDiv(target_addr, elem_bytes);
+  PrimExpr global_cycle_linear =
+      cycle_id * (mat_stride * chunk_cols) + chunk_linear;
+  PrimExpr global_linear = FloorDiv(chunk_id, chunks_per_cycle) *
+                               (chunks_per_cycle * mat_stride * chunk_cols) +
+                           global_cycle_linear;
   PrimExpr i = FloorDiv(global_linear, mat_continuous);
   PrimExpr j = FloorMod(global_linear, mat_continuous);
   return Layout(Array<PrimExpr>{mat_stride, mat_continuous}, {i, j});
+}
+
+Layout MakeSqmmaABLayout(int mat_stride, int mat_continuous, int continuity,
+                         int element_size, bool k_inner) {
+  return MakeGemmABLayoutPH1(mat_stride, mat_continuous, continuity,
+                             element_size, k_inner);
 }
 
 Layout MakeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,

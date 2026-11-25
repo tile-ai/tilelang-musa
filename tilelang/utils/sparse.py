@@ -40,7 +40,7 @@ _DEFAULT_META_DTYPE = T.int16
 
 @tilelang.jit(
     out_idx=[-2, -1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def _compress_fn(D, dtype, meta_dtype, block_M=_BLOCK_M, block_K=_BLOCK_K, elem_per_thread=_ELEM_PER_THREAD):
     e_factor = get_e_factor(dtype, meta_dtype)

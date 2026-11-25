@@ -131,7 +131,7 @@ static Layout ExpandLayoutToBufferSubdomain(const Buffer &buffer,
   for (const auto &e : layout->GetForwardIndex()) {
     expanded_forward.push_back(Substitute(e, shifted_vars));
   }
-  return Layout(buffer->shape, expanded_forward);
+  return layout->CopyMetadataTo(Layout(buffer->shape, expanded_forward));
 }
 
 static Layout ExpandLayoutToBufferShape(const Buffer &buffer,
@@ -159,7 +159,8 @@ static Layout ExpandLayoutToBufferShape(const Buffer &buffer,
         for (const auto &e : layout->GetForwardIndex()) {
           lifted_forward.push_back(e);
         }
-        Layout lifted_layout = Layout(layout->InputShape(), lifted_forward);
+        Layout lifted_layout = layout->CopyMetadataTo(
+            Layout(layout->InputShape(), lifted_forward));
         if (IsSharedLayoutOutputExtentCompatible(buffer, lifted_layout)) {
           return lifted_layout;
         }
@@ -311,7 +312,8 @@ static Layout CanonicalizeSharedStageLayout(const Buffer &buffer,
       reordered_forward.push_back(forward_index[i]);
     }
   }
-  return Layout(layout->InputShape(), reordered_forward);
+  return layout->CopyMetadataTo(
+      Layout(layout->InputShape(), reordered_forward));
 }
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
@@ -1637,6 +1639,7 @@ private:
                                      : loop_mbar_phase_stack_.back();
     lower_args.mbarrier_buffer = &mbarrier_buffer_;
     lower_args.cluster_size = cluster_size_;
+    lower_args.thread_y_extent = thread_y_extent_;
     lower_args.add_workspace = add_workspace_callback;
     lower_args.alloc_mbarrier = mbarrier_callback;
     lower_args.update_barrier_arrive = barrier_arrive_callback;
@@ -1655,6 +1658,12 @@ private:
         thread_var_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
+      } else if (iv->thread_tag == "threadIdx.y") {
+        PrimExpr old_thread_y_extent = thread_y_extent_;
+        thread_y_extent_ = iv->dom->extent;
+        Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+        thread_y_extent_ = old_thread_y_extent;
+        return stmt;
       }
     }
     return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
@@ -1676,8 +1685,9 @@ private:
    * - If the loop only manipulates local buffers, thread partitioning is
    * skipped.
    * - If reducers are present, vectorization is skipped.
-   * - Vectorization is only applied if non-local buffers or vectorizable casts
-   *   are present.
+   * - Vectorization is attempted for non-local/cast loops and for Fragment
+   *   loops without mutable local.var state; the vectorizer
+   *   decides the legal physical width and falls back to scalar when needed.
    *
    * @return Stmt The lowered statement.
    */
@@ -1805,15 +1815,20 @@ private:
     // Element-level intrinsics (e.g. atomic_add) pass non-local buffer
     // pointers via tvm_access_ptr / tl::access_ptr inside CallNodes.
     bool has_non_local_store = false;
-    bool has_fragment_access = false;
+    bool has_fragment_buffer_access = false;
+    bool has_buffer_access_outside_fragment = false;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *load = obj.as<BufferLoadNode>()) {
         if (IsFragmentBuffer(load->buffer)) {
-          has_fragment_access = true;
+          has_fragment_buffer_access = true;
+        } else {
+          has_buffer_access_outside_fragment = true;
         }
       } else if (const auto *store = obj.as<BufferStoreNode>()) {
         if (IsFragmentBuffer(store->buffer)) {
-          has_fragment_access = true;
+          has_fragment_buffer_access = true;
+        } else {
+          has_buffer_access_outside_fragment = true;
         }
         if (!IsLocalBuffer(store->buffer)) {
           has_non_local_store = true;
@@ -1827,7 +1842,9 @@ private:
             auto it = buffer_map_.find(var);
             if (it != buffer_map_.end()) {
               if (IsFragmentBuffer(it->second)) {
-                has_fragment_access = true;
+                has_fragment_buffer_access = true;
+              } else {
+                has_buffer_access_outside_fragment = true;
               }
               if (!IsLocalBuffer(it->second)) {
                 has_non_local_store = true;
@@ -1838,7 +1855,9 @@ private:
           // tl::access_ptr format: (BufferLoad, extent, rw_mask)
           if (const auto *load = call->args[0].as<BufferLoadNode>()) {
             if (IsFragmentBuffer(load->buffer)) {
-              has_fragment_access = true;
+              has_fragment_buffer_access = true;
+            } else {
+              has_buffer_access_outside_fragment = true;
             }
             if (!IsLocalBuffer(load->buffer)) {
               has_non_local_store = true;
@@ -1849,7 +1868,9 @@ private:
           // PostOrderVisit reaches the address_of call directly.
           if (const auto *load = call->args[0].as<BufferLoadNode>()) {
             if (IsFragmentBuffer(load->buffer)) {
-              has_fragment_access = true;
+              has_fragment_buffer_access = true;
+            } else {
+              has_buffer_access_outside_fragment = true;
             }
             if (!IsLocalBuffer(load->buffer)) {
               has_non_local_store = true;
@@ -1863,7 +1884,7 @@ private:
     // must be partitioned together with their layout rewrite: once a logical
     // fragment index is lowered to a physical per-thread slot, the logical loop
     // iteration has to be owned by the corresponding thread.
-    bool parallel_loop = has_non_local_store || has_fragment_access;
+    bool parallel_loop = has_non_local_store || has_fragment_buffer_access;
 
     // Check if there are non-local buffer accesses (for vectorization decision)
     bool has_non_local = false;
@@ -1920,11 +1941,24 @@ private:
       }
     });
 
-    // Decide whether to vectorize:
-    // - Only if there are non-local buffers or vectorizable casts
-    // - AND no reducers are present
+    // Decide whether to try vectorization.  The vectorizer itself is
+    // responsible for proving a legal physical vector width and falls back to
+    // scalar when the Fragment/local layout is not contiguous.  Keep the
+    // known-unsafe cases out of that path: reducers and mutable local.var
+    // scalar state.
+    // Only add Fragment-only loops to the original gate.  Mixed Fragment /
+    // local or global loops retain their previous behavior; the vectorizer
+    // must not be used as a substitute for mixed-layout analysis.
+    bool disable_fragment_vectorize =
+        tvm::transform::PassContext::Current()
+            ->GetConfig<Bool>(kDisableFragmentVectorize, Bool(false))
+            .value();
+    bool has_only_fragment_access =
+        has_fragment_buffer_access && !has_buffer_access_outside_fragment;
     bool should_vectorize =
-        (has_non_local || has_cast_operations) && !has_reducer;
+        (has_non_local || has_cast_operations ||
+         (has_only_fragment_access && !disable_fragment_vectorize)) &&
+        !has_reducer;
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, thread_var_->var, analyzer_, layout_map_,
@@ -1947,11 +1981,15 @@ private:
           bool disable_thread_storage_sync =
               ctx->GetConfig<Bool>(kDisableThreadStorageSync, Bool(false))
                   .value();
+          bool disable_predicated_async_copy =
+              ctx->GetConfig<Bool>(kDisablePredicatedAsyncCopy, Bool(true))
+                  .value();
           inject_result = InjectPTXAsyncCopy(
               lowered, /*enable_auto_async_copy=*/true,
               parallel_async_without_async_commit_wait,
               disable_thread_storage_sync,
-              /*sync_inside_conditionals=*/true);
+              /*sync_inside_conditionals=*/true,
+              disable_predicated_async_copy);
         } else {
           inject_result = InjectPTXAsyncCopy(
               lowered, parallel_async_without_async_commit_wait);
@@ -1981,6 +2019,7 @@ private:
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
   size_t thread_block_size_ = 0;
+  PrimExpr thread_y_extent_ = IntImm(DataType::Int(32), 1);
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;
   // Stack of per-Block workspace buffers gathered while visiting children

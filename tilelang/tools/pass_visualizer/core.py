@@ -1,9 +1,9 @@
-"""Core helpers for the pass visualizer: load a user TileLang kernel, build the
-CUDA lowering pass pipeline, and render a PrimFunc's SBlock structure tree.
+"""Core helpers for the pass visualizer: load a user TileLang kernel, build its
+target-specific lowering pass pipeline, and render a PrimFunc's SBlock tree.
 
-This mirrors ``CUDAPassPipelineBodyPrologue`` in ``tilelang/cuda/pipeline.py``,
-running each prologue pass (through LayoutInference and the post-LayoutInference
-lowering passes) so the structure tree can be captured before/after every stage.
+This mirrors the CUDA and MUSA pipeline prologues through LayoutInference and
+the post-LayoutInference legalization passes, so the structure tree can be
+captured before and after every stage.
 
 The kernel file is taken as input; any ``@tilelang.jit`` kernel in the file is
 auto-discovered. These helpers are consumed by ``viewer.py`` to emit an
@@ -28,8 +28,8 @@ try:
 except ImportError:  # installed package (0.1.x) exposes it here
     from tilelang.utils.target import determine_target
 from tilelang.engine.lower import canon_target_host
-from tilelang.cuda.pipeline import allow_warp_specialized
 from tilelang.backend.pass_pipeline.pipeline_utils import (
+    allow_warp_specialized,
     should_enable_race_check,
     should_force_let_inline,
 )
@@ -91,18 +91,20 @@ def build_module(func: tirx.PrimFunc, target: str | Target = "auto"):
     return mod, target
 
 
-def build_pass_stages(target: Target) -> list[tuple[str, object]]:
-    """Build the ordered CUDA prologue pass list, through the full Prologue.
+PassStage = tuple[str, object]
 
-    Each stage is a ``(name, transform)`` pair where ``transform`` is a TVM pass
-    object callable as ``transform(mod) -> mod``. Conditional passes are resolved
-    here so the returned list reflects what actually runs for this target/config.
 
-    Matches CUDAPassPipelineBodyPrologue (tilelang/cuda/pipeline.py:68-137).
-    """
-    stages: list[tuple[str, object]] = []
-
-    stages.append(("BindTarget", tirx.transform.BindTarget(target)))
+def _build_common_pass_stages(
+    target: Target,
+    *,
+    before_materialize: list[PassStage],
+    before_pipeline_planning: list[PassStage],
+    after_lower_tile_op: list[PassStage],
+    before_hoist_non_restrict: list[PassStage],
+) -> list[PassStage]:
+    """Build shared CUDA/MUSA stages with target-specific insertion points."""
+    stages: list[PassStage] = [("BindTarget", tirx.transform.BindTarget(target))]
+    stages.extend(before_materialize)
     stages.append(("MaterializeKernelLaunch", tilelang.transform.MaterializeKernelLaunch()))
 
     if should_force_let_inline():
@@ -115,31 +117,75 @@ def build_pass_stages(target: Target) -> list[tuple[str, object]]:
     stages.append(("InjectAssumes", tilelang.transform.InjectAssumes()))
     stages.append(("Simplify", tilelang.transform.Simplify()))
     stages.append(("LayoutReducer", tilelang.transform.LayoutReducer()))
+    stages.extend(before_pipeline_planning)
 
-    if allow_warp_specialized(target=target):
-        stages.append(("ProducerConsumerWarpSpecialized", tilelang.cuda.transform.ProducerConsumerWarpSpecialized()))
-
-    stages.append(("LowerBlackwell2SM", tilelang.cuda.transform.LowerBlackwell2SM()))
     stages.append(("IfStmtBinding", tilelang.transform.IfStmtBinding()))
     stages.append(("PipelinePlanning", tilelang.transform.PipelinePlanning()))
     stages.append(("InjectSoftwarePipeline", tilelang.transform.InjectSoftwarePipeline()))
     stages.append(("Simplify", tilelang.transform.Simplify()))
-
-    # Infer memory layouts for fragments and shared memory (pipeline.py:113).
     stages.append(("LayoutInference", tilelang.transform.LayoutInference()))
 
-    # --- Post-LayoutInference lowering (pipeline.py:117-137) ---
-    # LayoutVisual (pipeline.py:115) is skipped: it only visualizes, not a transform.
+    # LayoutVisual is skipped because it observes the IR without transforming it.
     stages.append(("LowerTileOp", tilelang.transform.LowerTileOp()))
-    stages.append(("LowerL2Persistent", tilelang.cuda.transform.LowerL2Persistent()))
+    stages.extend(after_lower_tile_op)
     stages.append(("DecoupleTypeCast", tilelang.transform.DecoupleTypeCast()))
     stages.append(("LegalizeVectorizedLoop", tilelang.transform.LegalizeVectorizedLoop()))
     stages.append(("LegalizeSafeMemoryAccess", tilelang.transform.LegalizeSafeMemoryAccess()))
     stages.append(("LowerAccessPtr", tilelang.transform.LowerAccessPtr()))
     stages.append(("Simplify", tilelang.transform.Simplify()))
+    stages.extend(before_hoist_non_restrict)
     stages.append(("HoistNonRestrictParams", tilelang.transform.HoistNonRestrictParams()))
-
     return stages
+
+
+def _build_cuda_pass_stages(target: Target) -> list[PassStage]:
+    """Build stages matching ``CUDAPassPipelineBodyPrologue``."""
+    before_pipeline_planning: list[PassStage] = []
+    if allow_warp_specialized(target=target):
+        before_pipeline_planning.append(("ProducerConsumerWarpSpecialized", tilelang.cuda.transform.ProducerConsumerWarpSpecialized()))
+    before_pipeline_planning.append(("LowerBlackwell2SM", tilelang.cuda.transform.LowerBlackwell2SM()))
+    return _build_common_pass_stages(
+        target,
+        before_materialize=[],
+        before_pipeline_planning=before_pipeline_planning,
+        after_lower_tile_op=[("LowerL2Persistent", tilelang.cuda.transform.LowerL2Persistent())],
+        before_hoist_non_restrict=[],
+    )
+
+
+def _build_musa_pass_stages(target: Target) -> list[PassStage]:
+    """Build stages matching the prologue of ``MUSAPassPipelineBody``."""
+    from tilelang.musa import transform as musa_transform
+    from tilelang.musa.pipeline import allow_lower_musa_burst
+
+    before_pipeline_planning: list[PassStage] = []
+    if allow_warp_specialized(target=target):
+        before_pipeline_planning.append(("ProducerConsumerWarpSpecialized", musa_transform.ProducerConsumerWarpSpecialized()))
+    before_hoist_non_restrict: list[PassStage] = []
+    if allow_lower_musa_burst(target) and hasattr(tilelang.transform, "LateVectorizePlanner"):
+        before_hoist_non_restrict.append(("LateVectorizePlanner", tilelang.transform.LateVectorizePlanner()))
+    return _build_common_pass_stages(
+        target,
+        before_materialize=[("LowerMUSAFastDivmod", tilelang.transform.LowerMUSAFastDivmod())],
+        before_pipeline_planning=before_pipeline_planning,
+        after_lower_tile_op=[("LowerL2Persistent", musa_transform.LowerL2Persistent())],
+        before_hoist_non_restrict=before_hoist_non_restrict,
+    )
+
+
+def build_pass_stages(target: Target) -> list[PassStage]:
+    """Build the ordered lowering-prologue stages for ``target``.
+
+    Each stage is a ``(name, transform)`` pair where ``transform`` is a TVM pass
+    object callable as ``transform(mod) -> mod``. Conditional passes are resolved
+    here so the returned list reflects what actually runs for this target/config.
+    """
+    target_kind = target.kind.name
+    if target_kind == "cuda":
+        return _build_cuda_pass_stages(target)
+    if target_kind == "musa":
+        return _build_musa_pass_stages(target)
+    raise ValueError(f"Pass visualizer supports CUDA and MUSA targets, but got {target_kind!r}.")
 
 
 def _fmt_shape(shape) -> list:

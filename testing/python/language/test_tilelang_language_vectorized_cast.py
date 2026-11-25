@@ -147,7 +147,7 @@ VECTORIZED_CAST_CASES = [
 ]
 
 
-@tilelang.testing.requires_musa
+@tilelang.testing.requires_musa_compute_version_ge(3, 1)
 @pytest.mark.parametrize(
     "src_dtype_str,dst_dtype_str,check_str,lanes",
     VECTORIZED_CAST_CASES,

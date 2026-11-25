@@ -112,6 +112,18 @@ def LowerMUSAAcceleratedOps():
     return lambda f: f
 
 
+def LowerMUSAFastDivmod():
+    """Lower explicit ``T.fast_div*`` calls using MUSA magic-number division."""
+
+    return _ffi_api.LowerMUSAFastDivmod()  # type: ignore
+
+
+def LowerMUSARobustDescriptor():
+    """Hoist host-evaluable MUSA robust descriptors into kernel parameters."""
+
+    return _ffi_api.LowerMUSARobustDescriptor()  # type: ignore
+
+
 def ThreadRangeConstProp():
     """Constant propagation for simple threadIdx range guarded expressions."""
     if hasattr(_ffi_api, "ThreadRangeConstProp"):
@@ -413,6 +425,17 @@ def VectorizeSingleSide():
     return _ffi_api.VectorizeSingleSide()  # type: ignore
 
 
+def LowerLDGSTG():
+    """Lower eligible global loads and stores to target intrinsics.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerLDGSTG()  # type: ignore
+
+
 def LateVectorizePlanner():
     """LateVectorizePlanner
 
@@ -439,6 +462,8 @@ def MergeAsyncCopy():
         The result pass
     """
     return _ffi_api.MergeAsyncCopy()  # type: ignore
+
+
 def ConfigIndexBitwidth():
     """Config index bitwidth.
 

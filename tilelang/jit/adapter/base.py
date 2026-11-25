@@ -75,6 +75,12 @@ class BaseKernelAdapter(ABC):
             except Exception:
                 # Fallback to Python API if internal handles are unavailable
                 return lambda: int(torch.cuda.current_stream().cuda_stream)
+        if hasattr(torch, "musa") and torch.musa.is_available():
+            try:
+                torch.musa._lazy_init()
+                return lambda: int(torch.musa.current_stream().musa_stream)
+            except Exception:
+                return lambda: int(torch.musa.current_stream().musa_stream)
         # CPU or CUDA unavailable: no stream semantics
         return lambda: 0
 

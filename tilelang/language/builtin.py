@@ -76,6 +76,95 @@ def __ldg(load_or_buf: BufferLoad | tirx.Buffer, index: PrimExpr | int | None = 
     raise TypeError("T.__ldg expects a BufferLoad or a Buffer.")
 
 
+_LSU_INNER_PERSISTENCE = {
+    "cache_none": 0,
+    "cache_once": 1,
+    "cache_normal": 2,
+    "cache_persist": 3,
+    "no_override": 4,
+    "last_use": 5,
+}
+_LSU_OUTER_PERSISTENCE = {
+    "cache_none": 0,
+    "cache_once": 1,
+    "cache_normal": 2,
+    "cache_persist": 3,
+}
+_LSU_CHRNT = {"mcu": 0, "slc": 1, "l1": 0, "l2_l3": 1}
+_LSU_L2_POLICY = {"new_alloc": 0, "new": 0, "bypass": 1}
+
+
+def _normalize_lsu_hint(
+    value: str | int | tirx.IntImm,
+    name: str,
+    mapping: dict[str, int],
+    maximum: int,
+) -> int:
+    """Normalize an LSU cache-hint field to a compile-time integer."""
+    if isinstance(value, tirx.IntImm):
+        value = int(value.value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        value = int(value)
+    elif isinstance(value, str):
+        if value not in mapping:
+            choices = ", ".join(sorted(mapping))
+            raise ValueError(f"Unsupported {name} {value!r}; expected one of: {choices}")
+        value = mapping[value]
+    else:
+        raise TypeError(f"{name} must be an integer immediate or policy string, got {type(value)}")
+    if value < 0 or value > maximum:
+        raise ValueError(f"{name} must be in [0, {maximum}], got {value}")
+    return value
+
+
+def lsu_ld_cache_hint(
+    src: BufferLoad,
+    inner_persistence: str | int = 4,
+    outer_persistence: str | int = 2,
+    chrnt: str | int = 0,
+    l2: str | int = 0,
+    is_volatile: bool = False,
+) -> PrimExpr:
+    """Load one global element into a register with an MTCC LSU cache hint.
+
+    This is the ordinary global-to-register counterpart of the TMA cache
+    annotations. It mirrors MTCC's ``__lsu_ld_cache_hint`` fields and is
+    intentionally limited to a scalar ``BufferLoad`` address expression.
+    The intrinsic is supported by the MP31 MUSA compiler paths.
+
+    Policy strings are accepted for readability: inner persistence supports
+    ``cache_none``, ``cache_once``, ``cache_normal``, ``cache_persist``,
+    ``no_override`` and ``last_use``; outer persistence supports the first
+    four; ``chrnt`` accepts ``mcu``/``slc`` (``l1``/``l2_l3`` aliases), and
+    ``l2`` accepts ``new_alloc``/``bypass``.
+    """
+    if not isinstance(src, BufferLoad):
+        raise TypeError("T.lsu_ld_cache_hint expects a one-dimensional BufferLoad, such as x[i].")
+    if len(src.indices) != 1:
+        raise ValueError("T.lsu_ld_cache_hint currently supports flattened 1D buffer accesses only.")
+    if not isinstance(is_volatile, bool):
+        raise TypeError(f"is_volatile must be bool, got {type(is_volatile)}")
+
+    inner = _normalize_lsu_hint(
+        inner_persistence, "inner_persistence", _LSU_INNER_PERSISTENCE, 5
+    )
+    outer = _normalize_lsu_hint(
+        outer_persistence, "outer_persistence", _LSU_OUTER_PERSISTENCE, 3
+    )
+    coherence = _normalize_lsu_hint(chrnt, "chrnt", _LSU_CHRNT, 1)
+    l2_policy = _normalize_lsu_hint(l2, "l2", _LSU_L2_POLICY, 1)
+    op_name = "tl.lsu_ld_volatile_cache_hint" if is_volatile else "tl.lsu_ld_cache_hint"
+    return tirx.call_intrin(
+        str(src.dtype),
+        tirx.op.Op.get(op_name),
+        src,
+        inner,
+        outer,
+        coherence,
+        l2_policy,
+    )
+
+
 def __ffs(value: int | PrimExpr) -> PrimExpr:
     """Find the position of the least significant set bit.
 
@@ -310,8 +399,9 @@ def make_robust_desc(*args):
     """Create a robust source descriptor for MUSA robust copy lowering.
 
     Args:
-        *args: Either `(addr, size_bytes)` for a concrete robust descriptor, or
-            `()` for an internal empty-descriptor marker.
+        *args: `(addr, size_bytes)` describing the source byte range. Lowering
+            materializes host-evaluable descriptors on the host and falls back
+            to device construction for device-local dynamic ranges.
 
     Returns:
         tirx.Call: A handle to the created robust descriptor.
@@ -892,6 +982,49 @@ def lma_wait():
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.lma_wait"))
 
 
+def async_copy_commit_group(group_id: int):
+    """Commit a tagged asynchronous-copy group across basic blocks."""
+    if not isinstance(group_id, int) or group_id < 0:
+        raise ValueError("group_id must be a non-negative compile-time integer")
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.async_copy_commit_group"), group_id)
+
+
+def async_copy_wait_group(group_id: int):
+    """Wait for a tagged asynchronous-copy group across basic blocks."""
+    if not isinstance(group_id, int) or group_id < 0:
+        raise ValueError("group_id must be a non-negative compile-time integer")
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.async_copy_wait_group"), group_id)
+
+def ldlms_crossbb_commit_0():
+    """Commit LDLMS logical group 0 across basic blocks.
+
+    The MUSA code generator uses the MTCC tagged-group builtin when the
+    target and compiler support it. Otherwise commit is a no-op; the paired
+    wait uses the non-group MUSA asynchronous-copy wait.
+    """
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.ldlms_crossbb_commit_0"))
+
+
+def ldlms_crossbb_wait_0():
+    """Wait for LDLMS logical group 0 across basic blocks."""
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.ldlms_crossbb_wait_0"))
+
+
+def ldlms_crossbb_commit_1():
+    """Commit LDLMS logical group 1 across basic blocks."""
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.ldlms_crossbb_commit_1"))
+
+
+def ldlms_crossbb_wait_1():
+    """Wait for LDLMS logical group 1 across basic blocks."""
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.ldlms_crossbb_wait_1"))
+
+
+def sched_boundary():
+    """Emit an opaque scheduling boundary in generated MUSA code."""
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.sched_boundary"))
+
+
 def barrier_wait(mbarrier: BarrierType, parity: int | Var):
     """Wait for a memory barrier to complete.
 
@@ -1187,6 +1320,11 @@ def sync_global():
 def sync_grid():
     """Synchronize all threads in a grid."""
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.sync_grid"))
+
+
+def fence_sys():
+    """Emit a system-scope device memory fence."""
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.fence_sys"))
 
 
 def initialize_wgmma_descriptor(

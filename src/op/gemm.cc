@@ -4,6 +4,7 @@
  */
 
 #include "gemm.h"
+#include "backend/common/target_utils.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -184,16 +185,31 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
 
 Stmt GemmNode::Lower(const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) const {
-  if (const auto f = Function::GetGlobal("tl.gemm.lower")) {
+  const int64_t *thread_y_extent = as_const_int(lower_args.thread_y_extent);
+  const bool use_qy2_subgroup_lowering =
+      TargetIsQY2(lower_args.target) && thread_y_extent != nullptr &&
+      *thread_y_extent > 1;
+  const char *lower_func_name = use_qy2_subgroup_lowering
+                                    ? "tl.musa.qy2.gemm.lower_subgroup"
+                                    : "tl.gemm.lower";
+  if (const auto f = Function::GetGlobal(lower_func_name)) {
     PrimExpr mbar_phase = lower_args.mbar_phase_expr;
     if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
       mbar_phase = explicit_phase.value();
     }
     // NOTE(wt): Decide the instruction key and compute warp partition on Python
     // side.
-    auto prim_func = Downcast<PrimFunc>(
-        (*f)(GetRef<Gemm>(this), lower_args.layout_map, lower_args.target,
-             lower_args.thread_bounds, lower_args.thread_var, mbar_phase));
+    PrimFunc prim_func;
+    if (use_qy2_subgroup_lowering) {
+      prim_func = Downcast<PrimFunc>(
+          (*f)(GetRef<Gemm>(this), lower_args.layout_map, lower_args.target,
+               lower_args.thread_bounds, lower_args.thread_var, mbar_phase,
+               lower_args.thread_y_extent));
+    } else {
+      prim_func = Downcast<PrimFunc>(
+          (*f)(GetRef<Gemm>(this), lower_args.layout_map, lower_args.target,
+               lower_args.thread_bounds, lower_args.thread_var, mbar_phase));
+    }
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
@@ -222,7 +238,7 @@ Stmt GemmNode::Lower(const LowerArgs &lower_args,
                /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
                /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
-    LOG(FATAL) << "No lower function found for gemm";
+    LOG(FATAL) << "No GEMM lower function registered as " << lower_func_name;
     return Stmt();
   }
 }
@@ -242,15 +258,20 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
     // and must always set their layouts.
     auto block_size = *as_const_int(layout_args.thread_bounds->extent);
     String gemm_inst = GetGemmInstructionKey(block_size, layout_args.target);
+    const GemmImpl &impl = ResolveGemmImpl(layout_args.target);
     bool reuse_existing_shared_layout =
-        ResolveGemmImpl(layout_args.target)
-            .reuse_existing_shared_layout(gemm_inst);
+        impl.reuse_existing_shared_layout(gemm_inst);
     for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
       if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
           layout_args.layout_map.count(buf)) {
-        continue;
+        const auto can_reuse = impl.can_reuse_existing_shared_layout;
+        if (can_reuse == nullptr ||
+            can_reuse(*this, layout_args.layout_map, buf, block_size,
+                      layout_args.target, gemm_inst)) {
+          continue;
+        }
       }
       if (auto frag = layout.as<Fragment>()) {
         results.Set(buf,

@@ -80,24 +80,30 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
         else:
             parsed = [str(f).strip() for f in formats if str(f).strip()]
         self.formats_list = [f for f in parsed if f != "txt"]
+        self.visualized_buffers: set[object] = set()
 
-    def visit_block_(self, op: tirx.SBlock) -> None:
+    def visit_sblock_(self, op: tirx.SBlock) -> None:
         if "layout_map" in op.annotations:
             layout_map = op.annotations["layout_map"]
 
             for key, layout in layout_map.items():
-                if isinstance(layout, T.Fragment):
-                    print(f"{key} inferred layout:")
-                    print_fragment_format(layout)
-                    for fmt in self.formats_list:
-                        input_shape = layout.get_input_shape()
-                        if len(input_shape) != 2:
-                            warnings.warn(
-                                f"Skip plotting {key} layout: input_shape={input_shape} is not 2D.",
-                                stacklevel=2,
-                            )
-                            continue
-                        plot_layout(layout, name=f"{key}_layout", formats=fmt)
+                name = getattr(key, "name", str(key))
+                if not isinstance(layout, T.Fragment) or key in self.visualized_buffers:
+                    continue
+                self.visualized_buffers.add(key)
+                print(f"{name} inferred layout:")
+                print_fragment_format(layout)
+                for fmt in self.formats_list:
+                    input_shape = layout.get_input_shape()
+                    if len(input_shape) != 2:
+                        warnings.warn(
+                            f"Skip plotting {name} layout: input_shape={input_shape} is not 2D.",
+                            stacklevel=2,
+                        )
+                        continue
+                    plot_layout(layout, name=f"{name}_layout", formats=fmt)
+
+        super().visit_sblock_(op)
 
 
 def LayoutVisual(formats: str | Sequence[str] = ""):

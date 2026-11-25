@@ -60,6 +60,10 @@ bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
 }
 
+bool GetIsLsuCacheHint(const CopyNode &op) {
+  return GetBoolAnnotation(op, "lsu_cache_hint");
+}
+
 bool HasSourceRobustDesc(const CopyNode &op) {
   return op.annotations.count("src_robust_desc") != 0;
 }
@@ -398,6 +402,7 @@ struct CopyFacts {
   bool no_implicit_async_commit_wait = false;
   PreferredCopyInstruction prefer_instruction = PreferredCopyInstruction::kAuto;
   bool disable_tma = false;
+  bool lsu_cache_hint = false;
   bool can_bulk_load_1d = false;
   bool can_bulk_store_1d = false;
   bool can_bulk_load = false;
@@ -590,6 +595,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.no_implicit_async_commit_wait = GetNoImplicitAsyncCommitWait(op);
   facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
+  facts.lsu_cache_hint = GetIsLsuCacheHint(op);
   facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
   facts.async_unavailable_reason = MakeAsyncUnavailableReason(op, ctx.target);
   facts.pass_context_disables_tma =
@@ -659,6 +665,21 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx) {
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
+  if (facts.lsu_cache_hint) {
+    if (!TargetIsPH1(ctx.target)) {
+      return Unsupported("LSU cache hints are supported on MP31 only.");
+    }
+    if (op.src.scope() != "global") {
+      return Unsupported("LSU cache hints require a global-memory source.");
+    }
+    if (facts.explicit_tma || facts.explicit_cp_async ||
+        facts.no_implicit_async_commit_wait ||
+        (facts.prefer_instruction != PreferredCopyInstruction::kAuto &&
+         facts.prefer_instruction != PreferredCopyInstruction::kSync)) {
+      return Unsupported("LSU cache hints require normal synchronous copy.");
+    }
+    return Supported(CopyInst::kNormal);
+  }
   if (facts.explicit_tma) {
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,

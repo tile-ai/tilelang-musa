@@ -11,7 +11,7 @@ namespace detail {
 TL_DEVICE constexpr int default_warp_size() {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIP_DEVICE_COMPILE__)
   return 64;
-#elif defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ <= 220)
+#elif defined(__MUSA_ARCH__) && (__MUSA_ARCH__ <= 220)
   return 128;
 #else
   return 32;
@@ -58,14 +58,14 @@ get_warp_group_idx(int warp_size = detail::default_warp_size(),
 }
 
 TL_DEVICE void warpgroup_commit_batch() {
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310 &&              \
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310) &&                        \
     defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
   __musa_tce_commit_group();
 #endif
 }
 
 template <int NumMma> TL_DEVICE void warpgroup_wait() {
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
 #if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
   __musa_tce_wait_group(NumMma);
 #else
@@ -75,7 +75,7 @@ template <int NumMma> TL_DEVICE void warpgroup_wait() {
 }
 
 TL_DEVICE void lma_wait() {
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310 &&              \
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310) &&                        \
     defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
   __musa_lma_wait();
 #else
@@ -85,7 +85,7 @@ TL_DEVICE void lma_wait() {
 
 // Elect one thread in the warp. The elected thread gets its predicate set to
 // true, all others obtain false.
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 310)
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
 TL_DEVICE uint32_t elect_one_sync() { return (threadIdx.x % 32) == 0; }
 #else
 TL_DEVICE uint32_t elect_one_sync() { return (threadIdx.x % 128) == 0; }
@@ -112,7 +112,7 @@ template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
   if constexpr (thread_extent == 0) {
     // Elect exactly one thread in the whole block (warp-0 leader).
     return elect_one_sync() && canonical_warp_idx() == 0;
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 310)
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
   } else if constexpr (thread_extent == 32) {
     return elect_one_sync();
 #else
@@ -121,14 +121,13 @@ template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
 #endif
   } else {
     // Elect one representative per logical thread group.
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 310)
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
     constexpr int kWarpsPerGroup = (thread_extent + 31) / 32;
 #else
     constexpr int kWarpsPerGroup = (thread_extent + 127) / 128;
 #endif
     static_assert(kWarpsPerGroup > 0);
-    return elect_one_sync() &&
-           canonical_warp_idx() % kWarpsPerGroup == 0;
+    return elect_one_sync() && canonical_warp_idx() % kWarpsPerGroup == 0;
   }
 }
 

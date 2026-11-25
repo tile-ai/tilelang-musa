@@ -1,7 +1,12 @@
 # cython: language_level=3
 
 import torch
-import torch_musa
+try:
+    import torch_musa
+except ModuleNotFoundError as exc:
+    if exc.name != "torch_musa":
+        raise
+    torch_musa = None
 cimport cython
 import ctypes
 from libc.stdint cimport int64_t, uintptr_t

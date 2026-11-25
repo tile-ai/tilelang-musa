@@ -5,8 +5,12 @@
 
 #include "gemm_py.h"
 
+#include "backend/musa/op/gemm.h"
 #include "builtin.h"
+#include "layout/layout.h"
 #include "support/check.h"
+#include <sstream>
+#include <string>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -26,6 +30,12 @@ using namespace tirx;
 // NormalizeToBufferRegion moved to src/op/utils.{h,cc}
 
 // MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
+
+namespace {
+
+std::string BoolTemplateArg(bool value) { return value ? "true" : "false"; }
+
+} // namespace
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -184,6 +194,10 @@ GemmPyNode::SelectSQMMAInstShape(int block_size, Target target) const {
   if (!TargetIsPH1(target)) {
     return std::nullopt;
   }
+  // Match the SQMMA template restriction and retain WMMA for sliced operands.
+  if (offsetA_ != 0 || offsetB_ != 0) {
+    return std::nullopt;
+  }
   if (a_.scope() != "shared.dyn" && a_.scope() != "shared") {
     return std::nullopt;
   }
@@ -247,7 +261,7 @@ GemmPyNode::SelectSQMMAInstShape(int block_size, Target target) const {
              b_dtype == DataType::BFloat(16) &&
              c_dtype == DataType::Float(32)) {
     type_class = SqmmaTypeClass::kBF16;
-  } else if (a_dtype == DataType::Float(32) && b_dtype == DataType::Float(32) &&
+  } else if (a_dtype.is_tfloat32() && b_dtype.is_tfloat32() &&
              c_dtype == DataType::Float(32)) {
     type_class = SqmmaTypeClass::kTF32;
   } else if (((a_dtype.is_float8_e4m3() && b_dtype.is_float8_e4m3()) ||
@@ -400,7 +414,7 @@ GemmPyNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
              b_dtype == DataType::BFloat(16) &&
              c_dtype == DataType::Float(32)) {
     type_class = Ph1WmmaTypeClass::kBF16BF16F32;
-  } else if (a_dtype == DataType::Float(32) && b_dtype == DataType::Float(32) &&
+  } else if (a_dtype.is_tfloat32() && b_dtype.is_tfloat32() &&
              c_dtype == DataType::Float(32)) {
     type_class = Ph1WmmaTypeClass::kTF32TF32F32;
   } else if (a_dtype == DataType::Int(8) && b_dtype == DataType::Int(8) &&
@@ -457,7 +471,7 @@ GemmPyNode::SelectPH1WmmaInstShape(int block_size, Target target) const {
 
 bool GemmPyNode::AllowPH1Wmma(int block_size, Target target) const {
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-  if (ctxt->GetConfig(kDisablePH1WMMA, Optional<Bool>()).value_or(false)) {
+  if (ctxt->GetConfig(kDisableWMMA, Optional<Bool>()).value_or(false)) {
     return false;
   }
   return SelectPH1WmmaInstShape(block_size, target).has_value();
@@ -534,8 +548,69 @@ bool GemmPyNode::checkWgmma() const {
   }
 }
 
+std::optional<std::array<int, 3>>
+GemmPyNode::SelectQY2MmaInstShape(int block_size, Target target) const {
+  return musa::SelectQY2MmaInstShape(a_, b_, c_, m_, n_, k_, block_size,
+                                     target);
+}
+
 Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   (void)analyzer;
+  if (TargetIsQY2(T.target)) {
+    auto block_size = as_const_int(T.thread_bounds->extent);
+    ICHECK(block_size) << "QY2 GEMM requires constant thread extent.";
+    auto qy2_mma_inst = SelectQY2MmaInstShape(*block_size, T.target);
+    ICHECK(qy2_mma_inst.has_value())
+        << "No QY2 MMA instruction shape was selected";
+    const bool use_qy2_wmma =
+        (*qy2_mma_inst)[0] != 32 || (*qy2_mma_inst)[1] != 32;
+    String gemm_inst = String(kGemmInstMusaMMA);
+    auto [warp_m, warp_n] = musa::ComputeQY2GemmWarpPartition(
+        policy_, m_, n_, *block_size, T.target, qy2_mma_inst);
+
+    std::string op_name;
+    if (IsFragmentBuffer(a_)) {
+      op_name = IsFragmentBuffer(b_) ? "tl::gemm_rr" : "tl::gemm_rs";
+    } else if (IsFragmentBuffer(b_)) {
+      op_name = "tl::gemm_sr";
+    } else {
+      op_name = "tl::gemm_ss";
+    }
+    ICHECK(IsFragmentBuffer(c_))
+        << "QY2 GEMM only supports C in local.fragment scope, got "
+        << c_.scope();
+
+    auto clear_accum_bool = clearAccum_.as<Bool>();
+    ICHECK(clear_accum_bool.has_value())
+        << "clear_accum must be a constant Bool type, got " << clearAccum_;
+
+    std::stringstream ss;
+    ss << op_name << "<" << m_ << ", " << n_ << ", " << k_ << ", ";
+    ss << warp_m << ", " << warp_n << ", ";
+    ss << BoolTemplateArg(transA_) << ", " << BoolTemplateArg(transB_);
+    ss << ", " << BoolTemplateArg(bool(clear_accum_bool.value()));
+    ss << ", " << strideA_ << ", " << strideB_;
+    ss << ", " << offsetA_ << ", " << offsetB_;
+    if (use_qy2_wmma) {
+      ss << ", " << (*qy2_mma_inst)[0] << ", " << (*qy2_mma_inst)[1] << ", "
+         << (*qy2_mma_inst)[2];
+    }
+    ICHECK_EQ(wgWait_, 0) << "wg_wait must be 0 for QY2 targets";
+    ss << ">";
+
+    auto Aptr = MakeAccessPtrFromRegion(aRegion_, /*rw_mask=*/1,
+                                        /*require_2d=*/true);
+    auto Bptr = MakeAccessPtrFromRegion(bRegion_, /*rw_mask=*/1,
+                                        /*require_2d=*/true);
+    auto Cptr = MakeAccessPtrFromRegion(cRegion_, /*rw_mask=*/3,
+                                        /*require_2d=*/true);
+    auto new_call =
+        Call(DataType::Handle(), tl::tl_gemm(),
+             Array<PrimExpr>{StringImm(ss.str()), Aptr, Bptr, Cptr});
+    return AttrStmt(Integer(0), tl::kGemmInst, StringImm(gemm_inst),
+                    Evaluate(new_call));
+  }
+
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     PrimExpr mbar_phase = T.mbar_phase_expr;
     if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
@@ -586,6 +661,76 @@ LayoutMap GemmPyNode::InferLayout(const LayoutInferArgs &T,
   if (completed_)
     return {};
   LayoutMap results;
+  if (TargetIsQY2(T.target)) {
+    auto block_size = as_const_int(T.thread_bounds->extent);
+    ICHECK(block_size) << "QY2 GEMM requires constant thread extent.";
+    auto qy2_mma_inst = SelectQY2MmaInstShape(*block_size, T.target);
+    ICHECK(qy2_mma_inst.has_value())
+        << "No QY2 MMA instruction shape was selected";
+    auto [warp_m, warp_n] = musa::ComputeQY2GemmWarpPartition(
+        policy_, m_, n_, *block_size, T.target, qy2_mma_inst);
+    const bool use_qy2_wmma =
+        (*qy2_mma_inst)[0] != 32 || (*qy2_mma_inst)[1] != 32;
+
+    ICHECK(IsFragmentBuffer(c_))
+        << "QY2 GEMM only supports C in local.fragment scope, got "
+        << c_.scope();
+    auto c_fragment =
+        use_qy2_wmma ? MakeGemmQY2WmmaCLayout(m_, n_, m_ / warp_m, n_ / warp_n,
+                                              c_->dtype.bits(), *qy2_mma_inst)
+                     : MakeGemmQY2FragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
+                                            c_->dtype.bits());
+    results.Set(c_, c_fragment->BindThreadRange(T.thread_bounds));
+
+    if (IsSharedBuffer(a_)) {
+      int dim_A = a_->shape.size();
+      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+      auto layout = MakeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                     a_->dtype.bits(), !transA_);
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
+    } else if (IsFragmentBuffer(a_)) {
+      auto fragment =
+          use_qy2_wmma
+              ? MakeGemmQY2WmmaFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                                         a_->dtype.bits(), transA_,
+                                         *qy2_mma_inst)
+              : (transA_
+                     ? MakeGemmQY2FragmentACol(m_, n_, k_, m_ / warp_m,
+                                               n_ / warp_n, a_->dtype.bits())
+                     : MakeGemmQY2FragmentARow(m_, n_, k_, m_ / warp_m,
+                                               n_ / warp_n, a_->dtype.bits()));
+      results.Set(a_, fragment->BindThreadRange(T.thread_bounds));
+    } else {
+      ICHECK(0) << "Unsupported QY2 GEMM A scope: " << a_.scope();
+    }
+
+    if (IsSharedBuffer(b_)) {
+      int dim_B = b_->shape.size();
+      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
+      auto layout = MakeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                     b_->dtype.bits(), transB_);
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
+    } else if (IsFragmentBuffer(b_)) {
+      auto fragment =
+          use_qy2_wmma
+              ? MakeGemmQY2WmmaFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                                         b_->dtype.bits(), transB_,
+                                         *qy2_mma_inst)
+              : (transB_
+                     ? MakeGemmQY2FragmentBRow(m_, n_, k_, m_ / warp_m,
+                                               n_ / warp_n, b_->dtype.bits())
+                     : MakeGemmQY2FragmentBCol(m_, n_, k_, m_ / warp_m,
+                                               n_ / warp_n, b_->dtype.bits()));
+      results.Set(b_, fragment->BindThreadRange(T.thread_bounds));
+    } else {
+      ICHECK(0) << "Unsupported QY2 GEMM B scope: " << b_.scope();
+    }
+
+    completed_ = true;
+    return results;
+  }
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.infer_layout")) {
     results = Downcast<LayoutMap>(

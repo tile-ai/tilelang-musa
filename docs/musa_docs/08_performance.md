@@ -65,7 +65,7 @@ print(f"mean latency: {latency_ms:.3f} ms")
 ### Benchmark 目录中的可复现实例
 
 仓库 benchmark 不是通用 microbenchmark 的替代品，而是带有固定模型 shape、
-reference 校验和结果记录的端到端样例。当前 [MP31 modelops benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/modelops/) 中最适合作为
+reference 校验和结果记录的端到端样例。当前 [MP31 modelops benchmark](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/modelops/) 中最适合作为
 入门的是 `example_mha_fwd_bhsd`：它包含两个 `T.gemm`、online softmax、
 pipeline copy 和 MUSA profiler 输出。
 
@@ -73,10 +73,10 @@ pipeline copy 和 MUSA profiler 输出。
 
 | 场景 | Benchmark 入口 |
 | --- | --- |
-| FlashAttention/MHA | [MP31 modelops](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/modelops/) |
-| MLA | [MP31 modelops ops](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/modelops/ops/) |
-| GDN / Linear Attention | [MP31 MATE ops](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/mate/ops/) |
-| MoE | [MP31 tilekernels/moe](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1/benchmark/mp31/tilekernels/moe/) |
+| FlashAttention/MHA | [MP31 modelops](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/modelops/) |
+| MLA | [MP31 modelops ops](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/modelops/ops/) |
+| GDN / Linear Attention | [MP31 MATE ops](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/mate/ops/) |
+| MoE | [MP31 tilekernels/moe](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5/benchmark/mp31/tilekernels/moe/) |
 
 ```bash
 # 从 tilelang_musa 仓库根目录运行
@@ -90,7 +90,7 @@ python benchmark/mp31/runner.py \
 数据应使用 Release build。该 benchmark 的默认参数为 `B=2,H=28,seq_q=8192,
 seq_kv=8192,D=128`，kernel 配置为 `block_M=256, block_N=128, threads=512`。
 每条记录包含 `time_us`、`bandwidth_gbs`、`flops`、`tflops` 和完整参数，适合
-保存成 JSONL 后做回归比较。仓库中的 [modelops baseline](https://github.com/tile-ai/tilelang-musa/blob/v0.1.12%2Bmusa.1/benchmark/mp31/baselines/modelops.jsonl) 保存了对应 source 的基线记录。
+保存成 JSONL 后做回归比较。仓库中的 [modelops baseline](https://github.com/tile-ai/tilelang-musa/blob/v0.1.12%2Bmusa.5/benchmark/mp31/baselines/modelops.jsonl) 保存了对应 source 的基线记录。
 
 需要做回归检查时：
 

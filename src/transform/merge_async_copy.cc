@@ -53,8 +53,7 @@ private:
     AccessPtrInfo src;
     IntImm count;
     Optional<PrimExpr> predicate;
-    Optional<PrimExpr> robust_base;
-    Optional<PrimExpr> robust_size;
+    Optional<PrimExpr> robust_desc;
   };
 
   struct AttrInfo {
@@ -111,17 +110,15 @@ private:
                        src.value(),
                        Downcast<IntImm>(call->args[2]),
                        Optional<PrimExpr>(),
-                       Optional<PrimExpr>(),
                        Optional<PrimExpr>()};
 
     if (op.value().same_as(tl::musa_cp_async_robust())) {
-      if (call->args.size() != 5U && call->args.size() != 6U) {
+      if (call->args.size() != 4U && call->args.size() != 5U) {
         return std::nullopt;
       }
-      info.robust_base = call->args[3];
-      info.robust_size = call->args[4];
-      if (call->args.size() == 6U) {
-        info.predicate = call->args[5];
+      info.robust_desc = call->args[3];
+      if (call->args.size() == 5U) {
+        info.predicate = call->args[4];
       }
     } else {
       if (call->args.size() != 3U && call->args.size() != 4U) {
@@ -215,9 +212,8 @@ private:
         MakeAccessPtr(copy.src),
         copy.count,
     };
-    if (copy.robust_base.defined()) {
-      args.push_back(copy.robust_base.value());
-      args.push_back(copy.robust_size.value());
+    if (copy.robust_desc.defined()) {
+      args.push_back(copy.robust_desc.value());
     }
     if (copy.predicate.defined()) {
       args.push_back(copy.predicate.value());
@@ -263,12 +259,8 @@ private:
         !ExprInvariant(copy.predicate.value(), loop_var)) {
       return false;
     }
-    if (copy.robust_base.defined() &&
-        !ExprInvariant(copy.robust_base.value(), loop_var)) {
-      return false;
-    }
-    if (copy.robust_size.defined() &&
-        !ExprInvariant(copy.robust_size.value(), loop_var)) {
+    if (copy.robust_desc.defined() &&
+        !ExprInvariant(copy.robust_desc.value(), loop_var)) {
       return false;
     }
     return true;

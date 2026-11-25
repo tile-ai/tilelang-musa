@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import (
-    make_ph1_wmma_ab_layout,
-    make_ph1_wmma_fragment_a,
-    make_ph1_wmma_fragment_b,
-    make_ph1_wmma_fragment_c,
+    make_wmma_ab_layout,
+    make_wmma_fragment_a,
+    make_wmma_fragment_b,
+    make_wmma_fragment_c,
 )
 from tilelang.utils.language import is_fragment, is_shared, is_tensor_memory
 from tilelang import _ffi_api
@@ -88,7 +88,7 @@ class GemmWMMA(GemmBase):
         inst_shape = self._select_wmma_inst_shape(int(thread_nums), target)
         c_bits = int(tvm.DataType(self.C.dtype).bits)
         layouts = {
-            self.C: make_ph1_wmma_fragment_c(
+            self.C: make_wmma_fragment_c(
                 self.M,
                 self.N,
                 warp_m,
@@ -103,13 +103,13 @@ class GemmWMMA(GemmBase):
             b_shape = list(self.B.shape)
             a_bits = int(tvm.DataType(self.A.dtype).bits)
             b_bits = int(tvm.DataType(self.B.dtype).bits)
-            layouts[self.A] = make_ph1_wmma_ab_layout(
+            layouts[self.A] = make_wmma_ab_layout(
                 a_shape,
                 int(a_shape[-1]),
                 a_bits,
                 not self.trans_A,
             )
-            layouts[self.B] = make_ph1_wmma_ab_layout(
+            layouts[self.B] = make_wmma_ab_layout(
                 b_shape,
                 int(b_shape[-1]),
                 b_bits,
@@ -118,7 +118,7 @@ class GemmWMMA(GemmBase):
         else:
             a_bits = int(tvm.DataType(self.A.dtype).bits)
             b_bits = int(tvm.DataType(self.B.dtype).bits)
-            layouts[self.A] = make_ph1_wmma_fragment_a(
+            layouts[self.A] = make_wmma_fragment_a(
                 self.M,
                 self.N,
                 self.K,
@@ -128,7 +128,7 @@ class GemmWMMA(GemmBase):
                 self.trans_A,
                 inst_shape,
             )
-            layouts[self.B] = make_ph1_wmma_fragment_b(
+            layouts[self.B] = make_wmma_fragment_b(
                 self.M,
                 self.N,
                 self.K,
@@ -202,8 +202,10 @@ class GemmWMMA(GemmBase):
 
             @T.prim_func
             def _gemm_wmma_ss() -> None:
-                A_ptr = T.access_ptr(A_region, "r")
-                B_ptr = T.access_ptr(B_region, "r")
+                # Templates apply the last two matrix offsets themselves.
+                # Retain leading offsets such as the pipeline stage.
+                A_ptr = T.access_ptr(A_region, "r", ignore_last_ndim=2)
+                B_ptr = T.access_ptr(B_region, "r", ignore_last_ndim=2)
                 C_ptr = T.access_ptr(C_region, "rw")
                 T.evaluate(
                     T.call_intrin(

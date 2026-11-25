@@ -10,6 +10,7 @@
 #include <tvm/runtime/logging.h>
 
 #include "cuda/op/copy.h"
+#include "cuda/target_utils.h"
 #include "cuda/stubs/cuda.h"
 #include "layout/layout.h"
 #include "op/builtin.h"

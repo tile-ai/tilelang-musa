@@ -17,15 +17,15 @@ using MP22_16x16_16b_Col =
            Stride<Stride<_32, _1>, Stride<_16, _128, _8>>>;
 
 using MP22_16x16_32b = Layout<Shape<Shape<_8, _4>, Shape<_2, _4>>,
-                              Stride<Stride<_1, _16>, Stride<_8, _64>>>;
+                              Stride<Stride<_16, _1>, Stride<_128, _4>>>;
 
 using MP22_16x16_16b_A_Row = MP22_16x16_16b_Col;
 using MP22_16x16_16b_A_Col = MP22_16x16_16b_Row;
 using MP22_16x16_16b_B_Col = MP22_16x16_16b_Row;
 using MP22_16x16_16b_B_Row = MP22_16x16_16b_Col;
 
-using MP22_8x32_32b =
-    Layout<Shape<Shape<_8, _4>, _8>, Stride<Stride<_1, _8>, _32>>;
+using MP22_8x32_32b = Layout<Shape<Shape<_8, _4>, Shape<_4, _2>>,
+                             Stride<Stride<_8, _1>, Stride<_64, _4>>>;
 
 using MP22_8x32_16b_A_Row = Layout<Shape<Shape<_4, _8>, Shape<_2, _2>>,
                                    Stride<Stride<_16, _1>, Stride<_8, _64>>>;

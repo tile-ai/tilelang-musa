@@ -27,15 +27,15 @@ constexpr const char *kBarrierInit = "barrier_init";
 using namespace tirx;
 using namespace ffi;
 
-class SharedBarrierRewriter : public StmtExprMutator {
+class CudaSharedBarrierRewriter : public StmtExprMutator {
 public:
   static Stmt Rewrite(Stmt body, bool disable_shuffle_elect = false) {
-    SharedBarrierRewriter rewriter(disable_shuffle_elect);
+    CudaSharedBarrierRewriter rewriter(disable_shuffle_elect);
     return rewriter(std::move(body));
   }
 
 private:
-  SharedBarrierRewriter(bool disable_shuffle_elect)
+  CudaSharedBarrierRewriter(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
 
   Stmt VisitStmt_(const SBlockNode *op) final {
@@ -199,20 +199,20 @@ private:
   bool has_cluster_barrier_ = false;
 };
 
-PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
+PrimFunc LowerSharedBarrierCudaBackend(PrimFunc f, bool disable_shuffle_elect) {
   f.CopyOnWrite()->body =
-      SharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect);
+      CudaSharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect);
   return f;
 }
 
 namespace transform {
 using namespace tirx::transform;
 
-tvm::transform::Pass LowerSharedBarrier() {
+tvm::transform::Pass LowerSharedBarrierCudaBackend() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_shuffle_elect =
         ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
-    return tl::LowerSharedBarrier(std::move(f), disable_shuffle_elect);
+    return tl::LowerSharedBarrierCudaBackend(std::move(f), disable_shuffle_elect);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedBarrier", {});
 }
@@ -220,7 +220,7 @@ tvm::transform::Pass LowerSharedBarrier() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def("tl.cuda.transform.LowerSharedBarrier",
-                        LowerSharedBarrier);
+                        LowerSharedBarrierCudaBackend);
 }
 
 } // namespace transform

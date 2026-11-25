@@ -1,5 +1,5 @@
-"""Interactive pass browser: render the SBlock structure tree after every CUDA
-lowering pass as a single self-contained HTML file.
+"""Interactive pass browser: render the SBlock structure tree after every
+target-specific lowering pass as a single self-contained HTML file.
 
 Left pane is the ordered pass list (click to select). Right pane shows the
 structure tree for the selected pass, with lines added by that pass highlighted
@@ -88,8 +88,16 @@ _TILE_OPS = (
 # 2) Synchronization primitives — thread/warp sync emitted by warp-specialization
 #    and pipelining passes (NOT tile ops).
 _SYNC_OPS = ("mbarrier_wait_parity", "ptx_arrive_barrier", "mbarrier_expect_tx", "tl_shuffle_elect", "barrier_wait", "fence_barrier_init")
-# 3) Lowered hardware intrinsics — the PTX/TMA-level result of LowerTileOp.
-_HW_OPS = ("ptx_mma", "ptx_ldmatrix", "tma_load", "create_tma_descriptor", "tvm_access_ptr", "access_ptr")
+# 3) Lowered backend intrinsics — the result of LowerTileOp.
+_HW_OPS = (
+    "ptx_mma",
+    "ptx_ldmatrix",
+    "tl_gemm",
+    "tma_load",
+    "create_tma_descriptor",
+    "tvm_access_ptr",
+    "access_ptr",
+)
 
 _TILEOP_RE = re.compile(r"\bT\.(" + "|".join(_TILE_OPS) + r")(?=\(|\s|$)")
 _SYNC_RE = re.compile(r"\bT\.(" + "|".join(_SYNC_OPS) + r")(?=\(|\s|$)")

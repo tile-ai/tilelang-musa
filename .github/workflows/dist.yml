@@ -45,68 +45,6 @@ env:
   UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
 
 jobs:
-  build-sdist:
-    name: Build SDist
-    if: |
-      github.repository_owner == 'tile-ai' &&
-      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    runs-on: macos-latest
-    timeout-minutes: 30
-    env:
-      # `NO_VERSION_LABEL=ON` disables embedding the toolchain / git commit hash in version metadata.
-      # Otherwise, the version of the SDist has a git hash suffix (e.g., 0.1.0+gitabcdef12),
-      # but the package built from the SDist has no way to get the git hash (it is not a git repo),
-      # leading to inconsistent versions between SDist and built packages (+gitabcdef12 vs. +gitunknown).
-      NO_VERSION_LABEL: 'ON'
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-          submodules: recursive
-
-      - name: Setup Python and uv with caching
-        id: setup-uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          python-version: "3.12"
-          activate-environment: true
-
-      - name: Build SDist
-        run: |
-          uv run --no-project --with=build -m -- build --sdist --outdir=dist
-
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1
-        with:
-          max-size: "200MB"
-          create-symlink: true
-          evict-old-files: "7d"
-          append-timestamp: false
-          key: sdist-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
-          restore-keys: |
-            sdist-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
-            sdist-${{ runner.os }}-${{ runner.arch }}
-            ${{ runner.os }}-${{ runner.arch }}
-
-      - name: Test SDist buildable
-        run: |
-          TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
-          cp -r dist "${TEMP_DIR}/dist"
-          cd "${TEMP_DIR}"
-          uv pip install -v dist/*.tar.gz
-          python3 -c "import tilelang; print(tilelang.__version__)"
-
-      - name: Upload SDist
-        # Not PR to save artifact storage, as SDist is only needed for releases.
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
-        uses: actions/upload-artifact@v7
-        with:
-          name: sdist
-          path: dist/*.tar.gz
-          if-no-files-found: error
-
   build-wheels:
     name: Build wheels for Python ${{ matrix.python-version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
     if: |
@@ -253,17 +191,9 @@ jobs:
     # Not PR to save artifact storage, as artifacts are only needed for releases.
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
     runs-on: ubuntu-latest
-    needs: [build-sdist, build-wheels]
+    needs: [build-wheels]
     timeout-minutes: 15
     steps:
-      - name: Download built SDist
-        uses: actions/download-artifact@v8
-        with:
-          # unpacks default artifact into dist/
-          # if `name: artifact` is omitted, the action will create extra parent dir
-          name: sdist
-          path: dist
-
       - name: Download built wheels
         uses: actions/download-artifact@v8
         with:

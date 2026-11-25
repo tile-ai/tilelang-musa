@@ -25,6 +25,7 @@
 #include "op/builtin.h"
 #include "op/gemm.h"
 #include "backend/common/target_utils.h"
+#include "runtime/runtime.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -126,6 +127,14 @@ bool UseMusaNativeVector(DataType t) {
          (t.is_float() && t.bits() == 32 &&
           (t.lanes() == 2 || t.lanes() == 4)) ||
          (t.is_int() && t.bits() == 32 && (t.lanes() == 16 || t.lanes() == 32));
+}
+
+Optional<PrimExpr> ScalarFromBroadcast(const PrimExpr &expr) {
+  const auto *bcast = expr.as<BroadcastNode>();
+  if (bcast == nullptr || !bcast->value.dtype().is_scalar()) {
+    return Optional<PrimExpr>();
+  }
+  return bcast->value;
 }
 
 std::string GetMusaNativeVectorType(DataType t) {
@@ -355,7 +364,8 @@ std::string GetTileLangFP4Type(DataType type) {
   return stream.str();
 }
 
-CodeGenTileLangMUSA::CodeGenTileLangMUSA() {
+CodeGenTileLangMUSA::CodeGenTileLangMUSA(bool enable_fma_contraction)
+    : enable_fma_contraction_(enable_fma_contraction) {
   restrict_keyword_ = "__restrict__";
   vid_global_barrier_state_ = name_supply_->FreshName(kMUSAGlobalBarrierState);
   vid_global_barrier_expect_ = name_supply_->FreshName("__barrier_expect");
@@ -458,11 +468,26 @@ CodeGenTileLangMUSA::GetTMASwizzleGranularity(const PrimExpr &desc) const {
     return tl::musa::MU_SMEM_SWIZZLE_GRANULARITY_NONE;
   }
   const Array<PrimExpr> &args = it->second;
-  auto rank = args[3].as<IntImmNode>()->value;
-  auto desc_size = rank * 4 + 9;
-  ICHECK(args.size() == desc_size)
-      << "arg's size must be equal desc_size(i.e. rank * 4 + 9)";
-  const auto *sg = args[desc_size - 3].as<IntImmNode>();
+  if (args.size() < 4)
+    return tl::musa::MU_SMEM_SWIZZLE_GRANULARITY_NONE;
+  const auto *kind = args[0].as<StringImmNode>();
+  const auto *rank_imm = args[3].as<IntImmNode>();
+  if (!kind || !rank_imm)
+    return tl::musa::MU_SMEM_SWIZZLE_GRANULARITY_NONE;
+  size_t swizzle_index;
+  size_t rank = static_cast<size_t>(rank_imm->value);
+  if (kind->value == tl::tvm_musa_tensormap_create_tiled) {
+    size_t descriptor_size = rank * 4 + 9;
+    ICHECK_EQ(args.size(), descriptor_size);
+    swizzle_index = descriptor_size - 3;
+  } else if (kind->value == tl::tvm_musa_tensormap_create_im2col) {
+    size_t descriptor_size = rank * 2 + 20;
+    ICHECK_EQ(args.size(), descriptor_size);
+    swizzle_index = descriptor_size - 1;
+  } else {
+    return tl::musa::MU_SMEM_SWIZZLE_GRANULARITY_NONE;
+  }
+  const auto *sg = args[swizzle_index].as<IntImmNode>();
   if (!sg) {
     return tl::musa::MU_SMEM_SWIZZLE_GRANULARITY_NONE;
   }
@@ -950,10 +975,38 @@ void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
   int lanes = t.lanes();
+
+  // When contraction is enabled, keep the multiply and subtract visible as a
+  // single packed operation. Once emitted as separate mul4/sub4 calls, MTCC
+  // cannot contract them back to FMA.
+  if (enable_fma_contraction_ && op == "-" && t.is_float() && t.bits() == 32 &&
+      lanes == 4) {
+    const MulNode *mul = lhs.as<MulNode>();
+    if (mul != nullptr && mul->dtype == t && mul->a.dtype() == t &&
+        mul->b.dtype() == t && rhs.dtype() == t) {
+      auto a_scalar = ScalarFromBroadcast(mul->a);
+      auto b_scalar = ScalarFromBroadcast(mul->b);
+      auto c_scalar = ScalarFromBroadcast(rhs);
+      if (c_scalar.defined() && a_scalar.defined() != b_scalar.defined()) {
+        // Preserve scalar operands for the native scalar/vector/scalar FMA.
+        // Both native forms retain the existing fused RTZ operation.
+        os << "tl::fma4("
+           << PrintExpr(a_scalar.defined() ? a_scalar.value()
+                                           : b_scalar.value())
+           << ", " << PrintExpr(a_scalar.defined() ? mul->b : mul->a) << ", -("
+           << PrintExpr(c_scalar.value()) << "))";
+        return;
+      }
+      os << "tl::fma4(" << PrintExpr(mul->a) << ", " << PrintExpr(mul->b)
+         << ", -(" << PrintExpr(rhs) << "))";
+      return;
+    }
+  }
+
   bool use_fma = false;
   PrimExpr fma_a, fma_b, fma_c;
 
-  if (op == "+") {
+  if (enable_fma_contraction_ && op == "+") {
     auto try_fuse_mul_add = [&](const PrimExpr &maybe_mul,
                                 const PrimExpr &addend) -> bool {
       const MulNode *mul = maybe_mul.as<MulNode>();
@@ -989,6 +1042,17 @@ void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
     return "";
   };
 
+  Optional<PrimExpr> lhs_scalar;
+  Optional<PrimExpr> rhs_scalar;
+  if (op == "*" && !use_fma && t.is_float() && t.bits() == 32) {
+    lhs_scalar = ScalarFromBroadcast(lhs);
+    rhs_scalar = ScalarFromBroadcast(rhs);
+    if (lhs_scalar.defined() && rhs_scalar.defined()) {
+      lhs_scalar = Optional<PrimExpr>();
+      rhs_scalar = Optional<PrimExpr>();
+    }
+  }
+
   if (UseMusaNativeVector(t) && (lanes == 2 || lanes == 4)) {
     std::string tl_func = get_tl_func(lanes);
 
@@ -997,6 +1061,10 @@ void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
       if (use_fma) {
         os << PrintExpr(fma_a) << ", " << PrintExpr(fma_b) << ", "
            << PrintExpr(fma_c);
+      } else if (rhs_scalar.defined()) {
+        os << PrintExpr(lhs) << ", " << PrintExpr(rhs_scalar.value());
+      } else if (lhs_scalar.defined()) {
+        os << PrintExpr(lhs_scalar.value()) << ", " << PrintExpr(rhs);
       } else {
         os << PrintExpr(lhs) << ", " << PrintExpr(rhs);
       }
@@ -1030,27 +1098,48 @@ void CodeGenTileLangMUSA::PrintVecBinaryOp(const std::string &op, DataType t,
       stream << ' ' << sret << ";\n";
       int ssa_scope = BeginScope();
       {
-        std::vector<std::string> packed_vecs;
+        std::vector<std::pair<std::string, bool>> packed_args;
         if (use_fma) {
-          packed_vecs = {
-              SSAGetID(PrintExpr(fma_a), fma_a.dtype()),
-              SSAGetID(PrintExpr(fma_b), fma_b.dtype()),
-              SSAGetID(PrintExpr(fma_c), fma_c.dtype()),
+          packed_args = {
+              {SSAGetID(PrintExpr(fma_a), fma_a.dtype()), true},
+              {SSAGetID(PrintExpr(fma_b), fma_b.dtype()), true},
+              {SSAGetID(PrintExpr(fma_c), fma_c.dtype()), true},
+          };
+        } else if (rhs_scalar.defined()) {
+          packed_args = {
+              {SSAGetID(PrintExpr(lhs), lhs.dtype()), true},
+              {SSAGetID(PrintExpr(rhs_scalar.value()),
+                        rhs_scalar.value().dtype()),
+               false},
+          };
+        } else if (lhs_scalar.defined()) {
+          packed_args = {
+              {SSAGetID(PrintExpr(lhs_scalar.value()),
+                        lhs_scalar.value().dtype()),
+               false},
+              {SSAGetID(PrintExpr(rhs), rhs.dtype()), true},
           };
         } else {
-          packed_vecs = {
-              SSAGetID(PrintExpr(lhs), lhs.dtype()),
-              SSAGetID(PrintExpr(rhs), rhs.dtype()),
+          packed_args = {
+              {SSAGetID(PrintExpr(lhs), lhs.dtype()), true},
+              {SSAGetID(PrintExpr(rhs), rhs.dtype()), true},
           };
         }
         for (int i = 0; i < lanes / chunk_width; ++i) {
           this->PrintIndent();
           stream << "((" << chunk_type << "*)(&" << sret << "))[" << i
-                 << "] = tl::" << tl_func << "(((" << chunk_type << "*)(&"
-                 << packed_vecs[0] << "))[" << i << "]";
-          for (size_t arg_idx = 1; arg_idx < packed_vecs.size(); ++arg_idx) {
-            stream << ", ((" << chunk_type << "*)(&" << packed_vecs[arg_idx]
-                   << "))[" << i << "]";
+                 << "] = tl::" << tl_func << "(";
+          for (size_t arg_idx = 0; arg_idx < packed_args.size(); ++arg_idx) {
+            if (arg_idx != 0) {
+              stream << ", ";
+            }
+            const auto &arg = packed_args[arg_idx];
+            if (arg.second) {
+              stream << "((" << chunk_type << "*)(&" << arg.first << "))[" << i
+                     << "]";
+            } else {
+              stream << arg.first;
+            }
           }
           stream << ");\n";
         }
@@ -2026,24 +2115,38 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::musa_cp_async_robust())) {
-    ICHECK(op->args.size() == 5U || op->args.size() == 6U)
-        << "musa_cp_async_robust expects 5 or 6 arguments (dst_ptr, src_ptr, "
-           "bytes, robust_base, robust_size, [predicate])";
+    ICHECK(op->args.size() == 4U || op->args.size() == 5U)
+        << "musa_cp_async_robust expects 4 or 5 arguments (dst_ptr, src_ptr, "
+           "bytes, robust_desc, [predicate])";
     std::string dst = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
     std::string size = this->PrintExpr(op->args[2]);
-    std::string robust_base = this->PrintExpr(op->args[3]);
-    std::string robust_size = this->PrintExpr(op->args[4]);
     this->PrintIndent();
-    if (op->args.size() == 5U) {
-      this->stream << "tl::cp_async_gs_robust<" << size << ">(" << dst << ", "
-                   << src << ", " << robust_base << ", " << robust_size
-                   << ");\n";
+    const auto *robust_desc_call = op->args[3].as<CallNode>();
+    if (robust_desc_call == nullptr) {
+      std::string robust_desc = this->PrintExpr(op->args[3]);
+      if (op->args.size() == 4U) {
+        this->stream << "tl::cp_async_gs_robust<" << size << ">(" << dst << ", "
+                     << src << ", " << robust_desc << ");\n";
+      } else {
+        std::string condition = this->PrintExpr(op->args[4]);
+        this->stream << "tl::cp_async_gs_robust_conditional<" << size << ">("
+                     << dst << ", " << src << ", " << robust_desc << ", "
+                     << condition << ");\n";
+      }
     } else {
-      std::string condition = this->PrintExpr(op->args[5]);
-      this->stream << "tl::cp_async_gs_robust_conditional<" << size << ">("
-                   << dst << ", " << src << ", " << robust_base << ", "
-                   << robust_size << ", " << condition << ");\n";
+      auto [robust_base, robust_size] =
+          PrintInlineRobustDescriptorArgs(op->args[3]);
+      if (op->args.size() == 4U) {
+        this->stream << "tl::cp_async_gs_robust<" << size << ">(" << dst << ", "
+                     << src << ", " << robust_base << ", " << robust_size
+                     << ");\n";
+      } else {
+        std::string condition = this->PrintExpr(op->args[4]);
+        this->stream << "tl::cp_async_gs_robust_conditional<" << size << ">("
+                     << dst << ", " << src << ", " << robust_base << ", "
+                     << robust_size << ", " << condition << ");\n";
+      }
     }
   } else if (op->op.same_as(builtin::ptx_cp_async())) {
     // Keep compatibility with both cp.async signatures:
@@ -2237,10 +2340,12 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tma_load_im2col())) {
     std::stringstream ss;
     ICHECK_GE(op->args.size(), 4U);
+    auto sg = GetTMASwizzleGranularity(op->args[0]);
     auto inner_hint = GetTMACachePolicy(op->args[op->args.size() - 2], "inner");
     auto outer_hint = GetTMACachePolicy(op->args[op->args.size() - 1], "outer");
-    CheckMUSATMACachePolicySupported("tma_load_im2col", inner_hint, outer_hint);
-    ss << "tl::tma_load_im2col";
+    ss << "tl::tma_load_im2col<" << ToString(sg)
+       << ", SmemSwizzleStride::B256, SmemSwizzleLine::B256, "
+       << "PrefetchSize::NONE, " << inner_hint << ", " << outer_hint << ">";
     print_extern_call_stmt(ss.str(), 0, 3);
   } else if (op->op.same_as(tl::tma_store())) {
     std::stringstream ss;
@@ -2331,6 +2436,27 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ">();\n";
   } else if (op->op.same_as(tl::lma_wait())) {
     print_extern_call_stmt("tl::lma_wait");
+  } else if (op->op.same_as(tl::async_copy_commit_group()) ||
+             op->op.same_as(tl::async_copy_wait_group())) {
+    ICHECK_EQ(op->args.size(), 1U);
+    const auto *group_id = op->args[0].as<IntImmNode>();
+    ICHECK(group_id && group_id->value >= 0)
+        << "MUSA LDLMS cross-BB group ID must be a non-negative compile-time integer";
+    this->PrintIndent();
+    this->stream << (op->op.same_as(tl::async_copy_commit_group())
+                         ? "tl::async_copy_commit_group<"
+                         : "tl::async_copy_wait_group<")
+                 << group_id->value << ">();\n";
+  } else if (op->op.same_as(tl::ldlms_crossbb_commit_0())) {
+    print_extern_call_stmt("tl::ldlms_crossbb_commit_0");
+  } else if (op->op.same_as(tl::ldlms_crossbb_wait_0())) {
+    print_extern_call_stmt("tl::ldlms_crossbb_wait_0");
+  } else if (op->op.same_as(tl::ldlms_crossbb_commit_1())) {
+    print_extern_call_stmt("tl::ldlms_crossbb_commit_1");
+  } else if (op->op.same_as(tl::ldlms_crossbb_wait_1())) {
+    print_extern_call_stmt("tl::ldlms_crossbb_wait_1");
+  } else if (op->op.same_as(tl::sched_boundary())) {
+    print_extern_call_stmt("tl::sched_boundary");
   } else if (op->op.same_as(tl::warpgroup_fence_operand())) {
     ICHECK_EQ(op->args.size(), 4U);
     std::string dtype = Downcast<StringImm>(op->args[0])->value;
@@ -2361,6 +2487,8 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fence_sys())) {
+    this->stream << "__threadfence_system();\n";
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
@@ -3067,6 +3195,28 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     PrimExpr base = bl->indices[0];
     auto buffer_ref = this->GetBufferRef(op->dtype, buffer, base);
     os << "__ldg(&(" << buffer_ref << "))";
+  } else if (op->op.same_as(tl::lsu_ld_cache_hint()) ||
+             op->op.same_as(tl::lsu_ld_volatile_cache_hint())) {
+    ICHECK_EQ(op->args.size(), 5U)
+        << "T.lsu_ld_cache_hint expects (BufferLoad, inner, outer, chrnt, l2).";
+    const BufferLoadNode *bl = op->args[0].as<BufferLoadNode>();
+    ICHECK(bl) << "T.lsu_ld_cache_hint expects a BufferLoad as the first argument.";
+    ICHECK(!current_src_robust_desc_.defined())
+        << "LSU cache hints cannot be combined with a source robust descriptor.";
+    ICHECK_EQ(bl->buffer.scope(), "global")
+        << "LSU cache hints require a global-memory source.";
+    ICHECK_EQ(bl->indices.size(), 1U)
+        << "T.lsu_ld_cache_hint currently supports flattened 1D buffer accesses.";
+    const BufferNode *buffer = bl->buffer.get();
+    const int inner = Downcast<IntImm>(op->args[1])->value;
+    const int outer = Downcast<IntImm>(op->args[2])->value;
+    const int chrnt = Downcast<IntImm>(op->args[3])->value;
+    const int l2 = Downcast<IntImm>(op->args[4])->value;
+    const bool is_volatile = op->op.same_as(tl::lsu_ld_volatile_cache_hint());
+    auto buffer_ref = this->GetBufferRef(op->dtype, buffer, bl->indices[0]);
+    os << "tl::lsu_ld_cache_hint<" << inner << ", " << outer << ", " << chrnt
+       << ", " << l2 << ", " << (is_volatile ? "true" : "false")
+       << ">(&(" << buffer_ref << "))";
   } else if (op->op.same_as(tl::ldg32())) {
     ICHECK(!op->args.empty()) << "T.ldg32 expects a pointer argument.";
     if (op->args.size() > 1) {
@@ -3548,6 +3698,28 @@ void CodeGenTileLangMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::musa_fast_div())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.musa_fast_div expects dividend, divisor, multiplier, shift";
+    os << "tl::fast_div(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", "
+       << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::musa_fast_mod())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.musa_fast_mod expects dividend, divisor, multiplier, shift";
+    os << "tl::fast_mod(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", "
+       << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::musa_fast_div_device())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.musa_fast_div_device expects dividend and divisor";
+    os << "tl::fast_div(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::musa_fast_mod_device())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.musa_fast_mod_device expects dividend and divisor";
+    os << "tl::fast_mod(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_murand_kernel_h_ = true;
     this->murand_random_generator_state =
@@ -3750,9 +3922,29 @@ void CodeGenTileLangMUSA::VisitStmt_(const AttrStmtNode *op) {
     return;
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
-    const StringImmNode *pattern = op->value.as<StringImmNode>();
-    ICHECK(pattern);
-    this->stream << "const dim3 blockIdx = " << pattern->value << "();\n";
+    if (const auto *pattern = op->value.as<StringImmNode>()) {
+      this->stream << "const dim3 blockIdx = " << pattern->value << "();\n";
+      this->VisitStmt(op->body);
+      return;
+    }
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tirx::builtin::tvm_tuple()) &&
+          call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        ICHECK(name_node && size_node) << "threadblock_swizzle_pattern expects "
+                                          "tvm_tuple(device_func, panel_size)";
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    }
+    ICHECK(!func_name.empty() && panel_size > 0)
+        << "threadblock_swizzle_pattern: failed to extract func_name and "
+           "panel_size";
+    this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
+                 << panel_size << ">();\n";
     this->VisitStmt(op->body);
     return;
   } else if (op->attr_key == "pragma_unroll_factor") {
@@ -3980,10 +4172,18 @@ void CodeGenTileLangMUSA::VisitExpr_(const BufferLoadNode *op,
         << "Robust load does not support 4-bit packed dtypes.";
     ICHECK(!(value_dtype.bits() == 1 && value_dtype.is_int()))
         << "Robust load does not support bit-packed boolean loads.";
-    auto [robust_base, robust_size] =
-        GetRobustDescArgs(current_src_robust_desc_);
-    std::string robust_base_str = PrintExpr(robust_base);
-    std::string robust_size_str = PrintExpr(robust_size);
+    const auto *robust_desc_call = current_src_robust_desc_.as<CallNode>();
+    std::string robust_desc_str;
+    std::string robust_base_str;
+    std::string robust_size_str;
+    if (robust_desc_call != nullptr) {
+      auto robust_desc_args =
+          PrintInlineRobustDescriptorArgs(current_src_robust_desc_);
+      robust_base_str = std::move(robust_desc_args.first);
+      robust_size_str = std::move(robust_desc_args.second);
+    } else {
+      robust_desc_str = PrintExpr(current_src_robust_desc_);
+    }
 
     auto ptr_cast = [this](DataType pointed_to) {
       std::ostringstream ptr_os;
@@ -4017,9 +4217,14 @@ void CodeGenTileLangMUSA::VisitExpr_(const BufferLoadNode *op,
                                  std::ostream &out) {
       std::ostringstream type_os;
       PrintType(load_type, type_os);
-      out << "tl::robust_load<" << type_os.str() << ">("
-          << get_buffer_ptr(load_type, ptr_index) << ", " << robust_base_str
-          << ", " << robust_size_str << ")";
+      out << "tl::robust_load<" << type_os.str() << ">(";
+      out << get_buffer_ptr(load_type, ptr_index) << ", ";
+      if (robust_desc_call != nullptr) {
+        out << robust_base_str << ", " << robust_size_str;
+      } else {
+        out << robust_desc_str;
+      }
+      out << ")";
     };
 
     int lanes = op->dtype.lanes();
@@ -4188,6 +4393,47 @@ void CodeGenTileLangMUSA::VisitStmt_(const BufferStoreNode *op) {
   }
 }
 
+void CodeGenTileLangMUSA::VisitExpr_(const SelectNode *op, std::ostream &os) {
+  if (op->condition.dtype().is_scalar()) {
+    // Preserve the scalar condition stack used by nested lazy if_then_else.
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+  ICHECK(!op->dtype.is_scalable_vector());
+  ICHECK_EQ(op->condition.dtype().lanes(), op->dtype.lanes());
+  ICHECK_EQ(op->true_value.dtype(), op->dtype);
+  ICHECK_EQ(op->false_value.dtype(), op->dtype);
+
+  // MUSA represents predicate vectors as ushortN aggregates. They cannot be
+  // the condition of a C++ ternary. Select is eager, so materialize each vector
+  // operand once, then select independently using its scalar predicate lanes.
+  std::string cond = SSAGetID(PrintExpr(op->condition), op->condition.dtype());
+  std::string lhs = SSAGetID(PrintExpr(op->true_value), op->dtype);
+  std::string rhs = SSAGetID(PrintExpr(op->false_value), op->dtype);
+  std::string result = name_supply_->FreshName("select_vec");
+  PrintIndent();
+  PrintType(op->dtype, stream);
+  stream << " " << result << ";\n";
+  for (int i = 0; i < op->dtype.lanes(); ++i) {
+    std::ostringstream value;
+    PrintVecElemLoad(cond, op->condition.dtype(), i, value);
+    value << " ? ";
+    if (UseMusaNativeVector(op->dtype)) {
+      // Keep native half/BF16 storage bits: wrapper conversion through float
+      // could change NaN payloads even though Select performs no arithmetic.
+      value << lhs << "[" << i << "] : " << rhs << "[" << i << "]";
+      PrintIndent();
+      stream << result << "[" << i << "] = (" << value.str() << ");\n";
+    } else {
+      PrintVecElemLoad(lhs, op->dtype, i, value);
+      value << " : ";
+      PrintVecElemLoad(rhs, op->dtype, i, value);
+      PrintVecElemStore(result, op->dtype, i, "(" + value.str() + ")");
+    }
+  }
+  os << result;
+}
+
 void CodeGenTileLangMUSA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
@@ -4255,6 +4501,10 @@ void CodeGenTileLangMUSA::VisitExpr_(const BroadcastNode *op,
 
   if (UseMusaNativeVector(op->dtype)) {
     std::string v = PrintExpr(op->value);
+    if (op->dtype.is_float16()) {
+      os << "make_tl_h" << lanes << "_splat(" << v << ")";
+      return;
+    }
     os << "(";
     PrintType(op->dtype, os);
     os << "{";
@@ -4629,6 +4879,17 @@ void CodeGenTileLangMUSA::PrintVecElemLoadExpr(DataType t, int i,
   return;
 }
 
+std::pair<std::string, std::string>
+CodeGenTileLangMUSA::PrintInlineRobustDescriptorArgs(const PrimExpr &desc) {
+  auto [robust_base, robust_size] = GetRobustDescArgs(desc);
+  PrimExpr previous_src_robust_desc = current_src_robust_desc_;
+  current_src_robust_desc_ = PrimExpr();
+  std::string robust_base_str = PrintExpr(robust_base);
+  std::string robust_size_str = PrintExpr(robust_size);
+  current_src_robust_desc_ = previous_src_robust_desc;
+  return {robust_base_str, robust_size_str};
+}
+
 void CodeGenTileLangMUSA::PrintFunctionSignature(const String &function_name,
                                                  const PrimFunc &func,
                                                  std::ostream &os) {
@@ -4662,8 +4923,30 @@ void CodeGenTileLangMUSA::PrintFunctionSignature(const String &function_name,
       // work around for grid constant parameters.
       if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
         if (ptr->storage_scope == "grid_constant") {
+          std::string name = v->name_hint;
+          bool is_conv_param =
+              name.size() >= 11 &&
+              name.compare(name.size() - 11, 11, "_conv_param") == 0;
+          bool is_output_dim =
+              name.size() >= 11 &&
+              name.compare(name.size() - 11, 11, "_output_dim") == 0;
           os << "__attribute__((grid_constant)) const ";
-          CodeGenC::PrintType(ptr->element_type, os);
+          if (is_conv_param) {
+            os << "__musa::tme_conv_param_t";
+          } else if (is_output_dim) {
+            const auto *prim = ptr->element_type.as<PrimTypeNode>();
+            ICHECK(prim);
+            DataType dtype = prim->dtype;
+            ICHECK(dtype.is_int() && dtype.bits() == 32 &&
+                   (dtype.lanes() == 2 || dtype.lanes() == 3));
+            os << "v" << dtype.lanes() << "i32_t";
+          } else if (const auto *prim = ptr->element_type.as<PrimTypeNode>();
+                     prim != nullptr &&
+                     prim->dtype == tl::musaRobustDescriptorType()) {
+            os << "tl::robust_param_desc_t";
+          } else {
+            CodeGenC::PrintType(ptr->element_type, os);
+          }
           os << ' ' << vid;
           continue;
         }
@@ -4713,6 +4996,7 @@ void CodeGenTileLangMUSA::AddFunction(const GlobalVar &gvar,
   CodeGenC::DeclareFunction(gvar, f);
   // clear previous generated state.
   this->InitFuncState(f);
+  fp4_packed_buffers_.clear();
   tma_descriptor_args_.clear();
   next_mbarrier_id_ = 0;
   mbarrier_base_ids_.clear();
@@ -4757,8 +5041,30 @@ void CodeGenTileLangMUSA::AddFunction(const GlobalVar &gvar,
       // work around for grid constant parameters.
       if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
         if (ptr->storage_scope == "grid_constant") {
+          std::string name = v->name_hint;
+          bool is_conv_param =
+              name.size() >= 11 &&
+              name.compare(name.size() - 11, 11, "_conv_param") == 0;
+          bool is_output_dim =
+              name.size() >= 11 &&
+              name.compare(name.size() - 11, 11, "_output_dim") == 0;
           stream << "__attribute__((grid_constant)) const ";
-          CodeGenC::PrintType(ptr->element_type, stream);
+          if (is_conv_param) {
+            stream << "__musa::tme_conv_param_t";
+          } else if (is_output_dim) {
+            const auto *prim = ptr->element_type.as<PrimTypeNode>();
+            ICHECK(prim);
+            DataType dtype = prim->dtype;
+            ICHECK(dtype.is_int() && dtype.bits() == 32 &&
+                   (dtype.lanes() == 2 || dtype.lanes() == 3));
+            stream << "v" << dtype.lanes() << "i32_t";
+          } else if (const auto *prim = ptr->element_type.as<PrimTypeNode>();
+                     prim != nullptr &&
+                     prim->dtype == tl::musaRobustDescriptorType()) {
+            stream << "tl::robust_param_desc_t";
+          } else {
+            CodeGenC::PrintType(ptr->element_type, stream);
+          }
           stream << ' ' << vid;
           continue;
         }

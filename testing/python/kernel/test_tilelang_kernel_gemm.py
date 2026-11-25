@@ -1,7 +1,21 @@
 import pytest
 from tilelang import tvm as tvm
+import torch
+
 import tilelang.testing
 import tilelang.language as T
+
+
+def _reference_gemm(A, B, out_dtype, accum_dtype, target):
+    # PH1 uses scalar half FMA for a half accumulator. Round after each
+    # multiply-add as the kernel does, including across successive K tiles.
+    if accum_dtype == T.float16 and target.kind.name == "musa" and target.arch == "mp_31":
+        C = torch.zeros((A.shape[0], B.shape[1]), device=A.device, dtype=torch.float16)
+        for a, b in zip(A.float().unbind(dim=1), B.float().unbind(dim=0), strict=True):
+            C = (C.float() + a[:, None] * b[None, :]).half()
+    else:
+        C = torch.matmul(A.float(), B.float())
+    return C.to(getattr(torch, out_dtype))
 
 
 def matmul(
@@ -86,8 +100,6 @@ def run_gemm(
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
-        import torch
-
         if trans_A:
             A = A.T
         if trans_B:
@@ -97,9 +109,7 @@ def run_gemm(
             # float32 automatically, -0x1000 meas
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)
             B = (B.view(torch.int32) - 0x1000).view(torch.float32)
-        C = torch.matmul(A.to(torch.float), B.to(torch.float))
-        C = C.to(torch.__getattribute__(out_dtype))
-        return C
+        return _reference_gemm(A, B, out_dtype, dtypeAccum, kernel.target)
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
@@ -398,17 +408,11 @@ def run_gemm_sr(
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
-        import torch
-
         if trans_A:
             A = A.T
         if trans_B:
             B = B.T
-        A = A.to(torch.float)
-        B = B.to(torch.float)
-        C = torch.matmul(A, B)
-        C = C.to(torch.__getattribute__(out_dtype))
-        return C
+        return _reference_gemm(A, B, out_dtype, dtypeAccum, kernel.target)
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
@@ -519,15 +523,11 @@ def run_gemm_rs(
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
-        import torch
-
         if trans_A:
             A = A.T
         if trans_B:
             B = B.T
-        C = torch.matmul(A.to(torch.float), B.to(torch.float))
-        C = C.to(torch.__getattribute__(out_dtype))
-        return C
+        return _reference_gemm(A, B, out_dtype, dtypeAccum, kernel.target)
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 

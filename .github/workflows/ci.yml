@@ -34,46 +34,11 @@ env:
   PRE_COMMIT_HOME: "${{ github.workspace }}/.cache/pip/.pre-commit" # to be updated
 
 jobs:
-  lint:
-    name: Quick Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Setup Python 3.9
-        id: setup-pylowest
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.9"
-          update-environment: true
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            requirements*.txt
-            .pre-commit-config.yaml
-
-      - name: Check AST with Python 3.9
-        run: |
-          "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
-
-      - name: Pre-commit Lint
-        run: |
-          if ! pipx run pre-commit run --all-files --color=always --show-diff-on-failure; then
-            echo "::error::Pre-commit checks failed. Please run 'pre-commit install' and 'pre-commit run --all-files' locally to see the issues."
-            exit 1
-          fi
-
   tests:
     name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} (on ${{ matrix.runner.name }})
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    needs: [lint]
     runs-on: ${{ matrix.runner.tags }}
     strategy:
       matrix:

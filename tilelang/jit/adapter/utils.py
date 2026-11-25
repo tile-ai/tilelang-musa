@@ -157,7 +157,11 @@ def get_annotated_mod(
 
 
 def pythonic_expr(
-    expr: tvm.tirx.PrimExpr, dtype_map: dict[str, str] | None = None, ignore_cast: bool = False, floor_div_op: str = "/"
+    expr: tvm.tirx.PrimExpr,
+    dtype_map: dict[str, str] | None = None,
+    ignore_cast: bool = False,
+    floor_div_op: str = "/",
+    conditional_style: Literal["default", "python", "cpp"] = "default",
 ) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
@@ -170,6 +174,9 @@ def pythonic_expr(
                       behavior (suitable for generating C/C++ expressions). For generating
                       Python code where integer division is required (e.g. grid/block),
                       pass '//' explicitly.
+        conditional_style: Syntax used for Select/if_then_else expressions. The
+                           default preserves TVM's textual form; use 'python' or
+                           'cpp' when generating executable source.
     Returns:
         A string representation of the expression.
     """
@@ -195,6 +202,7 @@ def pythonic_expr(
         tvm.tirx.NE: 10,
         tvm.tirx.And: 5,
         tvm.tirx.Or: 4,
+        tvm.tirx.Select: 3,
         # Atoms (Var, IntImm) have the highest precedence implicitly
     }
     # By default, atomic expressions (variables, constants) have the highest precedence
@@ -277,6 +285,26 @@ def pythonic_expr(
             s = f"{op_name}({a_str}, {b_str})"
             # Function calls have high precedence
             p = PRECEDENCE.get(tvm.tirx.Call, ATOMIC_PRECEDENCE)
+        elif isinstance(node, tvm.tirx.Select) or (
+            isinstance(node, tvm.tirx.Call)
+            and getattr(node.op, "name", "") in {"tir.if_then_else", "tirx.if_then_else"}
+            and len(node.args) == 3
+        ):
+            if isinstance(node, tvm.tirx.Select):
+                condition, true_value, false_value = node.condition, node.true_value, node.false_value
+            else:
+                condition, true_value, false_value = node.args
+            condition_str, _ = node_to_result_map[condition]
+            true_str, _ = node_to_result_map[true_value]
+            false_str, _ = node_to_result_map[false_value]
+            if conditional_style == "cpp":
+                s = f"({condition_str} ? {true_str} : {false_str})"
+                p = PRECEDENCE[tvm.tirx.Select]
+            elif conditional_style == "python":
+                s = f"({true_str} if {condition_str} else {false_str})"
+                p = PRECEDENCE[tvm.tirx.Select]
+            else:
+                s, p = str(node), 0
         else:
             # Fallback for unhandled expression types
             s, p = str(node), 0
@@ -425,7 +453,7 @@ def parse_tma_descriptor_args(
 
         tma_create_str, _, dtype, tensor_rank, global_address, *remaining_args = args
 
-        is_img2col = tma_create_str.value == "__tvm_tensormap_create_im2col"
+        is_img2col = tma_create_str.value in ("__tvm_tensormap_create_im2col", "__tvm_musa_tensormap_create_im2col")
 
         # Convert basic fields
         dtype = pythonic_expr_func(dtype)

@@ -187,6 +187,21 @@ bool ForBodyContainsSeqStmt(const For &loop) {
   return has_seq_stmt;
 }
 
+static bool IsVectorizablePureExternCall(const CallNode *op) {
+  if (!op->op.same_as(builtin::call_pure_extern()) || op->args.size() < 2 ||
+      op->args[0].as<StringImmNode>() == nullptr || op->dtype.is_void() ||
+      op->dtype.is_handle() || op->dtype.is_scalable_vector()) {
+    return false;
+  }
+  for (size_t i = 1; i < op->args.size(); ++i) {
+    if (op->args[i].dtype().is_handle() || op->args[i].dtype().is_void() ||
+        op->args[i].dtype().is_scalable_vector()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
   explicit VectorizePlanner(arith::Analyzer *analyzer,
@@ -563,8 +578,10 @@ private:
         Op::GetAttrMap<TVectorizable>("TVectorizable");
 
     auto optional_op = node->op.as<Op>();
-    bool vectorizable = op_vectorizable_.get(optional_op.value(), false) &&
-                        !node->dtype.is_scalable_vector();
+    bool vectorizable =
+        optional_op && op_vectorizable_.get(optional_op.value(), false) &&
+        !node->dtype.is_scalable_vector();
+    vectorizable = vectorizable || IsVectorizablePureExternCall(node);
     if (vectorizable) {
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
@@ -1086,6 +1103,57 @@ private:
   arith::Analyzer *analyzer_;
 };
 
+std::vector<Var> CollectVars(const PrimExpr &expr) {
+  std::vector<Var> vars;
+  PostOrderVisit(expr, [&vars](const ObjectRef &obj) {
+    if (const auto *var_node = obj.as<VarNode>()) {
+      Var var = GetRef<Var>(var_node);
+      for (const auto &existing : vars) {
+        if (existing.same_as(var)) {
+          return;
+        }
+      }
+      vars.push_back(var);
+    }
+  });
+  return vars;
+}
+
+bool CanProveEqualWithBoundedVar(const PrimExpr &lhs, const PrimExpr &rhs,
+                                 arith::Analyzer *analyzer) {
+  if (analyzer->CanProveEqual(lhs, rhs)) {
+    return true;
+  }
+
+  PrimExpr diff = analyzer->Simplify(lhs - rhs);
+  std::vector<Var> vars = CollectVars(diff);
+  if (vars.size() != 1) {
+    return false;
+  }
+
+  // A finite analyzer bound is semantic information. Proving the equality for
+  // every value in that interval is valid regardless of the variable's name.
+  // Cap the interval to keep this fallback from dominating compile time.
+  Var bounded_var = vars[0];
+  arith::ConstIntBound bound = analyzer->const_int_bound(bounded_var);
+  if (bound->min_value == arith::ConstIntBound::kNegInf ||
+      bound->max_value == arith::ConstIntBound::kPosInf ||
+      bound->min_value < 0 || bound->max_value - bound->min_value > 1024) {
+    return false;
+  }
+
+  PrimExpr zero = make_zero(diff.dtype());
+  for (int64_t value = bound->min_value; value <= bound->max_value; ++value) {
+    PrimExpr value_expr = IntImm(bounded_var.dtype(), value);
+    PrimExpr diff_value =
+        analyzer->Simplify(Substitute(diff, {{bounded_var, value_expr}}));
+    if (!analyzer->CanProveEqual(diff_value, zero)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool HasContiguousOffsetsInVectorBoundary(const PrimExpr &expr, Var var,
                                           const PrimExpr &iter_var_size,
                                           int target_vectorized_size,
@@ -1117,13 +1185,35 @@ bool HasContiguousOffsetsInVectorBoundary(const PrimExpr &expr, Var var,
           LaneOffsetDivModSimplifier(lane, target_vectorized_size, analyzer)
               .Rewrite(current));
       PrimExpr delta = analyzer->Simplify(current - previous);
-      if (!analyzer->CanProveEqual(delta, one_for_expr)) {
+      if (!CanProveEqualWithBoundedVar(delta, one_for_expr, analyzer)) {
         return false;
       }
       previous = current;
     }
   }
   return true;
+}
+
+Optional<PrimExpr>
+CanonicalizeContiguousIndexToRamp(const PrimExpr &index, Var lane_var,
+                                  int lanes, arith::Analyzer *analyzer) {
+  if (lanes <= 1 || index.dtype().is_scalable_or_fixed_length_vector()) {
+    return std::nullopt;
+  }
+
+  PrimExpr lane_extent = make_const(lane_var.dtype(), lanes);
+  if (!HasContiguousOffsetsInVectorBoundary(index, lane_var, lane_extent, lanes,
+                                            analyzer)) {
+    return std::nullopt;
+  }
+
+  PrimExpr base = analyzer->Simplify(
+      Substitute(index, {{lane_var, make_zero(lane_var.dtype())}}));
+  if (base.dtype().is_scalable_or_fixed_length_vector()) {
+    return std::nullopt;
+  }
+  return Ramp(base, make_const(base.dtype(), 1),
+              IntImm(DataType::Int(32), lanes));
 }
 
 bool IndicesCanVectorize(const PrimExpr &expr, Var var,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
+
 try:
-    import torch.musa._CudaDeviceProperties as _MusaDeviceProperties
+    from torch_musa._MUSAC import _MusaDeviceProperties
 except ImportError:
     _MusaDeviceProperties = type("DummyMusaDeviceProperties", (), {})
 
@@ -20,25 +22,15 @@ class musaDeviceAttrNames:
     musaDevAttrMaxPersistingL2CacheSize: int = 108
 
 
-def _get_attr_int(obj, *names) -> int | None:
-    for name in names:
-        value = getattr(obj, name, None)
-        if value is not None:
-            try:
-                return int(value)
-            except Exception:
-                continue
-    return None
-
-
 def get_musa_device_properties(device_id: int = 0) -> _MusaDeviceProperties | None:
     try:
-        import torch.musa
+        import torch
 
-        if not torch.musa.is_available():
+        musa = getattr(torch, "musa", None)
+        if musa is None or not musa.is_available():
             return None
-        return torch.musa.get_device_properties(device_id)
-    except Exception:
+        return musa.get_device_properties(device_id)
+    except (ImportError, RuntimeError):
         return None
 
 
@@ -50,27 +42,22 @@ def get_device_name(device_id: int = 0) -> str | None:
 
 
 def get_device_attribute(attr: int, device_id: int = 0) -> int | None:
-    prop = get_musa_device_properties(device_id)
-    if prop is None:
+    try:
+        libmusart = ctypes.cdll.LoadLibrary("libmusart.so")
+        value = ctypes.c_int()
+        musa_device_get_attribute = libmusart.musaDeviceGetAttribute
+        musa_device_get_attribute.argtypes = [
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        musa_device_get_attribute.restype = ctypes.c_int
+        result = musa_device_get_attribute(ctypes.byref(value), attr, device_id)
+        if result != 0:
+            return None
+        return value.value
+    except (AttributeError, OSError):
         return None
-
-    attr_map = {
-        musaDeviceAttrNames.musaDevAttrMaxThreadsPerBlock: _get_attr_int(prop, "max_threads_per_block"),
-        musaDeviceAttrNames.musaDevAttrMaxSharedMemoryPerBlock: _get_attr_int(prop, "shared_memory_per_block", "shared_mem_per_block"),
-        musaDeviceAttrNames.musaDevAttrMaxRegistersPerBlock: _get_attr_int(prop, "max_registers_per_block", "regs_per_block"),
-        musaDeviceAttrNames.musaDevAttrMultiProcessorCount: _get_attr_int(prop, "multi_processor_count"),
-        musaDeviceAttrNames.musaDevAttrMaxSharedMemoryPerMultiprocessor: _get_attr_int(
-            prop,
-            "shared_memory_per_multiprocessor",
-            "shared_mem_per_multiprocessor",
-        ),
-        musaDeviceAttrNames.musaDevAttrMaxPersistingL2CacheSize: _get_attr_int(
-            prop,
-            "max_persisting_l2_cache_size",
-            "persisting_l2_cache_max_size",
-        ),
-    }
-    return attr_map.get(attr)
 
 
 def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> int | None:

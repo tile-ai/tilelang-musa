@@ -8,7 +8,6 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
 #include <tvm/tirx/builtin.h>
-#include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -37,6 +36,7 @@
 #include "common/loop_fusion_utils.h"
 #include "common/pipeline_utils.h"
 #include "common/union_find.h"
+#include "explicit_alias_layout.h"
 #include "layout_reducer.h"
 #include "parallel_loop_layout_validator.h"
 #include "tir/transforms/ir_utils.h"
@@ -49,14 +49,6 @@ using namespace ffi;
 
 namespace {
 
-int64_t GetElementStorageBits(DataType dtype) {
-  // Layout aliasing must be reasoned about in logical storage bits per element,
-  // not in bytes.  For sub-byte dtypes such as fp4, `dtype.bytes()` rounds up
-  // to 1 and loses the "two fp4 values share one byte" relationship that
-  // subtype-changing views rely on.
-  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
-}
-
 bool IsPH1SupportedFp8(DataType dtype) {
   return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
          dtype.is_float8_e5m2();
@@ -66,30 +58,6 @@ bool UsePH1Fp8SqmmaKMajorHints(DataType a_dtype, DataType b_dtype,
                                bool allow_sqmma) {
   return allow_sqmma && IsPH1SupportedFp8(a_dtype) &&
          IsPH1SupportedFp8(b_dtype);
-}
-
-bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
-                 arith::Analyzer *analyzer) {
-  if (lhs.size() != rhs.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < lhs.size(); ++i) {
-    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
-                                        const Layout &layout,
-                                        arith::Analyzer *analyzer) {
-  for (const auto &buffer : buffers) {
-    if (ShapesEqual(layout->InputShape(), buffer->shape, analyzer)) {
-      return buffer;
-    }
-  }
-  return Optional<Buffer>();
 }
 
 } // namespace
@@ -267,29 +235,11 @@ public:
         for (const auto &sib : siblings) {
           if (sib.same_as(src_buffer))
             continue;
-          bool shapes_equal =
-              src_layout->InputShape().size() == sib->shape.size();
-          if (shapes_equal) {
-            for (size_t i = 0; i < src_layout->InputShape().size(); ++i) {
-              if (!analyzer_.CanProveEqual(src_layout->InputShape()[i],
-                                           sib->shape[i])) {
-                shapes_equal = false;
-                break;
-              }
-            }
-          }
+          // Alias buffers may reinterpret the same storage with different
+          // shapes, strides, or element widths.  Preserve their actual
+          // addressing when translating the inferred layout.
           Layout target_layout =
-              shapes_equal
-                  ? src_layout
-                  // Alias buffers may reinterpret the same storage with a
-                  // different element width.  Reshape the inferred layout using
-                  // the old/new storage bit ratio so that layout inference
-                  // keeps the physical storage footprint unchanged while
-                  // allowing the logical element count to change.
-                  : src_layout->Reshape(
-                        sib->shape, &analyzer_,
-                        Integer(GetElementStorageBits(src_buffer->dtype)),
-                        Integer(GetElementStorageBits(sib->dtype)));
+              ReshapeLayoutForAlias(src_layout, src_buffer, sib, &analyzer_);
           if (layout_map.count(sib)) {
             ICHECK(IsLayoutEquivalentUnderPrefixLift(target_layout,
                                                      layout_map[sib]))
@@ -532,25 +482,8 @@ public:
         continue;
       for (const auto &buf : buffers) {
         if (!layout_map.count(buf)) {
-          bool shapes_equal =
-              rep_layout.value()->InputShape().size() == buf->shape.size();
-          if (shapes_equal) {
-            for (size_t i = 0; i < rep_layout.value()->InputShape().size();
-                 ++i) {
-              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i],
-                                           buf->shape[i])) {
-                shapes_equal = false;
-                break;
-              }
-            }
-          }
-          Layout reshaped =
-              shapes_equal
-                  ? rep_layout.value()
-                  : rep_layout.value()->Reshape(
-                        buf->shape, &analyzer_,
-                        Integer(GetElementStorageBits(rep.value()->dtype)),
-                        Integer(GetElementStorageBits(buf->dtype)));
+          Layout reshaped = ReshapeLayoutForAlias(rep_layout.value(),
+                                                  rep.value(), buf, &analyzer_);
           layout_map.Set(buf, reshaped);
         }
       }
@@ -862,7 +795,9 @@ private:
         auto b_layout = FindLayoutForBuffer(active_layout_map, gemm->b_);
         auto block_size = as_const_int(thread_bounds_vec_[i]->extent);
         std::optional<std::array<int, 3>> sqmma_inst = std::nullopt;
-        if (block_size != nullptr) {
+        if (block_size != nullptr &&
+            gemm->GetGemmInstructionKey(*block_size, target_) ==
+                kGemmInstMusaSQMMA) {
           sqmma_inst = gemm->GetGemmInstructionShape(*block_size, target_,
                                                      kGemmInstMusaSQMMA);
         }
@@ -1046,7 +981,7 @@ private:
       analyzer_vec_.push_back(analyzer_.Clone());
       buffer_oob_vec_.push_back(false);
     } else {
-      IRVisitorWithAnalyzer::VisitStmt(op->body);
+      IRVisitorWithAnalyzer::VisitStmt_(op);
     }
   }
 
@@ -1089,7 +1024,12 @@ private:
           bool shapes_equal =
               ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_);
 
-          if (shapes_equal) {
+          if (anchor_buffer.defined()) {
+            Layout resolved_layout = buffer.same_as(anchor_buffer.value())
+                ? layout
+                : ReshapeLayoutForAlias(layout, anchor_buffer.value(), buffer, &analyzer_);
+            annotated_layout_map_.Set(buffer, resolved_layout);
+          } else if (shapes_equal) {
             annotated_layout_map_.Set(buffer, layout);
           } else {
             auto reshaped_layout =
@@ -1132,7 +1072,12 @@ private:
               bool shapes_equal =
                   ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_);
 
-              if (shapes_equal) {
+              if (anchor_buffer.defined()) {
+                Layout resolved_layout = buffer.same_as(anchor_buffer.value())
+                    ? layout
+                    : ReshapeLayoutForAlias(layout, anchor_buffer.value(), buffer, &analyzer_);
+                resolved_step_layouts.Set(buffer, resolved_layout);
+              } else if (shapes_equal) {
                 resolved_step_layouts.Set(buffer, layout);
               } else {
                 auto reshaped_layout = layout->Reshape(

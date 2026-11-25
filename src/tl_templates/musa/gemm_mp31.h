@@ -5,6 +5,8 @@
 #include "intrin.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <type_traits>
 #include <mute/algorithm/clear.hpp>
 #include <mute/arch/mma_mp31.hpp>
 #include <mute/tensor.hpp>
@@ -512,10 +514,8 @@ class GemmTensorOp {
 public:
   using A_type_mute = typename tl::to_mute_type<A_type_raw>::type;
   using B_type_mute = typename tl::to_mute_type<B_type_raw>::type;
-  using A_type = conditional_t<std::is_same<A_type_mute, float>::value,
-                               tfloat32_t, A_type_mute>;
-  using B_type = conditional_t<std::is_same<B_type_mute, float>::value,
-                               tfloat32_t, B_type_mute>;
+  using A_type = A_type_mute;
+  using B_type = B_type_mute;
   using C_type = C_type_raw;
 
   static_assert(num_warp_m > 0 && num_warp_n > 0,
@@ -668,17 +668,46 @@ public:
 
 namespace tl_sqmma {
 
+constexpr bool isSupportedLeadingStrideBytes(int bytes) {
+  return bytes == 8 || bytes == 16 || bytes == 32 || bytes == 64 ||
+         bytes == 128 || bytes == 256;
+}
+
+template <int MN, int K, int LeadingDim, typename ElementType, TCE::Major Major>
+TL_HOST_DEVICE constexpr auto makePitchedSmemLayoutAtom() {
+  constexpr int kElementBits = sizeof_bits_v<ElementType>;
+  if constexpr (Major == TCE::Major::MN) {
+    using BaseLayout = Layout<Shape<Int<MN * kElementBits>, Int<K>>,
+                              Stride<_1, Int<LeadingDim * kElementBits>>>;
+    if constexpr (kElementBits <= 8) {
+      return upcast<kElementBits>(
+          ComposedLayout<Swizzle<4, 4, 4>, smem_ptr_flag, BaseLayout>{});
+    } else if constexpr (kElementBits == 16) {
+      return upcast<kElementBits>(
+          ComposedLayout<Swizzle<3, 5, 3>, smem_ptr_flag, BaseLayout>{});
+    } else {
+      static_assert(kElementBits == 32, "Unsupported SQMMA element type");
+      return upcast<kElementBits>(
+          ComposedLayout<Swizzle<2, 6, 2>, smem_ptr_flag, BaseLayout>{});
+    }
+  } else {
+    static_assert(Major == TCE::Major::K, "Unsupported SQMMA major mode");
+    using BaseLayout = Layout<Shape<Int<MN>, Int<K * kElementBits>>,
+                              Stride<Int<LeadingDim * kElementBits>, _1>>;
+    return upcast<kElementBits>(
+        ComposedLayout<Swizzle<4, 4, 4>, smem_ptr_flag, BaseLayout>{});
+  }
+}
+
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum, typename A_type_raw,
+          bool trans_B, bool clear_accum, int lda, int ldb, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
 class GemmTensorOp {
 public:
   using A_type_mute = typename tl::to_mute_type<A_type_raw>::type;
   using B_type_mute = typename tl::to_mute_type<B_type_raw>::type;
-  using A_type = conditional_t<std::is_same<A_type_mute, float>::value,
-                               tfloat32_t, A_type_mute>;
-  using B_type = conditional_t<std::is_same<B_type_mute, float>::value,
-                               tfloat32_t, B_type_mute>;
+  using A_type = A_type_mute;
+  using B_type = B_type_mute;
   using C_type = C_type_raw;
 
   static constexpr bool IsFp8A =
@@ -694,6 +723,27 @@ public:
   static constexpr TCE::Major SqmmaMajorB =
       IsFp8SQMMA ? TCE::Major::K : (trans_B ? TCE::Major::K : TCE::Major::MN);
 
+  static constexpr int kADefaultStride = trans_A ? M : K;
+  static constexpr int kBDefaultStride = trans_B ? K : N;
+  static constexpr bool kAUsesCustomStride = lda != kADefaultStride;
+  static constexpr bool kBUsesCustomStride = ldb != kBDefaultStride;
+  static_assert(lda >= kADefaultStride,
+                "SQMMA A leading dimension must cover its logical row");
+  static_assert(ldb >= kBDefaultStride,
+                "SQMMA B leading dimension must cover its logical row");
+  static_assert(!kAUsesCustomStride || sizeof_bits_v<A_type> == 16,
+                "MP31 SQMMA custom A stride currently supports FP16/BF16");
+  static_assert(!kBUsesCustomStride || sizeof_bits_v<B_type> == 16,
+                "MP31 SQMMA custom B stride currently supports FP16/BF16");
+  static_assert(!kAUsesCustomStride ||
+                    isSupportedLeadingStrideBytes(lda * sizeof_bits_v<A_type> /
+                                                  8),
+                "Unsupported MP31 SQMMA custom A leading stride");
+  static_assert(!kBUsesCustomStride ||
+                    isSupportedLeadingStrideBytes(ldb * sizeof_bits_v<B_type> /
+                                                  8),
+                "Unsupported MP31 SQMMA custom B leading stride");
+
   // Tile handled by one squad warp
   using AtomShape_MNK =
       Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>;
@@ -702,7 +752,9 @@ public:
   using SqmmaOp =
       decltype(mute::MP31::SQMMA::ss_op_selector<A_type, B_type, C_type,
                                                  AtomShape_MNK, SqmmaMajorA,
-                                                 SqmmaMajorB>());
+                                                 SqmmaMajorB,
+                                                 // M128 instructions require N to be a multiple of 32.
+                                                 Int<(N / num_warp_n) % 32 == 0 ? 128 : 64>>());
   using SqmmaTraits = MMA_Traits<SqmmaOp>;
   using InstructionShape_MNK = typename SqmmaTraits::Shape_MNK;
 
@@ -724,10 +776,21 @@ public:
       decltype(mutlass::gemm::collective::detail::ss_smem_selector_B<
                SqmmaMajorB, B_type, SqmmaOp, TileShape_MNK>());
 
-  using SmemLayoutA =
-      decltype(tile_to_shape(SmemLayoutAtomA{}, Shape<Int<M>, Int<K>, _1>{}));
-  using SmemLayoutB =
-      decltype(tile_to_shape(SmemLayoutAtomB{}, Shape<Int<N>, Int<K>, _1>{}));
+  using PitchedSmemLayoutAtomA =
+      decltype(makePitchedSmemLayoutAtom<M, K, lda, A_type, SqmmaMajorA>());
+  using PitchedSmemLayoutAtomB =
+      decltype(makePitchedSmemLayoutAtom<N, K, ldb, B_type, SqmmaMajorB>());
+  using SelectedSmemLayoutAtomA =
+      conditional_t<kAUsesCustomStride, PitchedSmemLayoutAtomA,
+                    SmemLayoutAtomA>;
+  using SelectedSmemLayoutAtomB =
+      conditional_t<kBUsesCustomStride, PitchedSmemLayoutAtomB,
+                    SmemLayoutAtomB>;
+
+  using SmemLayoutA = decltype(tile_to_shape(SelectedSmemLayoutAtomA{},
+                                             Shape<Int<M>, Int<K>, _1>{}));
+  using SmemLayoutB = decltype(tile_to_shape(SelectedSmemLayoutAtomB{},
+                                             Shape<Int<N>, Int<K>, _1>{}));
 
   static_assert(num_warp_m % 4 == 0,
                 "num_warp_m must be a multiple of 4 for sqmma");
@@ -785,15 +848,11 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
 TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum,
                        int thread_idx_base = 0) {
   if constexpr (use_sqmma) {
-    static_assert((trans_A && lda == M) || (!trans_A && lda == K),
-                  "SQMMA doesn't support custom stride for A");
-    static_assert((trans_B && ldb == K) || (!trans_B && ldb == N),
-                  "SQMMA doesn't support custom stride for B");
     static_assert(offset_a == 0 && offset_b == 0,
                   "offset_a and offset_b must be zero for SQMMA");
     using MMA = mute::tl_sqmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
-                                             trans_A, trans_B, clear_accum,
-                                             A_type, B_type, C_type>;
+                                             trans_A, trans_B, clear_accum, lda,
+                                             ldb, A_type, B_type, C_type>;
     MMA::template body<wg_wait>(pA, pB, accum, thread_idx_base);
   } else {
     using MMA =
@@ -833,5 +892,141 @@ TL_DEVICE /**
     wait_wgmma() {
   mute::warpsquad_wait<num_mma>();
 }
+
+
+namespace tl_gemmsp {
+
+template <typename A, typename MetaT> struct SparseDecodeTraits {
+  using Meta = typename std::remove_cv<MetaT>::type;
+  static_assert(sizeof(A) == 1 || sizeof(A) == 2 || sizeof(A) == 4,
+                "gemm_sp register decode only supports 8/16/32-bit A.");
+  static_assert(std::is_integral_v<Meta>,
+                "gemm_sp expects integral sparse metadata.");
+  static constexpr int kBits = sizeof(A) * 8;
+  static constexpr int kMetaBits = sizeof(Meta) * 8;
+  static constexpr int kStep = kBits == 32 ? 2 : 4;
+  static constexpr int kCompressedPerBlock = kBits == 32 ? 1 : 2;
+  static constexpr int kExpandedPerBlock = kBits == 32 ? 2 : 4;
+  static constexpr int kSelectorBits = 4;
+  static constexpr int kSelectorsPerMeta = kMetaBits / kSelectorBits;
+  static_assert(kMetaBits % kSelectorBits == 0,
+                "gemm_sp sparse metadata width must be divisible by 4 bits.");
+  static constexpr int kDecompressedPerMeta =
+      kSelectorsPerMeta * kExpandedPerBlock;
+};
+
+template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
+          bool trans_E, bool trans_B, bool clear_accum, int lda, int ldb,
+          int offset_a, int offset_b, typename A_type, typename B_type,
+          typename C_type, typename E_type>
+class GemmSPSS {
+public:
+  static_assert(offset_a == 0 && offset_b == 0,
+                "PH1 sparse FMA path expects zero A/B offsets.");
+  static_assert((trans_A && lda == M) || (!trans_A && lda == K) || lda == 0,
+                "PH1 sparse FMA path expects default contiguous stride for A.");
+  static_assert((trans_B && ldb == K) || (!trans_B && ldb == N) || ldb == 0,
+                "PH1 sparse FMA path expects default contiguous stride for B.");
+
+  static constexpr int kBStride = ldb == 0 ? (trans_B ? K : N) : ldb;
+
+  template <typename MetaT>
+  static TL_DEVICE uint32_t load_sparse_meta(const MetaT *pE, int row,
+                                             int meta_col, int meta_cols) {
+    using Meta = typename std::remove_cv<MetaT>::type;
+    static_assert(std::is_integral_v<Meta>,
+                  "gemm_sp expects integral sparse metadata.");
+    return static_cast<uint32_t>(
+        pE[trans_E ? (meta_col * M + row) : (row * meta_cols + meta_col)]);
+  }
+
+  template <typename A, typename MetaT>
+  static TL_DEVICE A sparse_decompress_value(const A *pA, const MetaT *pE,
+                                             int m, int k) {
+    using Traits = SparseDecodeTraits<A, MetaT>;
+    const int meta_cols = K / Traits::kDecompressedPerMeta;
+    const uint32_t meta =
+        load_sparse_meta(pE, m, k / Traits::kDecompressedPerMeta,
+                                meta_cols);
+    const int selector =
+        (meta >> (((k % Traits::kDecompressedPerMeta) / Traits::kStep) * 4)) &
+        0xf;
+    int idx0 = selector & 0x3;
+    int idx1 = selector >> 2;
+    if constexpr (Traits::kCompressedPerBlock == 1) {
+      idx0 /= 2;
+    }
+    const int in_block = k % Traits::kExpandedPerBlock;
+    const bool take0 = in_block == idx0;
+    const bool take1 = Traits::kCompressedPerBlock > 1 && in_block == idx1;
+    if (!take0 && !take1) {
+      return A{};
+    }
+    const int comp_group = k / Traits::kExpandedPerBlock;
+    const int comp_col =
+        comp_group * Traits::kCompressedPerBlock + (take1 ? 1 : 0);
+    return pA[trans_A ? (m + comp_col * M) : (m * (K / 2) + comp_col)];
+  }
+
+  static TL_DEVICE void body(A_type *pA, B_type *pB, C_type *accum,
+                             E_type *pE, int thread_idx_base = 0) {
+    (void)num_warp_m;
+    (void)num_warp_n;
+    (void)thread_idx_base;
+
+    const int tid = threadIdx.x;
+    const int num_threads = blockDim.x;
+    const int total = M * N;
+    const int trip = (total + num_threads - 1) / num_threads;
+
+    for (int idx_iter = 0; idx_iter < trip; ++idx_iter) {
+      const int linear = idx_iter * num_threads + tid;
+      if (linear >= total) {
+        continue;
+      }
+      const int m = linear / N;
+      const int n = linear - m * N;
+      C_type sum = clear_accum ? C_type{} : accum[idx_iter];
+      for (int k = 0; k < K; ++k) {
+        const A_type a_val = sparse_decompress_value(
+            pA, pE, m, k);
+        const int b_index = trans_B ? (offset_b + n * kBStride + k)
+                                    : (offset_b + k * kBStride + n);
+        sum += static_cast<C_type>(a_val) * static_cast<C_type>(pB[b_index]);
+      }
+      accum[idx_iter] = sum;
+    }
+  }
+};
+} // namespace tl_gemmsp
+
+
+
+template <int M, int N, int K, int num_warp_m, int num_warp_n,
+          bool trans_A, bool trans_E, bool trans_B,
+          bool clear_accum = false, int lda = 0,
+          int ldb = 0, int offset_a = 0, int offset_b = 0,
+          bool use_sqmma = false, int inst_m = 0, int inst_n = 0,
+          int inst_k = 0, int wg_wait = 0, int B_SG = 16, int B_SS = 256,
+          int B_SL = 256, typename A_type, typename B_type, typename C_type,
+          typename E_type>
+TL_DEVICE void gemm_sp_ss(A_type *pA, B_type *pB, C_type *accum, E_type *pE,
+                          int thread_idx_base = 0) {
+  static_assert(wg_wait == 0,
+                "PH1 sparse FMA path currently expects wg_wait to stay at 0.");
+  (void)use_sqmma;
+  (void)inst_m;
+  (void)inst_n;
+  (void)inst_k;
+  (void)B_SG;
+  (void)B_SS;
+  (void)B_SL;
+
+  using MMA = tl_gemmsp::GemmSPSS<M, N, K, num_warp_m, num_warp_n, trans_A, trans_E,
+                       trans_B, clear_accum, lda, ldb, offset_a, offset_b,
+                       A_type, B_type, C_type, E_type>;
+  MMA::body(pA, pB, accum, pE, thread_idx_base);
+}
+
 
 } // namespace tl

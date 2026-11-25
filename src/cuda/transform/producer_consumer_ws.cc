@@ -620,6 +620,24 @@ static bool HasGlobalToSharedCopyShape(const CopyNode *copy) {
          IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
 }
 
+static bool ContainsNonSharedTileOpCopy(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (found) {
+      return;
+    }
+    if (const auto *call = node.as<CallNode>()) {
+      auto tile_op = ParseOperator(GetRef<Call>(call));
+      if (tile_op.defined()) {
+        if (const auto *copy = tile_op.as<CopyNode>()) {
+          found = !IsSharedBuffer(copy->dst);
+        }
+      }
+    }
+  });
+  return found;
+}
+
 static cuda::CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode *copy,
                                                            Target target) {
   if (copy == nullptr) {
@@ -1540,6 +1558,11 @@ private:
       LocalLiveSet movable_probe_live = producer_body_live;
       for (int ci = compute_cursor; ci < wait_pos; ++ci) {
         const LocalAccessSummary &summary = consumer_compute_summaries[ci];
+        if (!summary.write_buffers.empty() ||
+            ContainsNonSharedTileOpCopy(consumer_compute_stmts[ci])) {
+          all_movable = false;
+          break;
+        }
         if (consumer_compute_stmts[ci].as<BindNode>()) {
           if (!movable_probe_live.NeedsAnyDef(summary)) {
             all_movable = false;
@@ -2726,7 +2749,7 @@ private:
 // Pass registration
 // ---------------------------------------------------------------------------
 
-tvm::transform::Pass ProducerConsumerWarpSpecialized() {
+tvm::transform::Pass ProducerConsumerWarpSpecializedCudaBackend() {
   using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     // Skip if disabled.
@@ -2793,7 +2816,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def("tl.cuda.transform.ProducerConsumerWarpSpecialized",
-                        ProducerConsumerWarpSpecialized);
+                        ProducerConsumerWarpSpecializedCudaBackend);
 }
 
 } // namespace tl

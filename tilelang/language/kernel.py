@@ -370,13 +370,6 @@ def ClusterKernel(
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
 
-    if producer_threads is not None:
-        if is_cpu:
-            raise ValueError("producer_threads is only valid for GPU kernels")
-        if not isinstance(producer_threads, int):
-            raise TypeError("producer_threads must be an int")
-        attrs["tl.warp_specialization_producer_threads"] = tirx.IntImm("int32", producer_threads)
-
     cluster_dims = _normalize_cluster_dims(cluster_dims)
     if cluster_dims is not None:
         attrs["cluster_dims"] = cluster_dims

@@ -16,10 +16,10 @@ In most cases, you only need to:
 
 | Component | Version | Purpose |
 | --- | --- | --- |
-| Public source baseline | [`v0.1.12+musa.1`](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.1) | Source code and API reference in this repository |
+| Public source | [`v0.1.12+musa.5`](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5) | Source code and API reference for PH1/MP31 and QY2/MP22 |
 | Recommended binary package | `tilelang_musa==0.1.12+musa.5` | See the [Installation Guide](./docs/musa_docs/02_installation.md) |
 
-The public source baseline is `v0.1.12+musa.1`; the recommended binary package is `v0.1.12+musa.5`.
+The public source and recommended binary package both use the `v0.1.12+musa.5` version. The MUSA source targets PH1/MP31 and QY2/MP22; available instructions depend on the device and its matching MUSA SDK.
 
 Prepare the MUSA SDK, driver, PyTorch and `torch_musa` environment as described in the [MUSA Installation Guide](./docs/musa_docs/02_installation.md), then install:
 
@@ -30,11 +30,21 @@ python -m pip install 'tilelang_musa==0.1.12+musa.5' 'apache-tvm-ffi==0.1.11.pos
 
 See the [MUSA documentation](./docs/musa_docs/index.md) for environment requirements, dependency configuration and getting started.
 
+To obtain the versioned source and its pinned dependencies:
+
+```bash
+git clone --branch 'v0.1.12+musa.5' --recursive https://github.com/tile-ai/tilelang-musa.git
+cd tilelang-musa
+git submodule status --recursive
+```
+
+See [building from source](./docs/musa_docs/02_installation.md#从源码构建) for the MUSA build configuration. GitHub's automatic source archives do not include submodule contents.
+
 ## Latest News
 
-### v0.1.12+musa.5 Binary Package
+### v0.1.12+musa.5 Source and Binary Package
 
-The recommended binary package is `v0.1.12+musa.5`. Follow the [Installation Guide](./docs/musa_docs/02_installation.md) to prepare the required environment and dependencies. The public source baseline remains `v0.1.12+musa.1`.
+The public source now includes the `v0.1.12+musa.5` updates for PH1/MP31 and QY2/MP22, including copy and alias handling, GEMM lowering, synchronization, and runtime integration. Follow the [Installation Guide](./docs/musa_docs/02_installation.md) to use the matching package or build the versioned source.
 
 See [TileOPs v1.0.0](https://github.com/MooreThreads/TileOPs/releases/tag/v1.0.0) for MUSA operator implementations and development examples.
 
@@ -58,7 +68,7 @@ Add support for DeepSeek [TileKernels](./tilekernels/) on the MUSA platform. The
 
 🚀 tilelang_musa0.1.8+musa.1 has been released. This version is based on tilelang 0.1.8 and is deeply adapted for the musa platform. You can use the latest tilelang syntax to write kernels that can run on the musa platform. Our developers have already written some high-performance operators, including [GEMM](./testing/musa/mp31/basic/test_gemm.py), [FA](./testing/musa/mp31/flash_attention/), [DSA](./testing/musa/mp31/dsa/), etc.
 
-## Tested Devices
+## Supported Devices
 
 Tilelang MUSA already supports S5000, S4000, and M1000.
 
@@ -188,7 +198,7 @@ TileOPs v1.0.0 documents `v0.1.12+musa.4` as its compiler runtime. For the recom
 
 Start with a small input and compare against a PyTorch reference. Check shapes, dtypes, layouts, boundary conditions and synchronization before tuning tile sizes, pipelines or memory layouts. Measure performance after correctness passes, and record the hardware and software versions with the results.
 
-The source code is based on `v0.1.12+musa.1`. Documentation may describe other package revisions; check its version notes when using the `v0.1.12+musa.5` binary or upstream examples.
+The source and MUSA documentation are pinned to `v0.1.12+musa.5`. Upstream examples may use newer APIs; check the version notes and the tests included with this tag.
 
 ## More Docs
 

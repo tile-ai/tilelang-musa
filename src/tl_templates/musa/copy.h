@@ -14,18 +14,90 @@
 
 namespace tl {
 
+// __has_builtin is evaluated by the MUSA compiler while it parses this
+// header.  Keep the probe here (rather than in Python/TIR) so the same
+// generated kernel works with both MTCC revisions that know the PH1 tagged
+// LDLMS builtins and older revisions that only have PTX async groups.
+#if defined(__has_builtin)
+#define TL_HAS_MUSA_BUILTIN(x) __has_builtin(x)
+#else
+#define TL_HAS_MUSA_BUILTIN(x) 0
+#endif
+
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ >= 310)
+#define TL_MUSA_ARCH_GE_310 1
+#elif defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 310)
+#define TL_MUSA_ARCH_GE_310 1
+#else
+#define TL_MUSA_ARCH_GE_310 0
+#endif
+
+#if (defined(__MUSA_ARCH__) && (__MUSA_ARCH__ == 220)) || \
+    (defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ == 220))
+#define TL_MUSA_ARCH_IS_QY2 1
+#else
+#define TL_MUSA_ARCH_IS_QY2 0
+#endif
+
+#if TL_MUSA_ARCH_GE_310 &&                                                     \
+    TL_HAS_MUSA_BUILTIN(__musa_memcpy_g2s_crossbb_commit_group) &&             \
+    TL_HAS_MUSA_BUILTIN(__musa_memcpy_g2s_crossbb_wait_group)
+#define TL_HAS_MUSA_LDLMS_CROSSBB 1
+#else
+#define TL_HAS_MUSA_LDLMS_CROSSBB 0
+#endif
+
 TL_DEVICE void cp_async_commit() {
-  // #if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
-  //   __musa_memcpy_g2s_commit_group();
-  // #endif
+#if !TL_MUSA_ARCH_IS_QY2 && defined(__MUSACC_VER_MAJOR__) && \
+    (__MUSACC_VER_MAJOR__ > 4)
+  __musa_memcpy_g2s_commit_group();
+#endif
 }
 
 template <int N> TL_DEVICE void cp_async_wait() {
-  // #if defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
-  //   __musa_memcpy_g2s_wait_group(N);
-  // #else
+#if TL_MUSA_ARCH_IS_QY2
+  // QY2/MP22 retains the legacy non-group wait path.
   __musa_memcpy_g2s_wait();
-  // #endif
+#elif defined(__MUSACC_VER_MAJOR__) && (__MUSACC_VER_MAJOR__ > 4)
+  __musa_memcpy_g2s_wait_group(N);
+#else
+  __musa_memcpy_g2s_wait();
+#endif
+}
+
+template <int LogicalID> TL_DEVICE void async_copy_commit_group() {
+  static_assert(LogicalID >= 0,
+                "cross-BB group logical id must be non-negative");
+#if TL_HAS_MUSA_LDLMS_CROSSBB
+  __memcpy_g2s_crossbb_commit_group<LogicalID>();
+#endif
+}
+
+template <int LogicalID> TL_DEVICE void async_copy_wait_group() {
+  static_assert(LogicalID >= 0,
+                "cross-BB group logical id must be non-negative");
+#if TL_HAS_MUSA_LDLMS_CROSSBB
+  __memcpy_g2s_crossbb_wait_group<LogicalID>();
+#else
+  __musa_memcpy_g2s_wait();
+#endif
+}
+
+TL_DEVICE void ldlms_crossbb_commit_0() { async_copy_commit_group<0>(); }
+
+TL_DEVICE void ldlms_crossbb_wait_0() { async_copy_wait_group<0>(); }
+
+TL_DEVICE void ldlms_crossbb_commit_1() { async_copy_commit_group<1>(); }
+
+TL_DEVICE void ldlms_crossbb_wait_1() { async_copy_wait_group<1>(); }
+
+TL_DEVICE void sched_boundary() {
+#if !defined(__MUSACC_VER_MAJOR__) || (__MUSACC_VER_MAJOR__ < 5) ||            \
+    ((__MUSACC_VER_MAJOR__ == 5) && (__MUSACC_VER_MINOR__ < 3))
+  // Empty on legacy MTCC; its fence pass cannot safely handle this marker.
+#else
+  asm volatile("" ::: "memory");
+#endif
 }
 
 template <int N>
@@ -54,16 +126,14 @@ TL_DEVICE void cp_async_gs_conditional(void const *const smem_addr,
 // MP22 uses the legacy 3-word robust address, while MP31+ switches to the
 // v4 robust descriptor form with prefetch-capable load intrinsics.
 #if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
-using robust_desc_t = __musa::robust_v4_addr_t;
-#define TL_GET_ROBUST_DESC(ROBUST_PTR) ((ROBUST_PTR).get_v4_robust_addr())
+using robust_hw_desc_t = __musa::robust_v4_addr_t;
 #define TL_ROBUST_LOAD_CALL(LENGTH_TYPE, ADDR, DESC)                           \
   __musa_ld_v4_robust_##LENGTH_TYPE((ADDR), (DESC), 0)
 #define TL_ROBUST_MEMCPY_G2S(DST, SRC, BYTES, DESC)                            \
   __musa_memcpy_g2s_robust_v4((DST), (SRC), (BYTES), (DESC),                   \
                               0 /* prefetch_size */)
 #else
-using robust_desc_t = __musa::robust_addr_t;
-#define TL_GET_ROBUST_DESC(ROBUST_PTR) ((ROBUST_PTR).get_robust_addr())
+using robust_hw_desc_t = __musa::robust_addr_t;
 #define TL_ROBUST_LOAD_CALL(LENGTH_TYPE, ADDR, DESC)                           \
   __musa_ld_robust_##LENGTH_TYPE((ADDR), (DESC))
 #define TL_ROBUST_MEMCPY_G2S(DST, SRC, BYTES, DESC)                            \
@@ -81,18 +151,26 @@ TL_DEVICE To robust_bit_cast(const From &from) {
   return storage.to;
 }
 
-TL_DEVICE robust_desc_t make_robust_desc(void const *robust_base_ptr,
-                                         uint64_t robust_size) {
-  auto *typed_base =
-      reinterpret_cast<int8_t *>(const_cast<void *>(robust_base_ptr));
+using robust_param_desc_t = __musa::robust_data_t;
+
+TL_HOST_DEVICE robust_param_desc_t make_robust_desc(void const *robust_base_ptr,
+                                                    uint64_t robust_size) {
+  auto *typed_base = reinterpret_cast<int8_t *>(const_cast<void *>(robust_base_ptr));
   __musa::robust_ptr<int8_t> robust_ptr(typed_base, robust_size);
-  return TL_GET_ROBUST_DESC(robust_ptr);
+  return robust_ptr.get_robust_ptr();
+}
+
+TL_DEVICE robust_hw_desc_t get_robust_hw_desc(robust_param_desc_t robust_desc) {
+#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__) >= 310
+  return robust_desc;
+#else
+  __musa::robust_ptr<int8_t> robust_ptr(robust_desc);
+  return robust_ptr.get_robust_addr();
+#endif
 }
 
 template <typename T>
-TL_DEVICE T robust_load(void const *global_ptr, void const *robust_base_ptr,
-                        uint64_t robust_size) {
-  auto robust_desc = make_robust_desc(robust_base_ptr, robust_size);
+TL_DEVICE T robust_load_hw(void const *global_ptr, robust_hw_desc_t robust_desc) {
   void const *addr = global_ptr;
   if constexpr (sizeof(T) == 1) {
     auto raw = TL_ROBUST_LOAD_CALL(i8, addr, robust_desc);
@@ -127,13 +205,51 @@ TL_DEVICE T robust_load(void const *global_ptr, void const *robust_base_ptr,
   }
 }
 
+template <typename T>
+TL_DEVICE T robust_load(void const *global_ptr, robust_param_desc_t robust_desc) {
+  return robust_load_hw<T>(global_ptr, get_robust_hw_desc(robust_desc));
+}
+
+template <typename T>
+TL_DEVICE T robust_load(void const *global_ptr, void const *robust_base_ptr,
+                       uint64_t robust_size) {
+  return robust_load<T>(global_ptr, make_robust_desc(robust_base_ptr, robust_size));
+}
+
 template <int N>
 TL_DEVICE void
-cp_async_gs_robust(void const *const smem_addr, void const *global_ptr,
-                   void const *robust_base_ptr, uint64_t robust_size) {
-  auto robust_desc = make_robust_desc(robust_base_ptr, robust_size);
+cp_async_gs_robust_hw(void const *const smem_addr, void const *global_ptr,
+                      robust_hw_desc_t robust_desc) {
   TL_ROBUST_MEMCPY_G2S((void _AS3 *)smem_addr, (void _AS1 *)global_ptr,
                        N /* total_bytes */, robust_desc);
+}
+
+template <int N>
+TL_DEVICE void cp_async_gs_robust(void const *const smem_addr,
+                                void const *global_ptr,
+                                robust_param_desc_t robust_desc) {
+  cp_async_gs_robust_hw<N>(smem_addr, global_ptr, get_robust_hw_desc(robust_desc));
+}
+
+template <int N>
+TL_DEVICE void cp_async_gs_robust(void const *const smem_addr,
+                                void const *global_ptr,
+                                void const *robust_base_ptr, uint64_t robust_size) {
+  cp_async_gs_robust<N>(smem_addr, global_ptr,
+                      make_robust_desc(robust_base_ptr, robust_size));
+}
+
+template <int N>
+TL_DEVICE void cp_async_gs_robust_conditional(void const *const smem_addr,
+                                           void const *global_ptr,
+                                           robust_param_desc_t robust_desc,
+                                           bool cond) {
+  robust_param_desc_t selected_desc = robust_desc;
+  if (!cond) {
+    selected_desc[2] = 0;
+    selected_desc[3] = 0;
+  }
+  cp_async_gs_robust<N>(smem_addr, global_ptr, selected_desc);
 }
 
 template <int N>
@@ -147,7 +263,6 @@ TL_DEVICE void cp_async_gs_robust_conditional(void const *const smem_addr,
 
 #undef TL_ROBUST_MEMCPY_G2S
 #undef TL_ROBUST_LOAD_CALL
-#undef TL_GET_ROBUST_DESC
 
 #endif
 
@@ -278,3 +393,8 @@ TL_DEVICE void store_global_256_conditional(void *ptr, const T &value,
 }
 
 } // namespace tl
+
+#undef TL_HAS_MUSA_LDLMS_CROSSBB
+#undef TL_MUSA_ARCH_GE_310
+#undef TL_MUSA_ARCH_IS_QY2
+#undef TL_HAS_MUSA_BUILTIN

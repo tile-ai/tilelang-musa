@@ -62,6 +62,12 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
                          const PrimExpr &iter_var_size,
                          int target_vectorized_size, arith::Analyzer *analyzer);
 
+// Canonicalize a scalar physical index into Ramp(base, 1, lanes) only when the
+// same address-contiguity proof used by vectorization planning succeeds.
+Optional<PrimExpr> CanonicalizeContiguousIndexToRamp(const PrimExpr &index,
+                                                     Var lane_var, int lanes,
+                                                     arith::Analyzer *analyzer);
+
 } // namespace tl
 } // namespace tvm
 

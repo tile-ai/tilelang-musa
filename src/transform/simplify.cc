@@ -234,8 +234,41 @@ public:
     analyzer->rewrite_simplify.SetEnabledExtensions(
         config->GetEnabledExtensions());
 
+    // Mutable scalar assumptions need flow-sensitive values: a BufferLoad
+    // itself is not a pure expression that the arithmetic analyzer can bind.
+    bool has_local_var_assume = false;
+    bool has_handle_access = false;
+    PostOrderVisit(func->body, [&](const ObjectRef &obj) {
+      if (const auto *call = obj.as<CallNode>()) {
+        has_handle_access |= call->op.same_as(builtin::address_of());
+        for (const PrimExpr &arg : call->args) {
+          has_handle_access |= arg.dtype().is_handle();
+        }
+      }
+      Optional<PrimExpr> condition;
+      if (const auto *attr = obj.as<AttrStmtNode>();
+          attr && attr->attr_key == "tl.assume") {
+        condition = Downcast<PrimExpr>(attr->node);
+      } else if (const auto *call = obj.as<CallNode>();
+                 call && call->op.same_as(builtin::assume())) {
+        condition = call->args[0];
+      }
+      if (condition.defined()) {
+        PostOrderVisit(condition.value(),
+                       [&](const ObjectRef &value) {
+                         const auto *load = value.as<BufferLoadNode>();
+                         if (load && load->buffer.scope() == "local.var") {
+                           has_local_var_assume = true;
+                         }
+                       });
+      }
+    });
+    // Keep the existing conservative behavior when a pointer can escape. In
+    // particular, the BufferLoad operand of address_of must remain an lvalue.
+    has_local_var_assume &= !has_handle_access;
     std::optional<ControlFlowGraph> touch_pattern = std::nullopt;
-    if (config->propagate_knowns_to_prove_conditional ||
+    if (has_local_var_assume ||
+        config->propagate_knowns_to_prove_conditional ||
         config->propagate_knowns_to_simplify_expressions) {
       touch_pattern = ControlFlowGraph(func->body);
     }
@@ -244,6 +277,7 @@ public:
         CollectVarsUsedInBufferDefinition(func->body);
     StmtSimplifier simplifier(analyzer, config, std::move(touch_pattern),
                               std::move(used_in_buffer_def));
+    simplifier.propagate_assume_loads_ = has_local_var_assume;
     simplifier.MarkBufferMapShapes(func);
     func.CopyOnWrite()->body = simplifier(func->body);
 
@@ -332,12 +366,16 @@ private:
   using Parent::VisitStmt_;
 
   PrimExpr VisitExpr(const PrimExpr &expr) final {
+    // Rewrite scalar loads nested in indices before simplifying the enclosing
+    // load. Otherwise the assumption is rewritten but its uses stay unchanged.
+    PrimExpr input = propagate_assume_loads_ ? Parent::VisitExpr(expr) : expr;
     PrimExpr simplified;
-    if (config_->propagate_knowns_to_simplify_expressions) {
+    if (propagate_assume_loads_ ||
+        config_->propagate_knowns_to_simplify_expressions) {
       simplified = touch_pattern_->SimplifyInContext(
-          expr, current_stmt_.value(), analyzer_);
+          input, current_stmt_.value(), analyzer_);
     } else {
-      simplified = analyzer_->Simplify(expr);
+      simplified = analyzer_->Simplify(input);
     }
 
     ContextSingletonFloorDivFolder folder(analyzer_);
@@ -562,6 +600,7 @@ private:
   }
 
   SimplifyConfig config_;
+  bool propagate_assume_loads_{false};
   std::optional<ControlFlowGraph> touch_pattern_;
 
   Map<Var, PrimExpr> non_inlined_bindings_;

@@ -18,6 +18,9 @@ TL_DEVICE void tma_load(void *smem_ptr, void const *gmem_ptr,
   constexpr SmemSwizzleStride ss = SmemSwizzleStride::B256;
   constexpr SmemSwizzleLine sl = SmemSwizzleLine::B256;
   constexpr PrefetchSize prefetch = PrefetchSize::B128;
+#if TL_MUSA_HAS_TME_BLOCK_IMM_OFFSET
+  constexpr int32_t imm_offset = 0;
+#endif
   uint64_t gmem_int_ptr = reinterpret_cast<uint64_t>(gmem_ptr);
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
   __musa_tme_ld_blk(
@@ -25,6 +28,9 @@ TL_DEVICE void tma_load(void *smem_ptr, void const *gmem_ptr,
       make_ptr_with_address_space<AddressSpace::Global>(gmem_int_ptr), size,
       bar_id, static_cast<int32_t>(sg), static_cast<int32_t>(ss),
       static_cast<int32_t>(sl), static_cast<int32_t>(prefetch),
+#if TL_MUSA_HAS_TME_BLOCK_IMM_OFFSET
+      imm_offset,
+#endif
       static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint),
       l2_cache_policy);
 }
@@ -36,14 +42,21 @@ TL_DEVICE void tma_store(void *gmem_ptr, void const *smem_ptr, uint32_t size) {
   constexpr SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE;
   constexpr SmemSwizzleStride ss = SmemSwizzleStride::B256;
   constexpr SmemSwizzleLine sl = SmemSwizzleLine::B256;
+#if TL_MUSA_HAS_TME_BLOCK_IMM_OFFSET
+  constexpr int32_t imm_offset = 0;
+#endif
   uint64_t gmem_int_ptr = reinterpret_cast<uint64_t>(gmem_ptr);
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
   __musa_tme_st_blk(
       make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
       make_ptr_with_address_space<AddressSpace::Global>(gmem_int_ptr), size,
       static_cast<int32_t>(sg), static_cast<int32_t>(ss),
-      static_cast<int32_t>(sl), static_cast<int32_t>(inner_hint),
-      static_cast<int32_t>(outer_hint), l2_cache_policy);
+      static_cast<int32_t>(sl),
+#if TL_MUSA_HAS_TME_BLOCK_IMM_OFFSET
+      imm_offset,
+#endif
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint),
+      l2_cache_policy);
 }
 
 TL_DEVICE void prefetch_tma_descriptor(const MUtensorDescriptor &descriptor) {
@@ -163,6 +176,90 @@ tma_load(const MUtensorDescriptor &descriptor, uint32_t const &bar_id,
       static_cast<int32_t>(ss), static_cast<int32_t>(sl),
       static_cast<int32_t>(prefetch), static_cast<int32_t>(inner_hint),
       static_cast<int32_t>(outer_hint), 0);
+}
+
+template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
+          SmemSwizzleStride ss = SmemSwizzleStride::B256,
+          SmemSwizzleLine sl = SmemSwizzleLine::B256,
+          PrefetchSize prefetch = PrefetchSize::NONE,
+          CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL>
+TL_DEVICE void
+tma_load_im2col(const MUtensorDescriptor &descriptor, uint32_t const &bar_id,
+                void *smem_ptr, int32_t const &coord_c, int32_t const &coord_w,
+                int32_t const &coord_n, int32_t const &offset_w,
+                int32_t const &block_dim_c, int32_t const &block_dim_nw,
+                int32_t const &output_dim_w,
+                __musa::tme_conv_param_t const &conv_param) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
+  v3i32_t crd{coord_c, coord_w, coord_n};
+  v2i32_t blk_dim{block_dim_c, block_dim_nw};
+  int32_t weight_pos = static_cast<int32_t>(static_cast<int8_t>(offset_w));
+  __musa_tme_ld_im2col_3d(
+      bar_id, make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
+      gmem_int_desc, blk_dim, crd, weight_pos, output_dim_w, conv_param,
+      static_cast<int32_t>(sg), static_cast<int32_t>(ss),
+      static_cast<int32_t>(sl), static_cast<int32_t>(prefetch),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint), 0);
+}
+
+template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
+          SmemSwizzleStride ss = SmemSwizzleStride::B256,
+          SmemSwizzleLine sl = SmemSwizzleLine::B256,
+          PrefetchSize prefetch = PrefetchSize::NONE,
+          CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL>
+TL_DEVICE void
+tma_load_im2col(const MUtensorDescriptor &descriptor, uint32_t const &bar_id,
+                void *smem_ptr, int32_t const &coord_c, int32_t const &coord_w,
+                int32_t const &coord_h, int32_t const &coord_n,
+                int32_t const &offset_w, int32_t const &offset_h,
+                int32_t const &block_dim_c, int32_t const &block_dim_nhw,
+                v2i32_t const &output_dim_wh,
+                __musa::tme_conv_param_t const &conv_param) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
+  v4i32_t crd{coord_c, coord_w, coord_h, coord_n};
+  v2i32_t blk_dim{block_dim_c, block_dim_nhw};
+  int32_t weight_pos =
+      static_cast<int32_t>(static_cast<int8_t>(offset_w)) |
+      (static_cast<int32_t>(static_cast<int8_t>(offset_h)) << 8);
+  __musa_tme_ld_im2col_4d(
+      bar_id, make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
+      gmem_int_desc, blk_dim, crd, weight_pos, output_dim_wh, conv_param,
+      static_cast<int32_t>(sg), static_cast<int32_t>(ss),
+      static_cast<int32_t>(sl), static_cast<int32_t>(prefetch),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint), 0);
+}
+
+template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,
+          SmemSwizzleStride ss = SmemSwizzleStride::B256,
+          SmemSwizzleLine sl = SmemSwizzleLine::B256,
+          PrefetchSize prefetch = PrefetchSize::NONE,
+          CacheHint inner_hint = CacheHint::CACHE_NORMAL,
+          CacheHint outer_hint = CacheHint::CACHE_NORMAL>
+TL_DEVICE void tma_load_im2col(
+    const MUtensorDescriptor &descriptor, uint32_t const &bar_id,
+    void *smem_ptr, int32_t const &coord_c, int32_t const &coord_w,
+    int32_t const &coord_h, int32_t const &coord_d, int32_t const &coord_n,
+    int32_t const &offset_w, int32_t const &offset_h, int32_t const &offset_d,
+    int32_t const &block_dim_c, int32_t const &block_dim_nhwd,
+    v3i32_t const &output_dim_whd, __musa::tme_conv_param_t const &conv_param) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
+  v5i32_t crd{coord_c, coord_w, coord_h, coord_d, coord_n};
+  v2i32_t blk_dim{block_dim_c, block_dim_nhwd};
+  int32_t weight_pos =
+      static_cast<int32_t>(static_cast<int8_t>(offset_w)) |
+      (static_cast<int32_t>(static_cast<int8_t>(offset_h)) << 8) |
+      (static_cast<int32_t>(static_cast<int8_t>(offset_d)) << 16);
+  __musa_tme_ld_im2col_5d(
+      bar_id, make_ptr_with_address_space<AddressSpace::Shared>(smem_int_ptr),
+      gmem_int_desc, blk_dim, crd, weight_pos, output_dim_whd, conv_param,
+      static_cast<int32_t>(sg), static_cast<int32_t>(ss),
+      static_cast<int32_t>(sl), static_cast<int32_t>(prefetch),
+      static_cast<int32_t>(inner_hint), static_cast<int32_t>(outer_hint), 0);
 }
 
 template <SmemSwizzleGranularity sg = SmemSwizzleGranularity::NONE,

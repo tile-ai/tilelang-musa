@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
-from tilelang.layout import Layout, make_sqmma_swizzled_layout, make_ph_sqmma_fragment_c
+from tilelang.layout import Layout, make_sqmma_fragment_c, make_sqmma_swizzled_layout
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import _ffi_api
 from tilelang import tvm as tvm
@@ -41,6 +41,17 @@ class GemmSQMMA(GemmBase):
         return str(dtype).startswith("float8")
 
     @staticmethod
+    def _get_buffer_leading_dim(buffer, fallback: int, name: str) -> int:
+        """Return the leading dimension carried by explicit buffer strides."""
+        strides = getattr(buffer, "strides", None)
+        if strides is None or len(strides) < 2:
+            return fallback
+        inner_stride = GemmSQMMA._as_const_int(strides[-1], f"{name}_inner")
+        if inner_stride != 1:
+            raise ValueError(f"SQMMA requires a unit inner stride, got {inner_stride} for {name}")
+        return GemmSQMMA._as_const_int(strides[-2], name)
+
+    @staticmethod
     def _make_transposed_shared_operand_layout(
         input_shape,
         logical_rows: int,
@@ -64,6 +75,45 @@ class GemmSQMMA(GemmBase):
 
         return Layout(list(input_shape), forward_fn)
 
+    @staticmethod
+    def _make_ph1_tiled_transposed_a_layout(
+        input_shape,
+        instruction_m: int,
+        dtype: str,
+    ) -> Layout:
+        leading_shape = list(input_shape[:-2])
+        k_extent = int(input_shape[-2])
+        m_extent = int(input_shape[-1])
+        element_bits = int(tvm.DataType(dtype).bits)
+        if instruction_m <= 0 or m_extent % instruction_m != 0:
+            raise ValueError(f"PH1 transposed-A SQMMA layout requires M={m_extent} to be divisible by instruction_m={instruction_m}")
+
+        # gemm_mp31.h tiles SmemLayoutA by the SQMMA instruction M extent.
+        # Build the same independent atoms instead of swizzling the full M tile.
+        atom_layout = _ffi_api.make_sqmma_swizzled_layout(
+            k_extent,
+            instruction_m,
+            instruction_m,
+            element_bits,
+            False,
+        )
+        atom_elements = k_extent * instruction_m
+
+        def forward_fn(*indices):
+            k_index = indices[-2]
+            m_index = indices[-1]
+            atom_id = m_index // instruction_m
+            m_in_atom = m_index % instruction_m
+            mapped = list(atom_layout.map_forward_index([k_index, m_in_atom]))
+            atom_linear = mapped[0] * instruction_m + mapped[1]
+            physical_linear = atom_id * atom_elements + atom_linear
+            return list(indices[: len(leading_shape)]) + [
+                physical_linear // m_extent,
+                physical_linear % m_extent,
+            ]
+
+        return Layout(list(input_shape), forward_fn)
+
     def _select_sqmma_inst_shape(self, block_size: int, target: Target) -> tuple[int, int, int]:
         inst_shape = _ffi_api.GemmSelectSQMMAInstShape(self.gemm_node, int(block_size), target)
         if len(inst_shape) != 3:
@@ -78,7 +128,7 @@ class GemmSQMMA(GemmBase):
         sqmma_inst = self._select_sqmma_inst_shape(int(thread_nums), target)
 
         c_bits = int(tvm.DataType(self.C.dtype).bits)
-        c_layout = make_ph_sqmma_fragment_c(self.M, self.N, warp_m, warp_n, c_bits, sqmma_inst)
+        c_layout = make_sqmma_fragment_c(self.M, self.N, warp_m, warp_n, c_bits, sqmma_inst)
 
         a_shape = self.A.shape
         b_shape = self.B.shape
@@ -94,6 +144,10 @@ class GemmSQMMA(GemmBase):
                 self.K,
                 self.A.dtype,
                 k_major=True,
+            )
+        elif self.trans_A and int(tvm.DataType(self.A.dtype).bits) == 16:
+            a_layout = self._make_ph1_tiled_transposed_a_layout(
+                a_shape, sqmma_inst[0], self.A.dtype,
             )
         else:
             a_layout = make_sqmma_swizzled_layout(
@@ -154,6 +208,11 @@ class GemmSQMMA(GemmBase):
         clear_accum_bool = self._as_const_bool(self.clear_accum, "clear_accum")
         stride_a = self._as_const_int(self.stride_A, "stride_A")
         stride_b = self._as_const_int(self.stride_B, "stride_B")
+        # Region normalization may derive compact strides from the region
+        # shape. Recover physical row strides from explicit buffer metadata so
+        # SQMMA can encode them in its descriptors.
+        stride_a = self._get_buffer_leading_dim(self.A, stride_a, "stride_A")
+        stride_b = self._get_buffer_leading_dim(self.B, stride_b, "stride_B")
         offset_a = self._as_const_int(self.offset_A, "offset_A")
         offset_b = self._as_const_int(self.offset_B, "offset_B")
         wg_wait = self._as_const_int(self.wg_wait, "wg_wait")

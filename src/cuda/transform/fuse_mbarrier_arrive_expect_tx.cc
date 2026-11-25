@@ -174,7 +174,7 @@ private:
 
 } // namespace
 
-tvm::transform::Pass FuseMBarrierArriveExpectTx() {
+tvm::transform::Pass FuseMBarrierArriveExpectTxCudaBackend() {
   auto pass_func = [](PrimFunc f, const IRModule &,
                       const tvm::transform::PassContext &) {
     return MBarrierArriveExpectTxFuser::Rewrite(std::move(f));
@@ -186,7 +186,7 @@ tvm::transform::Pass FuseMBarrierArriveExpectTx() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def("tl.cuda.transform.FuseMBarrierArriveExpectTx",
-                        FuseMBarrierArriveExpectTx);
+                        FuseMBarrierArriveExpectTxCudaBackend);
 }
 
 } // namespace tl

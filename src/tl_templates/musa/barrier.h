@@ -37,24 +37,32 @@ TL_DEVICE uint32_t mbarrier_arrive(uint32_t barrier_id) {
 
 TL_DEVICE void mbarrier_arrive_expect_tx(uint32_t barrier_id,
                                          uint32_t transaction_bytes) {
-#if defined(__MUSA_ARCH_LIST__) && (__MUSA_ARCH_LIST__ >= 420)
-  __musa_async_arrive_add_trans(barrier_id, transaction_bytes);
-#else
   __musa_async_add_trans(barrier_id, transaction_bytes);
   __musa_async_arrive(barrier_id);
-#endif
 }
 
 TL_DEVICE void fence_proxy_async() { asm volatile("" : : : "memory"); }
 
 TL_DEVICE void fence_barrier_init() { asm volatile("" : : : "memory"); }
 
-TL_DEVICE void tma_store_arrive() { __musa_tme_store_commit(); }
+template <int UnsupportedArch = 0> TL_DEVICE void tma_store_arrive() {
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ == 310)
+  __musa_tme_store_commit();
+#elif defined(__MUSA_ARCH__)
+  static_assert(UnsupportedArch != UnsupportedArch,
+                "TME store synchronization requires MP31");
+#endif
+}
 
 template <int Count> TL_DEVICE void tma_store_wait() {
   static_assert(Count == 0,
                 "MUSA tma_store_wait currently supports Count == 0");
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ == 310)
   __musa_tme_store_read_wait();
+#elif defined(__MUSA_ARCH__)
+  static_assert(Count != Count,
+                "TME store synchronization requires MP31");
+#endif
 }
 
 } // namespace tl

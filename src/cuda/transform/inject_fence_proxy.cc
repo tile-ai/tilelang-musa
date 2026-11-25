@@ -538,7 +538,7 @@ private:
 
 } // namespace
 
-tvm::transform::Pass InjectFenceProxy() {
+tvm::transform::Pass InjectFenceProxyCudaBackend() {
   auto pass_func = [](PrimFunc f, const IRModule &, const PassContext &) {
     // fence.proxy.async is only meaningful on CUDA targets that expose the
     // TMA / async-proxy programming model (sm_90+). On anything else the
@@ -556,7 +556,7 @@ tvm::transform::Pass InjectFenceProxy() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.InjectFenceProxy", InjectFenceProxy);
+  refl::GlobalDef().def("tl.cuda.transform.InjectFenceProxy", InjectFenceProxyCudaBackend);
 }
 
 } // namespace tl

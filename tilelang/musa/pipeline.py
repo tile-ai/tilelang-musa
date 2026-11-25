@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
@@ -25,7 +27,9 @@ def module_has_tma(mod: IRModule) -> bool:
 def allow_lower_musa_burst(target: Target, pass_ctx=None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    return mcc.is_ph1(target) and pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_MUSA_BURST, False)
+    return (mcc.is_qy2(target) or mcc.is_ph1(target)) and pass_ctx.config.get(
+        tilelang.PassConfigKey.TL_ENABLE_MUSA_BURST, False
+    )
 
 
 def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
@@ -33,6 +37,9 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     from tilelang.musa import transform as musa_transform
 
     mod = tirx.transform.BindTarget(target)(mod)
+    # Keep explicit fast-divmod markers intact until this target-specific
+    # lowering can attach launch-invariant magic parameters or device setup.
+    mod = tilelang.transform.LowerMUSAFastDivmod()(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     if should_force_let_inline():
         mod = tilelang.transform.LetInline()(mod)
@@ -51,7 +58,29 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LayoutInference()(mod)
     LayoutVisual(mod)
-    mod = tilelang.transform.LowerTileOp()(mod)
+    # Set the fragment-vectorization default only when the user omitted it.
+    config = dict(pass_ctx.config)
+    fragment_vectorize_key = tilelang.PassConfigKey.TL_DISABLE_FRAGMENT_VECTORIZE
+    if fragment_vectorize_key not in config:
+        try:
+            config[fragment_vectorize_key] = mcc.get_musa_version()[:2] < (5, 3)
+        except (IndexError, OSError, RuntimeError, ValueError) as err:
+            warnings.warn(
+                f"Cannot determine MTCC version ({err}); disabling fragment-only vectorization. "
+                "Set tl.disable_fragment_vectorize explicitly to override this default.",
+                UserWarning,
+                stacklevel=2,
+            )
+            config[fragment_vectorize_key] = True
+    # Preserve the caller's pass controls and instruments in the nested context.
+    with tilelang.tvm.transform.PassContext(
+        opt_level=pass_ctx.opt_level,
+        required_pass=pass_ctx.required_pass,
+        disabled_pass=pass_ctx.disabled_pass,
+        instruments=pass_ctx.instruments,
+        config=config,
+    ):
+        mod = tilelang.transform.LowerTileOp()(mod)
 
     mod = musa_transform.LowerL2Persistent()(mod)
     mod = tilelang.transform.DecoupleTypeCast()(mod)
@@ -97,6 +126,7 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         mod = musa_transform.LowerPHIntrin()(mod)
     if allow_global_thread_synchronization():
         mod = tilelang.transform.ThreadSync("global")(mod)
+    mod = tilelang.transform.LowerMUSARobustDescriptor()(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)

@@ -27,6 +27,9 @@ bool CheckOutermostParenthesesMatch(const std::string &s);
  */
 std::string RemoveOutermostParentheses(const std::string &s);
 
+// Format a hexadecimal floating-point literal without redundant zeros.
+std::string FlexibleHexFormat(double value);
+
 } // namespace codegen
 } // namespace tvm
 

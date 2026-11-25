@@ -14,6 +14,11 @@ namespace tl {
 
 using runtime::DataType;
 
+// Public TVM registered SMEM storage tag: custom type 131, 8 bits.
+inline bool IsTCGEN5UnpackedFP4(DataType dtype) {
+  return dtype.code() == 131 && dtype.bits() == 8 && dtype.lanes() == 1;
+}
+
 struct TCGEN5MMAMeta {
   int atom_m, atom_n, atom_k;
   bool enable_ws, enable_2cta;
@@ -77,7 +82,7 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
       FAIL;
     }
   } else if ((ab_dtype.is_float8() || ab_dtype.is_float6_e2m3fn() ||
-              ab_dtype.is_float6_e3m2fn() || ab_dtype.is_float4()) &&
+              ab_dtype.is_float6_e3m2fn() || (ab_dtype.is_float4() || IsTCGEN5UnpackedFP4(ab_dtype))) &&
              ((c_dtype.is_float() && c_dtype.bits() == 32) ||
               (c_dtype.is_float16() && c_dtype.bits() == 16))) {
     if (K % 32 != 0)
@@ -204,7 +209,7 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
       return static_cast<uint32_t>(3);
     } else if (dtype.is_float6_e3m2fn()) {
       return static_cast<uint32_t>(4);
-    } else if (dtype.is_float4()) {
+    } else if (dtype.is_float4() || IsTCGEN5UnpackedFP4(dtype)) {
       return static_cast<uint32_t>(5);
     } else if (dtype.is_int() && dtype.bits() == 8) {
       return static_cast<uint32_t>(1);
@@ -291,7 +296,7 @@ GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n, DataType a_dtype,
       return 3u; // E2M3
     } else if (dtype.is_float6_e3m2fn()) {
       return 4u; // E3M2
-    } else if (dtype.is_float4()) {
+    } else if (dtype.is_float4() || IsTCGEN5UnpackedFP4(dtype)) {
       return 5u; // E2M1 (packed or f8f6f4/mxf8f6f4 unpacked storage)
     }
     LOG(FATAL) << "Unsupported dtype for block-scaled mxf8f6f4 descriptor: "

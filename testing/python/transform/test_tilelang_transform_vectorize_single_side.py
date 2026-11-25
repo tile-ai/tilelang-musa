@@ -9,6 +9,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.musa import transform as musa_transform
 from tilelang.transform import PassConfigKey
 from tvm import tirx as tir
 
@@ -43,7 +44,7 @@ def _apply_vectorize_single_side_and_ldgstg(mod, target="musa"):
     mod = tl.transform.VectorizeLoop()(mod)
     with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True}):
         mod = tl.transform.VectorizeSingleSide()(mod)
-        mod = tl.transform.LowerLDGSTG()(mod)
+        mod = musa_transform.LowerLDGSTG()(mod)
     return mod
 
 

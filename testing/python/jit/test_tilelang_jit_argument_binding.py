@@ -176,6 +176,146 @@ def test_eager_jit_phase1_key_excludes_tensor_args_and_applies_defaults():
     assert compile_kwargs == {"block": 64, "dtype": T.float32}
 
 
+def test_eager_jit_phase2_matchers_cache_buffer_and_packed_dtype_metadata():
+    a = torch.empty(8, 8)
+    b = torch.empty(8, 8)
+
+    old_mode = _copy_kernel.mode
+    old_func_mode = _copy_kernel.func.mode
+    _copy_kernel.mode = "eager"
+    _copy_kernel.func.set_mode("eager")
+    try:
+        _copy_kernel.func.parse_args(a, b)
+        template = next(iter(_copy_kernel.func.p1_cache.values()))
+
+        assert template.matcher
+        buffers = tuple(template.prim_func.buffer_map.values())
+        for _, _, _, _, buffer, is_packed in template.matcher.values():
+            assert any(buffer.same_as(candidate) for candidate in buffers)
+            assert is_packed is False
+
+        _, kernel_args = _copy_kernel.func.parse_args(a, b)
+        assert kernel_args == {"A": a, "B": b}
+    finally:
+        _copy_kernel.mode = old_mode
+        _copy_kernel.func.set_mode(old_func_mode)
+
+
+def test_eager_jit_hot_call_reuses_kernel_with_current_tensors(monkeypatch):
+    a = torch.empty(8, 8)
+    b = torch.empty(8, 8)
+    a_next = torch.empty_like(a)
+    b_next = torch.empty_like(b)
+    calls = []
+
+    def sentinel_kernel(*args):
+        calls.append(args)
+        return "sentinel"
+
+    old_mode = _copy_kernel.mode
+    old_func_mode = _copy_kernel.func.mode
+    old_kernel_cache = _copy_kernel._kernel_cache
+    old_eager_cache = _copy_kernel._eager_call_cache
+    _copy_kernel.mode = "eager"
+    _copy_kernel.func.set_mode("eager")
+    _copy_kernel._kernel_cache = {}
+    _copy_kernel._eager_call_cache = old_eager_cache.__class__()
+    try:
+        key, _ = _copy_kernel.func.parse_args(a, b, 64, T.float32)
+        _copy_kernel._kernel_cache[key] = sentinel_kernel
+        assert _copy_kernel(a, b, 64, T.float32) == "sentinel"
+
+        def fail_parse_args(*args, **kwargs):
+            raise AssertionError("eager hot-call cache hit should skip parse_args")
+
+        monkeypatch.setattr(_copy_kernel.func, "parse_args", fail_parse_args)
+        assert _copy_kernel(a_next, b_next, 64, T.float32) == "sentinel"
+        assert calls[-1] == (a_next, b_next)
+    finally:
+        _copy_kernel.mode = old_mode
+        _copy_kernel.func.set_mode(old_func_mode)
+        _copy_kernel._kernel_cache = old_kernel_cache
+        _copy_kernel._eager_call_cache = old_eager_cache
+
+
+def test_eager_jit_hot_call_rechecks_metadata_after_in_place_resize(monkeypatch):
+    a = torch.empty(8, 8)
+    b = torch.empty(8, 8)
+
+    def sentinel_kernel(*args):
+        return args
+
+    old_mode = _copy_kernel.mode
+    old_func_mode = _copy_kernel.func.mode
+    old_kernel_cache = _copy_kernel._kernel_cache
+    old_eager_cache = _copy_kernel._eager_call_cache
+    _copy_kernel.mode = "eager"
+    _copy_kernel.func.set_mode("eager")
+    _copy_kernel._kernel_cache = {}
+    _copy_kernel._eager_call_cache = old_eager_cache.__class__()
+    try:
+        key, _ = _copy_kernel.func.parse_args(a, b, 64, T.float32)
+        _copy_kernel._kernel_cache[key] = sentinel_kernel
+        _copy_kernel(a, b, 64, T.float32)
+        a.resize_(4, 16)
+        b.resize_(4, 16)
+
+        def mark_parse_args(*args, **kwargs):
+            raise RuntimeError("normal argument binding reached")
+
+        monkeypatch.setattr(_copy_kernel.func, "parse_args", mark_parse_args)
+        with pytest.raises(RuntimeError, match="normal argument binding reached"):
+            _copy_kernel(a, b, 64, T.float32)
+    finally:
+        _copy_kernel.mode = old_mode
+        _copy_kernel.func.set_mode(old_func_mode)
+        _copy_kernel._kernel_cache = old_kernel_cache
+        _copy_kernel._eager_call_cache = old_eager_cache
+
+
+@pytest.mark.parametrize(
+    "make_args",
+    [
+        lambda a, b: (torch.empty(4, 16), torch.empty(4, 16), 64, T.float32),
+        lambda a, b: (torch.empty(8, 16)[:, ::2], torch.empty(8, 16)[:, ::2], 64, T.float32),
+        lambda a, b: (torch.empty(8, 8, dtype=torch.float64), torch.empty(8, 8, dtype=torch.float64), 64, T.float32),
+        lambda a, b: (a, b, 32, T.float32),
+    ],
+    ids=["shape", "stride", "dtype", "compile-argument"],
+)
+def test_eager_jit_hot_call_rebinds_when_metadata_changes(monkeypatch, make_args):
+    a = torch.empty(8, 8)
+    b = torch.empty(8, 8)
+
+    def sentinel_kernel(*args):
+        return args
+
+    old_mode = _copy_kernel.mode
+    old_func_mode = _copy_kernel.func.mode
+    old_kernel_cache = _copy_kernel._kernel_cache
+    old_eager_cache = _copy_kernel._eager_call_cache
+    _copy_kernel.mode = "eager"
+    _copy_kernel.func.set_mode("eager")
+    _copy_kernel._kernel_cache = {}
+    _copy_kernel._eager_call_cache = old_eager_cache.__class__()
+    try:
+        key, _ = _copy_kernel.func.parse_args(a, b, 64, T.float32)
+        _copy_kernel._kernel_cache[key] = sentinel_kernel
+        _copy_kernel(a, b, 64, T.float32)
+
+        def mark_parse_args(*args, **kwargs):
+            raise RuntimeError("normal argument binding reached")
+
+        monkeypatch.setattr(_copy_kernel.func, "parse_args", mark_parse_args)
+        with pytest.raises(RuntimeError, match="normal argument binding reached"):
+            _copy_kernel(*make_args(a, b))
+    finally:
+        _copy_kernel.mode = old_mode
+        _copy_kernel.func.set_mode(old_func_mode)
+        _copy_kernel._kernel_cache = old_kernel_cache
+        _copy_kernel._eager_call_cache = old_eager_cache
+
+
 @tilelang.jit
 def _copy_kernel_with_var_keywords(A, B, block: int = 64, **metadata):
     M, N = T.const("M N")

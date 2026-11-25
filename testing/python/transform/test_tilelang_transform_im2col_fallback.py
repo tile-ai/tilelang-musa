@@ -1,7 +1,7 @@
 import pytest
-import tvm
 
 import tilelang
+from tilelang import tvm
 import tilelang.language as T
 import tilelang.testing
 

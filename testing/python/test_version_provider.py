@@ -1,15 +1,33 @@
 from __future__ import annotations
 
+import ast
+import importlib.metadata
 import importlib.util
 import shutil
 import subprocess
 import uuid
+import warnings
 from pathlib import Path
 
 import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_runtime_compute_version(module_file: Path):
+    source_path = REPO_ROOT / "tilelang" / "__init__.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function_node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_compute_version")
+    function_module = ast.Module(body=[function_node], type_ignores=[])
+    ast.fix_missing_locations(function_module)
+    namespace = {
+        "Path": Path,
+        "warnings": warnings,
+        "__file__": str(module_file),
+    }
+    exec(compile(function_module, str(source_path), "exec"), namespace)
+    return namespace["_compute_version"]
 
 
 def _clear_version_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,6 +41,20 @@ def _clear_version_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "USE_ROCM",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_installed_package_uses_tilelang_musa_distribution_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    requested_distributions = []
+
+    def fake_version(distribution_name: str) -> str:
+        requested_distributions.append(distribution_name)
+        return "1.2.3+musa"
+
+    monkeypatch.setattr(importlib.metadata, "version", fake_version)
+    compute_version = _load_runtime_compute_version(tmp_path / "site-packages" / "tilelang" / "__init__.py")
+
+    assert compute_version() == "1.2.3+musa"
+    assert requested_distributions == ["tilelang_musa"]
 
 
 def _load_provider(root: Path):

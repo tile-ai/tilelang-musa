@@ -333,6 +333,49 @@ def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_fdiv"), x, y, rounding_mode)
 
 
+def _fast_divmod_args(dividend: PrimExpr, divisor: PrimExpr) -> tuple[PrimExpr, PrimExpr]:
+    dividend = tirx.convert(dividend)
+    divisor = tirx.convert(divisor)
+    if dividend.dtype != divisor.dtype:
+        raise TypeError(
+            f"fast integer division requires dividend and divisor to have the same dtype, got {dividend.dtype} and {divisor.dtype}"
+        )
+    if dividend.dtype.type_code != 0 or dividend.dtype.bits != 32 or dividend.dtype.lanes != 1:
+        raise TypeError(f"fast integer division currently supports scalar int32 operands only, got {dividend.dtype}")
+    return dividend, divisor
+
+
+def fast_div(dividend: PrimExpr, divisor: PrimExpr) -> PrimExpr:
+    """Explicit MUSA fast integer division.
+
+    Unlike ``//``, this explicitly requests multiplication-and-shift integer
+    division. Both operands must be scalar ``int32`` values, the dividend must
+    be non-negative, and the divisor must be strictly positive. Launch-invariant
+    divisors use host-side setup, while device values use device-side setup.
+    """
+    dividend, divisor = _fast_divmod_args(dividend, divisor)
+    return tirx.call_intrin(dividend.dtype, tirx.op.Op.get("tl.fast_div"), dividend, divisor)
+
+
+def fast_mod(dividend: PrimExpr, divisor: PrimExpr) -> PrimExpr:
+    """Explicit MUSA fast integer remainder with the same contract as ``fast_div``."""
+    dividend, divisor = _fast_divmod_args(dividend, divisor)
+    return tirx.call_intrin(dividend.dtype, tirx.op.Op.get("tl.fast_mod"), dividend, divisor)
+
+
+def fast_divmod(dividend: PrimExpr, divisor: PrimExpr) -> tuple[PrimExpr, PrimExpr]:
+    """Return ``(quotient, remainder)`` using explicit MUSA fast divmod.
+
+    This keeps the normal ``//`` and ``%`` paths untouched while marking this
+    pair for multiplication-and-shift lowering.
+    """
+    dividend, divisor = _fast_divmod_args(dividend, divisor)
+    return (
+        tirx.call_intrin(dividend.dtype, tirx.op.Op.get("tl.fast_div"), dividend, divisor),
+        tirx.call_intrin(dividend.dtype, tirx.op.Op.get("tl.fast_mod"), dividend, divisor),
+    )
+
+
 _PACKED_X2_DTYPES = frozenset({"float32x2", "bfloat16x2", "float16x2"})
 
 
@@ -428,6 +471,9 @@ __all__ = [
     "ieee_fsqrt",  # noqa: F401
     "ieee_frsqrt",  # noqa: F401
     "ieee_fdiv",  # noqa: F401
+    "fast_div",  # noqa: F401
+    "fast_mod",  # noqa: F401
+    "fast_divmod",  # noqa: F401
     "add2",  # noqa: F401
     "sub2",  # noqa: F401
     "mul2",  # noqa: F401

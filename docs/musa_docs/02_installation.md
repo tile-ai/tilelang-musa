@@ -48,18 +48,40 @@ python -m pip install 'apache-tvm-ffi==0.1.11.post1'
 
 安装完成后仍通过 `import tilelang` 使用。
 
-### 源码参考与版本渠道
+### 从源码构建
 
 TileLang-MUSA 源码仓库位于
 [https://github.com/tile-ai/tilelang-musa](https://github.com/tile-ai/tilelang-musa)。
-需要查看源码、提交记录或 release tag 时，可从仓库的
-[Releases](https://github.com/tile-ai/tilelang-musa/releases) 页面选择
-`v0.1.12+musa.1` 或 `v0.1.13+musa.1`。
+本版本的源码 tag 为 `v0.1.12+musa.5`，MUSA 部分覆盖 PH1/MP31 与 QY2/MP22。
+先准备[版本与环境](./01_version_environment.md)中的 Linux、MUSA SDK、驱动、
+PyTorch、`torch_musa` 和 `apache-tvm-ffi==0.1.11.post1`。源码构建还需要
+C/C++ 编译工具、Python 开发头文件、CMake 3.26.1 或更新版本，以及 Ninja 或 Make。
 
-本页前面的 pip 命令安装的是 MUSA SDK 配套发行版 `v0.1.12+musa.5`。它与开源
-`v0.1.12+musa.1` 具有相同的基础 TileLang 版本，但包含额外 bugfix；开源
-release 适合源码和测试对照，不能直接替代 MUSA SDK 配套包。Python 包版本和
-GitHub release 版本需要分别核对完整的 `musa.*` patch 后缀。
+```bash
+git clone --branch 'v0.1.12+musa.5' --recursive https://github.com/tile-ai/tilelang-musa.git
+cd tilelang-musa
+git submodule status --recursive
+
+# 在已准备好 MUSA SDK 和 Python 依赖的环境中构建
+USE_MUSA=ON USE_CUDA=OFF \
+  CMAKE_ARGS='-DUSE_MUSA=ON -DUSE_CUDA=OFF -DCMAKE_BUILD_TYPE=Release' \
+  python -m pip install -v .
+```
+
+TVM 固定到公开提交
+[`643f4919007cf2201a9d2fac4f51e6373d5b537f`](https://github.com/MooreThreads/tvm_musa/commit/643f4919007cf2201a9d2fac4f51e6373d5b537f)。
+不要用 TVM 的最新分支替换该提交。`--recursive` 还会检出 MUTLASS 和 TVM 的嵌套
+依赖；GitHub 自动生成的源码 zip/tar 不包含这些 submodule 内容。已有 checkout 可执行：
+
+```bash
+git submodule update --init --recursive
+```
+
+需要在修改 Python 文件后立即使用新代码时，可将安装命令改为
+`python -m pip install -v -e .`，保留相同的 MUSA 构建参数。修改 C++ 或 backend
+文件后仍需重新构建。构建完成后运行[安装前检查](./01_version_environment.md#安装前检查)，
+并在实际目标设备上验证 kernel。源码构建与预编译包可能带有不同的构建后缀，
+请同时记录源码提交和运行环境。
 
 ### 历史版本（MUSA SDK 5.2.0 时代）
 

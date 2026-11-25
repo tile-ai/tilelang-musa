@@ -1,6 +1,27 @@
-# 👋 Welcome to Tile Language
+# 👋 Welcome to TileLang MUSA
 
-[GitHub](https://github.com/tile-ai/tilelang)
+[GitHub](https://github.com/tile-ai/tilelang-musa)
+
+This documentation accompanies `v0.1.12+musa.5`. For PH1/MP31 and QY2/MP22,
+start with the [MUSA environment guide](./musa_docs/01_version_environment.md)
+and [MUSA installation instructions](./musa_docs/02_installation.md).
+The guides below also include upstream TileLang material for other backends;
+those examples may require backend-specific adaptation.
+
+:::{toctree}
+:maxdepth: 1
+:caption: MUSA GUIDE
+
+musa_docs/index
+musa_docs/01_version_environment
+musa_docs/02_installation
+musa_docs/03_quick_start
+musa_docs/04_official_programming_interface
+musa_docs/05_musa_extensions
+musa_docs/06_typical_use_cases
+musa_docs/07_debug_diagnostics
+musa_docs/08_performance
+:::
 
 Tile Language (tile-lang) is a concise domain-specific language designed to streamline
 the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention).

@@ -5,6 +5,7 @@ from .cuda import *
 from .cpu import *
 from .cdna import *
 from .metal import *
+from .musa import *
 from tvm.target import Target
 import torch
 from tilelang.backend.target import determine_target
@@ -22,6 +23,8 @@ def get_arch(target: str | Target = "cuda") -> TileDevice:
         return CDNA(target)
     elif target.kind.name == "metal":
         return METAL(target)
+    elif target.kind.name == "musa":
+        return MUSA(target)
     else:
         raise ValueError(f"Unsupported target: {target.kind.name}")
 
@@ -29,6 +32,9 @@ def get_arch(target: str | Target = "cuda") -> TileDevice:
 def auto_infer_current_arch() -> TileDevice:
     # TODO(lei): This is a temporary solution to infer the current architecture
     # Can be replaced by a more sophisticated method in the future
+    musa = getattr(torch, "musa", None)
+    if musa is not None and musa.is_available():
+        return get_arch("musa")
     if torch.version.hip is not None:
         return get_arch("hip")
     if torch.cuda.is_available():
@@ -50,8 +56,11 @@ __all__ = [
     "has_mma_support",
     "is_cdna_arch",
     "is_metal_arch",
+    "is_musa_arch",
+    "is_mp31_arch",
     "CUDA",
     "CDNA",
     "METAL",
     "CPU",
+    "MUSA",
 ]

@@ -14,6 +14,32 @@ PASS_CONFIGS = {
 }
 
 
+@pytest.mark.parametrize("mode", ["elementwise", "broadcast_scale", "broadcast_recurrence"])
+def test_late_mul_vectorization_preserves_dependencies(mode):
+    from tilelang import tvm
+
+    @T.prim_func
+    def func(A: T.Tensor((32,), T.float32), B: T.Tensor((32,), T.float32)):
+        for i in T.serial(32):
+            if mode == "elementwise":
+                A[i] = A[i] * B[i]
+            elif mode == "broadcast_scale":
+                A[i] = A[i] * B[i // 16]
+            else:
+                A[i] = A[0] * B[i]
+
+    with tvm.target.Target({"kind": "musa", "arch": "mp_31"}):
+        mod = tilelang.transform.LateVectorizePlanner()(tvm.IRModule({"main": func}))
+    vectorized = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        mod["main"].body,
+        lambda node: vectorized.append(node)
+        if isinstance(node, tvm.tirx.For) and node.kind == tvm.tirx.ForKind.VECTORIZED
+        else None,
+    )
+    assert bool(vectorized) == (mode != "broadcast_recurrence")
+
+
 def require_musa():
     if not hasattr(torch, "musa") or not torch.musa.is_available():
         pytest.skip("MUSA is not available")

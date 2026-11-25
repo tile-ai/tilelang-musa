@@ -15,7 +15,7 @@ tags: [MUSA, TileLang]
 | --- | --- |
 | 操作系统 | Linux；源码构建建议使用 x86_64 开发环境 |
 | C 运行时 | 配套摩尔线程 TVM FFI wheel 要求 glibc 2.34 或更高版本 |
-| GPU | 已安装 MUSA 驱动的 MTT GPU；仓库 README 当前声明支持 S5000、S4000 和 M1000 |
+| GPU | 已安装 MUSA 驱动的 MTT GPU；本版本 MUSA 源码覆盖 PH1/MP31 与 QY2/MP22，支持 S5000、S4000 和 M1000 |
 | MUSA SDK | 使用与 GPU、驱动和 `torch_musa` 配套的 SDK，包含 `mcc`、MUSA runtime 和设备编译工具链 |
 | Python | Python 3.10 是当前 `torch_musa`/TileLang-MUSA 文档推荐环境 |
 | Python 依赖 | `torch`、`torch_musa`、`tilelang_musa` 和匹配版本的 `apache-tvm-ffi` |
@@ -92,30 +92,30 @@ MUSA SDK、驱动和 `torch_musa` 配套。该版本
 
 ### 版本渠道
 
-TileLang-MUSA 同时存在 MUSA SDK 配套发行版和开源仓库发行版两个发布渠道。两个渠道的
-基础 TileLang 版本可能相同，但 `musa.*` patch 后缀、适配的 MUSA SDK 和
-bugfix 集合不一定相同，不能只按 `0.1.x` 主版本号判断二者完全等价。MUSA SDK 配套发行版同样属于正式 release，面向 MUSA SDK Python 包源
-发布，并不是开发快照或临时构建产物。
+`v0.1.12+musa.5` 同时提供 GitHub 版本化源码和 MUSA SDK 配套 Python 包。
+本目录按该版本的 PH1/MP31、QY2/MP22 接口编写。使用其他版本时，应核对完整的
+`musa.*` 后缀、SDK 和 FFI 依赖；仅有基础版本号 `0.1.12` 相同不代表接口完全一致。
 
 | 渠道 | 版本 | 获取方式 | 定位 |
 | --- | --- | --- | --- |
-| MUSA SDK 配套正式版 | `v0.1.12+musa.5` | MUSA SDK Python 包源 | 当前推荐安装版本，包含相对开源 `v0.1.12+musa.1` 的额外 bugfix |
+| 开源源码 | `v0.1.12+musa.5` | [GitHub tag](https://github.com/tile-ai/tilelang-musa/tree/v0.1.12%2Bmusa.5) | 当前文档对应的 PH1/MP31、QY2/MP22 源码及测试 |
+| MUSA SDK 配套正式版 | `v0.1.12+musa.5` | MUSA SDK Python 包源 | 当前推荐的预编译 Python 包 |
 | MUSA SDK 配套正式版（历史） | `v0.1.8+musa.3` | MUSA SDK Python 包源 | 发布于 MUSA SDK 5.2.0 时代，配套 `apache-tvm-ffi==0.1.9.post3` |
-| 开源仓库正式版 | `v0.1.12+musa.1` | [GitHub Release](https://github.com/tile-ai/tilelang-musa/releases) | 与 MUSA SDK 配套版本同一基础 TileLang 版本，可用于阅读源码和对照 API |
+| 开源仓库正式版（历史） | `v0.1.12+musa.1` | [GitHub Release](https://github.com/tile-ai/tilelang-musa/releases) | 较早的 0.1.12 源码版本，不含本次完整更新 |
 | 开源仓库正式版 | `v0.1.13+musa.1` | [GitHub Release](https://github.com/tile-ai/tilelang-musa/releases) | 开源仓库中的后续基础版本，接口和行为应按该 release 说明核对 |
 
 开源仓库地址为
 [https://github.com/tile-ai/tilelang-musa](https://github.com/tile-ai/tilelang-musa)。
-当 MUSA SDK 配套包不可用时，用户可以借鉴开源仓库 `v0.1.12+musa.1` 的源码、测试和
-release 说明；如果需要使用当前 SDK 文档中的修复和适配，应优先安装 MUSA SDK 配套的
-`v0.1.12+musa.5`。开源 `v0.1.13+musa.1` 是另一个基础版本，不能直接
-当作 MUSA SDK 配套 `v0.1.12+musa.5` 的替代包。
+需要阅读或构建当前版本时，使用 `v0.1.12+musa.5` tag，并保留它固定的递归
+submodule 提交，详见[源码构建](./02_installation.md#从源码构建)。Python 包和源码
+构建均需匹配 MUSA SDK、驱动、`torch_musa` 和 TVM FFI；不应把预编译包与本地构建
+产物混装在同一环境中。`v0.1.13+musa.1` 使用另一个基础版本，不能直接替代本版本。
 
 ### 版本差异概览
 
 以下表格只比较两个 MUSA SDK 配套正式 release：历史正式版 `v0.1.8+musa.3`
-和当前正式版 `v0.1.12+musa.5`。开源仓库中的 `v0.1.12+musa.1`、
-`v0.1.13+musa.1` 属于独立发布渠道，不能直接套用下表的 patch 差异。
+和当前正式版 `v0.1.12+musa.5`，其中的架构描述限于 PH1/MP31 与 QY2/MP22。
+其他 tag 的差异应分别核对，不能直接套用下表。
 
 | 方向 | MUSA SDK 配套正式历史版 `v0.1.8+musa.3` | 当前 MUSA SDK 配套正式版 `v0.1.12+musa.5` |
 | --- | --- | --- |
