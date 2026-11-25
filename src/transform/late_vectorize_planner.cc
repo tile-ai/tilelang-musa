@@ -181,7 +181,34 @@ private:
   }
 
   bool ContainsMusaSIMDOpportunity(const For &loop) const {
-    return MatchesExp2VecPattern(loop) || MatchesCvtVecPattern(loop);
+    return MatchesExp2VecPattern(loop) || MatchesCvtVecPattern(loop) ||
+           MatchesMulVecPattern(loop);
+  }
+
+  bool MatchesMulVecPattern(const For &loop) const {
+    if (loop->kind == ForKind::kVectorized) {
+      return false;
+    }
+    const auto *store = GetSingleStore(loop->body);
+    if (!store || !store->value.as<MulNode>() ||
+        store->value.dtype() != DataType::Float(32) ||
+        SideEffect(store->value) > CallEffectKind::kReadState) {
+      return false;
+    }
+    // An in-place elementwise multiply is safe, but a broadcast or shifted
+    // read from its destination can carry a dependency across iterations.
+    PrimExpr store_offset = GetElementOffset(store->buffer, store->indices);
+    bool has_dependency = false;
+    PostOrderVisit(store->value, [&](const ObjectRef &obj) {
+      if (const auto *load = obj.as<BufferLoadNode>();
+          load && load->buffer->data.same_as(store->buffer->data)) {
+        has_dependency |=
+            !load->buffer.same_as(store->buffer) ||
+            !analyzer_->CanProve(GetElementOffset(load->buffer, load->indices) ==
+                                 store_offset);
+      }
+    });
+    return !has_dependency && HasElementwiseAccessPattern(loop, store);
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
