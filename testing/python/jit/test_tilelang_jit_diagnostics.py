@@ -236,21 +236,31 @@ def test_musa_compile_callback_honors_tilelang_verbose(monkeypatch):
 def test_jit_compile_reports_timeout_for_hanging_nvcc(monkeypatch, tmp_path, caplog, capture_tilelang_logs):
     import tilelang
     from tilelang.contrib import nvcc
-    from tilelang.env import env
+    from tilelang.env import CacheState, env
 
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("TILELANG_JIT_DIAGNOSTICS", "1")
     monkeypatch.setenv("TILELANG_COMPILE_TIMEOUT_SECONDS", "0.25")
+    # The compiler process is mocked; command discovery must not require a CUDA SDK.
+    monkeypatch.setattr(nvcc, "get_nvcc_compiler", lambda: "nvcc")
+    monkeypatch.setattr(nvcc, "get_nvcc_subprocess_env", lambda: None)
     monkeypatch.setattr(nvcc.subprocess, "Popen", lambda *args, **kwargs: _HangingProcess())
 
     caplog.set_level(logging.INFO, logger="tilelang.jit.diagnostics")
 
-    with pytest.raises(RuntimeError) as exc_info:
-        tilelang.compile(
-            _make_cuda_compile_probe(),
-            out_idx=-1,
-            target={"kind": "cuda", "arch": "sm_120"},
-        )
+    cache_was_enabled = CacheState.is_enabled()
+    monkeypatch.setenv("TILELANG_DISABLE_CACHE", "0")
+    env.enable_cache()
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            tilelang.compile(
+                _make_cuda_compile_probe(),
+                out_idx=-1,
+                target={"kind": "cuda", "arch": "sm_120"},
+            )
+    finally:
+        if not cache_was_enabled:
+            env.disable_cache()
 
     message = str(exc_info.value)
     assert "NVCC compilation timed out after 0.25 seconds" in message
