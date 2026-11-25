@@ -242,7 +242,11 @@ void CodeGenMUSA::PrintFunctionSignature(const ffi::String &function_name,
         << "Unsupported calling convention for musa codegen: " << calling_conv;
   }
   CodeGenC::PrintType(func->ret_type, os);
-  CodeGenC::PrintExtraAttrs(func, os);
+  if (calling_conv == CallingConv::kDeviceKernelLaunch) {
+    this->PrintExtraAttrs(func, os);
+  } else {
+    CodeGenC::PrintExtraAttrs(func, os);
+  }
   bool no_alias = func->HasNonzeroAttr(tirx::attr::kNoAlias);
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
@@ -282,7 +286,7 @@ void CodeGenMUSA::PrintFunctionSignature(const ffi::String &function_name,
   os << ")";
 }
 
-class ThreadIdxExtractor : public tirx::StmtVisitor {
+class LaunchConfigExtractor : public tirx::StmtVisitor {
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent) {
@@ -290,14 +294,16 @@ private:
       if (iv->var->name_hint == "threadIdx.x" ||
           iv->thread_tag == "threadIdx.x") {
         threadIdx_x_ext = op->value;
-      }
-      if (iv->var->name_hint == "threadIdx.y" ||
-          iv->thread_tag == "threadIdx.y") {
+      } else if (iv->var->name_hint == "threadIdx.y" ||
+                 iv->thread_tag == "threadIdx.y") {
         threadIdx_y_ext = op->value;
-      }
-      if (iv->var->name_hint == "threadIdx.z" ||
-          iv->thread_tag == "threadIdx.z") {
+      } else if (iv->var->name_hint == "threadIdx.z" ||
+                 iv->thread_tag == "threadIdx.z") {
         threadIdx_z_ext = op->value;
+      }
+    } else if (op->attr_key == tl::attr::kMinBlocksPerSM) {
+      if (const IntImmNode *v = op->value.as<IntImmNode>()) {
+        min_blocks_per_sm = v->value;
       }
     }
     StmtVisitor::VisitStmt_(op);
@@ -307,10 +313,11 @@ public:
   PrimExpr threadIdx_x_ext = Integer(1);
   PrimExpr threadIdx_y_ext = Integer(1);
   PrimExpr threadIdx_z_ext = Integer(1);
+  std::optional<int64_t> min_blocks_per_sm;
 };
 
 void CodeGenMUSA::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
-  ThreadIdxExtractor extractor;
+  LaunchConfigExtractor extractor;
   extractor(f->body);
   arith::Analyzer analyzer;
   PrimExpr threadIdx_ext =
@@ -323,7 +330,12 @@ void CodeGenMUSA::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
       // return
       return;
     }
-    os << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    if (extractor.min_blocks_per_sm.has_value()) {
+      os << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
+         << *extractor.min_blocks_per_sm << ")";
+    } else {
+      os << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    }
   }
 }
 
@@ -2713,6 +2725,7 @@ std::string MTCompile(const std::string &code, const Target &target) {
   }
   args.push_back("--cuda-device-only");
   args.push_back("--cuda-gpu-arch=" + std::string(arch.value()));
+  args.push_back("-O3");
 
   if (const char *extra_env = std::getenv("TVM_MUSA_FLAGS")) {
     std::istringstream flags_stream(extra_env);
