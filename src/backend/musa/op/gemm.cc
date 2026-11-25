@@ -13,6 +13,7 @@
 
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/op.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
@@ -205,6 +206,10 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
 std::optional<std::array<int, 3>>
 SelectSQMMAInstShape(const GemmNode &op, int block_size, Target target) {
   if (!TargetIsPH1(target)) {
+    return std::nullopt;
+  }
+  // gemm_ss SQMMA requires zero region offsets; WMMA handles sliced operands.
+  if (!is_zero(op.offsetA_) || !is_zero(op.offsetB_)) {
     return std::nullopt;
   }
   if (op.a_.scope() != "shared.dyn" && op.a_.scope() != "shared") {

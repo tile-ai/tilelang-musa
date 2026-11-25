@@ -194,6 +194,10 @@ GemmPyNode::SelectSQMMAInstShape(int block_size, Target target) const {
   if (!TargetIsPH1(target)) {
     return std::nullopt;
   }
+  // Match the SQMMA template restriction and retain WMMA for sliced operands.
+  if (offsetA_ != 0 || offsetB_ != 0) {
+    return std::nullopt;
+  }
   if (a_.scope() != "shared.dyn" && a_.scope() != "shared") {
     return std::nullopt;
   }
