@@ -246,4 +246,11 @@ TL_DEVICE void tme_store_read_wait() {
   __musa_tme_store_read_wait();
 }
 
+TL_DEVICE void tme_flush() {
+  // Drain in-flight MP31 TME transfers before CTA exit so a subsequent launch
+  // cannot reuse shared memory while the DMA engine is still writing.
+  // MTCC exposes this builtin directly (SINCE_MP_31).
+  __musa_tme_flush();
+}
+
 } // namespace tl
