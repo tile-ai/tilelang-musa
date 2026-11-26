@@ -136,12 +136,31 @@ struct AllReduce {
     }
   }
 
+  template <typename T, typename SyncFn>
+  static TL_DEVICE T run_with_barrier(T x, T *red_buf, SyncFn sync_fn) {
+    if constexpr (threads == scale) {
+      return x;
+    } else {
+      return butterfly_reduce_scalar_with_barrier(x, red_buf, sync_fn);
+    }
+  }
+
   template <typename T>
   static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
     if constexpr (threads == scale) {
       return;
     } else {
       butterfly_reduce_batch(x, red_buf);
+    }
+  }
+
+  template <typename T, typename SyncFn>
+  static TL_DEVICE void run_batch_with_barrier(T *x, T *red_buf,
+                                               SyncFn sync_fn) {
+    if constexpr (threads == scale) {
+      return;
+    } else {
+      butterfly_reduce_batch_with_barrier(x, red_buf, sync_fn);
     }
   }
 
@@ -164,6 +183,25 @@ private:
       return x;
     } else {
       return Next::run(x, red_buf);
+    }
+  }
+
+  template <typename T, typename SyncFn>
+  static TL_DEVICE T butterfly_reduce_scalar_with_barrier(T x, T *red_buf,
+                                                          SyncFn sync_fn) {
+    constexpr int offset = threads / 2;
+    if constexpr (offset >= 32) {
+      sync_fn();
+      red_buf[threadIdx.x - thread_offset] = x;
+      sync_fn();
+      x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
+    } else {
+      x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
+    }
+    if constexpr (offset == scale) {
+      return x;
+    } else {
+      return Next::run_with_barrier(x, red_buf, sync_fn);
     }
   }
 
@@ -193,6 +231,36 @@ private:
       return;
     } else {
       Next::run_batch(x, red_buf);
+    }
+  }
+
+  template <typename T, typename SyncFn>
+  static TL_DEVICE void butterfly_reduce_batch_with_barrier(T *x, T *red_buf,
+                                                            SyncFn sync_fn) {
+    constexpr int offset = threads / 2;
+    if constexpr (offset >= 32) {
+      sync_fn();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++) {
+        red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
+      }
+      sync_fn();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++) {
+        x[i] =
+            Reducer()(x[i], red_buf[((threadIdx.x - thread_offset) ^ offset) +
+                                    i * workspace_stride]);
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < batch_size; i++) {
+        x[i] = Reducer()(x[i], tl::shfl_xor_sync(uint32_t(-1), x[i], offset));
+      }
+    }
+    if constexpr (offset == scale) {
+      return;
+    } else {
+      Next::run_batch_with_barrier(x, red_buf, sync_fn);
     }
   }
 };
