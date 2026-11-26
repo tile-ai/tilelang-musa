@@ -310,3 +310,51 @@ def test_musa_scan_region_runtime_values(op, reverse):
         atol=0,
         rtol=0,
     )
+
+
+@pytest.mark.parametrize("op", ["cumsum", "cummax"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("n,threads,dtype", [
+    (600, 256, T.float32),
+    (600, 256, T.int32),
+    (512, 256, T.float16),
+    (512, 256, T.bfloat16),
+    (1024, 512, T.float32),
+])
+@tilelang.testing.requires_musa
+def test_musa_scan_1d_multi_warp_multichunk(op, reverse, n, threads, dtype):
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), dtype), B: T.Tensor((n,), dtype)):
+        with T.Kernel(1, threads=threads):
+            smem = T.alloc_shared((n,), dtype)
+            T.copy(A, smem)
+            if op == "cumsum":
+                T.cumsum(src=smem, dim=0, reverse=reverse)
+            else:
+                T.cummax(src=smem, dim=0, reverse=reverse)
+            T.copy(smem, B)
+
+    compiled = tilelang.compile(
+        kernel,
+        out_idx=[1],
+        target={"kind": "musa"},
+        execution_backend="tvm_ffi",
+    )
+    tdt = _torch_dtype(dtype)
+    if dtype in (T.int32, T.int64):
+        a_cpu = (torch.arange(n, dtype=tdt) * 7) % 19 - 9
+        atol, rtol = 0, 0
+    elif dtype in (T.float16, T.bfloat16):
+        # Small integers stay exact in fp16/bf16 even after summing 512 terms
+        a_cpu = ((torch.arange(n, dtype=torch.int32) % 5) - 2).to(tdt)
+        atol, rtol = 0, 0
+    else:
+        a_cpu = (torch.arange(n, dtype=torch.float32) % 17) - 8
+        atol, rtol = 0, 0
+
+    out = compiled(a_cpu.to("musa"))
+    torch.musa.synchronize()
+    ref_in = a_cpu.float() if dtype in (T.float16, T.bfloat16) else a_cpu
+    ref = _scan_reference(ref_in, op, 0, reverse)
+    got = out.cpu().float() if dtype in (T.float16, T.bfloat16) else out.cpu()
+    torch.testing.assert_close(got, ref.to(got.dtype), atol=atol, rtol=rtol)
