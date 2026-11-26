@@ -223,9 +223,51 @@ std::string MUSAGetFP4Type(DataType type) {
 
 CodeGenMUSA::CodeGenMUSA() { restrict_keyword_ = "__restrict__"; }
 
+namespace {
+
+std::string MapMUSAGeneratorType(const std::string &generator) {
+  if (generator == "curandStatePhilox4_32_10_t" ||
+      generator == "murandStatePhilox4_32_10_t") {
+    return "murandStatePhilox4_32_10_t";
+  }
+  if (generator == "curandStateMRG32k3a_t" ||
+      generator == "murandStateMRG32k3a_t") {
+    return "murandStateMRG32k3a_t";
+  }
+  if (generator == "curandStateXORWOW_t" ||
+      generator == "murandStateXORWOW_t") {
+    return "murandStateXORWOW_t";
+  }
+  TVM_FFI_THROW(InternalError)
+      << "Unsupported MUSA RNG generator: " << generator;
+}
+
+} // namespace
+
 void CodeGenMUSA::Init(bool output_ssa, Target target) {
   CodeGenC::Init(output_ssa);
   target_ = std::move(target);
+}
+
+void CodeGenMUSA::PreFunctionBody(const PrimFunc &f) {
+  CodeGenC::PreFunctionBody(f);
+  rng_state_name_map_.clear();
+  murand_random_generator_state_.clear();
+  tirx::PostOrderVisit(f->body, [this](const ffi::ObjectRef &n) {
+    const auto *call = n.as<CallNode>();
+    if (call == nullptr || !call->op.same_as(tl::rng_init())) {
+      return;
+    }
+    ICHECK_EQ(call->args.size(), 4U)
+        << "tl.rng_init expects (seed, seq, off, generator)";
+    const auto *gen_imm = call->args[3].as<StringImmNode>();
+    ICHECK(gen_imm != nullptr) << "tl.rng_init generator must be a string";
+    this->need_murand_kernel_h_ = true;
+    std::string state_type = MapMUSAGeneratorType(gen_imm->value);
+    std::string name = name_supply_->FreshName("__random_generator_state");
+    this->stream << "  " << state_type << " " << name << ";\n";
+    rng_state_name_map_.emplace(call, std::move(name));
+  });
 }
 
 void CodeGenMUSA::PrintFunctionSignature(const ffi::String &function_name,
@@ -421,6 +463,10 @@ std::string CodeGenMUSA::Finish() {
 
   if (need_math_constants_h_) {
     decl_stream << "#include <math_constants.h>\n";
+  }
+
+  if (need_murand_kernel_h_) {
+    decl_stream << "#include <murand_kernel.h>\n";
   }
 
   if (need_math_h_) {
@@ -1753,6 +1799,31 @@ void CodeGenMUSA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::musa::fence_sys())) {
     ICHECK_EQ(op->args.size(), 0U) << "T.fence_sys expects no arguments.";
     os << "__threadfence_system()";
+  } else if (op->op.same_as(tl::rng_init())) {
+    this->need_murand_kernel_h_ = true;
+    auto it = rng_state_name_map_.find(op);
+    ICHECK(it != rng_state_name_map_.end())
+        << "tl.rng_init call was not registered by PreFunctionBody pre-scan";
+    this->murand_random_generator_state_ = it->second;
+    os << "murand_init(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", &"
+       << this->murand_random_generator_state_ << ")";
+  } else if (op->op.same_as(tl::rng_rand())) {
+    this->need_murand_kernel_h_ = true;
+    ICHECK(!this->murand_random_generator_state_.empty())
+        << "tl.rng_rand requires a preceding T.rng_init call";
+    os << "murand(&" << this->murand_random_generator_state_ << ")";
+  } else if (op->op.same_as(tl::rng_rand_float())) {
+    this->need_murand_kernel_h_ = true;
+    ICHECK(!this->murand_random_generator_state_.empty())
+        << "tl.rng_rand_float requires a preceding T.rng_init call";
+    const auto *dist_imm = op->args[0].as<StringImmNode>();
+    ICHECK(dist_imm != nullptr) << "tl.rng_rand_float dist must be a string";
+    os << "murand_" << dist_imm->value;
+    if (op->dtype.bits() == 64) {
+      os << "_double";
+    }
+    os << "(&" << this->murand_random_generator_state_ << ")";
   } else if (op->op.same_as(tl::musa::lsu_ld_cache_hint()) ||
              op->op.same_as(tl::musa::lsu_ld_volatile_cache_hint())) {
     ICHECK(tl::TargetIsMP31(target_))

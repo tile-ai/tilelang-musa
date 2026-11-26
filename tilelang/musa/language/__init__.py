@@ -56,6 +56,8 @@ from .distributed import *  # noqa: F401,F403
 from .distributed import __all__ as _DISTRIBUTED_ALL
 from .memory import *  # noqa: F401,F403
 from .memory import __all__ as _MEMORY_ALL
+from .random import *  # noqa: F401,F403
+from .random import __all__ as _RANDOM_ALL
 
 _MUSA_API_ALL = (
     "Kernel",
@@ -106,8 +108,9 @@ __all__ = tuple(
             *_COPY_ALL,
             *_DISTRIBUTED_ALL,
             *_MEMORY_ALL,
+            *_RANDOM_ALL,
         )
     )
 )
 
-del _COMMON_ALL, _MUSA_API_ALL, _PRINT_ALL, _FAST_DIVMOD_ALL, _SQMMA_ALL, _WMMA_ALL, _COPY_ALL, _DISTRIBUTED_ALL, _MEMORY_ALL
+del _COMMON_ALL, _MUSA_API_ALL, _PRINT_ALL, _FAST_DIVMOD_ALL, _SQMMA_ALL, _WMMA_ALL, _COPY_ALL, _DISTRIBUTED_ALL, _MEMORY_ALL, _RANDOM_ALL

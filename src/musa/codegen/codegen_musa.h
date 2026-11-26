@@ -48,9 +48,11 @@ public:
             need_reduce_h_ || need_scan_h_ || need_async_copy_h_ ||
             need_ldg_stg_h_ || need_mp31_lsu_h_ || need_mp31_peer_reduce_h_ ||
             need_cvt_h_ || need_threadblock_swizzle_h_ || need_dp4a_h_ ||
-            need_mp31_tme_h_ || need_mp31_sqmma_h_ || need_mp31_wmma_h_);
+            need_mp31_tme_h_ || need_mp31_sqmma_h_ || need_mp31_wmma_h_ ||
+            need_murand_kernel_h_);
   }
   // override behavior
+  void PreFunctionBody(const PrimFunc &f) final;
   void PrintFunctionSignature(const ffi::String &function_name,
                               const PrimFunc &func, std::ostream &os) final;
   void PrintExtraAttrs(const PrimFunc &f, std::ostream &os) final; // NOLINT(*)
@@ -116,6 +118,11 @@ private:
   bool enable_warp_shuffle_{false};
   // whether need math_constants.h
   bool need_math_constants_h_{false};
+  // whether need murand_kernel.h
+  bool need_murand_kernel_h_{false};
+  // Current murand RNG state variable name and pre-scanned init call map
+  std::string murand_random_generator_state_;
+  std::unordered_map<const CallNode *, std::string> rng_state_name_map_;
   // whether need tl MUSA math helpers
   bool need_math_h_{false};
   // whether need mma.h
