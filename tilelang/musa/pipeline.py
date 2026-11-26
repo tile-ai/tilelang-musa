@@ -118,12 +118,15 @@ def _append_innermost_thread_extent(node, stmt):
 
 
 def add_tme_flush_cleanup(mod: IRModule) -> IRModule:
-    """Append an unconditional ``tl::tme_flush()`` exit drain to every MP31 TME kernel."""
+    """Append an unconditional ``tl::tme_flush()`` exit drain to every MP31 TME device kernel."""
     out = IRModule(mod.functions, attrs=mod.attrs)
     for gv, func in mod.functions.items():
-        if not isinstance(func, tirx.PrimFunc) or not _contains_tme_call(func.body):
+        if not isinstance(func, tirx.PrimFunc):
             continue
-        if _contains_tme_flush(func.body):
+        func_target = func.attrs.get("target") if func.attrs else None
+        if func_target is not None and func_target.kind.name != "musa":
+            continue
+        if not _contains_tme_call(func.body) or _contains_tme_flush(func.body):
             continue
         flush = tirx.Evaluate(tirx.call_extern("handle", TME_FLUSH_EXTERN))
         body = _append_innermost_thread_extent(func.body, flush)
@@ -172,8 +175,6 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     LayoutVisual(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
     mod = tilelang.musa.transform.LowerTMEIntrin()(mod)
-    if target_get_arch(target) == "mp_31":
-        mod = add_tme_flush_cleanup(mod)
 
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
@@ -224,6 +225,8 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     if _allow_warp_specialized(target):
         mod = tilelang.musa.transform.LowerPartialThreadSync()(mod)
+    if target_get_arch(target) == "mp_31":
+        mod = add_tme_flush_cleanup(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)

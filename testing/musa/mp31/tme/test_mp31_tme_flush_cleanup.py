@@ -83,5 +83,42 @@ def test_mp31_non_tme_kernel_omits_flush():
     torch.testing.assert_close(y, x + 1.0)
 
 
+@tilelang.testing.requires_musa_compute_version_eq(3, 1)
+def test_mp31_tme_symbolic_shape_emits_device_flush_only():
+    M = T.dynamic("M")
+    N, K = 256, 128
+    BM, BN, BK = 128, 128, 64
+
+    @T.prim_func
+    def sym_gemm(
+        A: T.Tensor((M, K), "float16"),
+        B: T.Tensor((N, K), "float16"),
+        C: T.Tensor((M, N), "float16"),
+    ):
+        with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=256) as (bx, by):
+            As = T.alloc_shared((BM, BK), "float16")
+            Bs = T.alloc_shared((BN, BK), "float16")
+            Cl = T.alloc_fragment((BM, BN), "float32")
+            T.clear(Cl)
+            for k in T.Pipelined(T.ceildiv(K, BK), num_stages=2):
+                T.copy(A[by * BM, k * BK], As)
+                T.copy(B[bx * BN, k * BK], Bs)
+                T.gemm(As, Bs, Cl, transpose_B=True)
+            T.copy(Cl, C[by * BM, bx * BN])
+
+    kernel = tilelang.compile(sym_gemm, out_idx=[2], target={"kind": "musa", "arch": "mp_31"})
+    src = kernel.get_kernel_source()
+    assert "tl::tme_load(" in src
+    assert "tl::tme_flush();" in src
+
+    for m_val in (200, 256):
+        a = torch.randn((m_val, K), dtype=torch.float16, device="musa") * 0.1
+        b = torch.randn((N, K), dtype=torch.float16, device="musa") * 0.1
+        out = kernel(a, b)
+        torch.musa.synchronize()
+        ref = torch.matmul(a.float().cpu(), b.float().cpu().T).to(torch.float16)
+        torch.testing.assert_close(out.cpu(), ref, rtol=2e-2, atol=2e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
