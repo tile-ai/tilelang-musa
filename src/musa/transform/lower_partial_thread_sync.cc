@@ -53,11 +53,9 @@ public:
 
   Stmt Rewrite(Stmt body) {
     body = VisitStmt(std::move(body));
-    ffi::Map<ffi::String, ffi::Any> annotations = {
-        {attr::kLocalVarInit, Integer(0)},
-    };
     for (auto it = phase_vars_.rbegin(); it != phase_vars_.rend(); ++it) {
-      body = SeqStmt(ffi::Array<Stmt>{AllocBuffer(*it, annotations), body});
+      Stmt init = BufferStore(*it, Integer(0), {Integer(0)});
+      body = SeqStmt(ffi::Array<Stmt>{AllocBuffer(*it), init, body});
     }
     return body;
   }
