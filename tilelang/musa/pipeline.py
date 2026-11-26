@@ -37,15 +37,14 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.VerifyBufferInit()(mod)
+    if target_get_arch(target) == "mp_31":
+        mod = tilelang.musa.transform.legalize_fragment_a_gemm(mod, pass_ctx.config)
     if _allow_warp_specialized(target):
         mod = tilelang.musa.transform.ProducerConsumerWarpSpecialized()(mod)
     mod = tilelang.transform.IfStmtBinding()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
-
-    if target_get_arch(target) == "mp_31":
-        mod = tilelang.musa.transform.legalize_fragment_a_gemm(mod, pass_ctx.config)
 
     mod = tilelang.transform.LayoutInference()(mod)
     LayoutVisual(mod)
