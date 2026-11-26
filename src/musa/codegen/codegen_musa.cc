@@ -242,7 +242,11 @@ void CodeGenMUSA::PrintFunctionSignature(const ffi::String &function_name,
         << "Unsupported calling convention for musa codegen: " << calling_conv;
   }
   CodeGenC::PrintType(func->ret_type, os);
-  CodeGenC::PrintExtraAttrs(func, os);
+  if (calling_conv == CallingConv::kDeviceKernelLaunch) {
+    this->PrintExtraAttrs(func, os);
+  } else {
+    CodeGenC::PrintExtraAttrs(func, os);
+  }
   bool no_alias = func->HasNonzeroAttr(tirx::attr::kNoAlias);
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
@@ -282,7 +286,7 @@ void CodeGenMUSA::PrintFunctionSignature(const ffi::String &function_name,
   os << ")";
 }
 
-class ThreadIdxExtractor : public tirx::StmtVisitor {
+class LaunchConfigExtractor : public tirx::StmtExprVisitor {
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent) {
@@ -290,27 +294,47 @@ private:
       if (iv->var->name_hint == "threadIdx.x" ||
           iv->thread_tag == "threadIdx.x") {
         threadIdx_x_ext = op->value;
-      }
-      if (iv->var->name_hint == "threadIdx.y" ||
-          iv->thread_tag == "threadIdx.y") {
+      } else if (iv->var->name_hint == "threadIdx.y" ||
+                 iv->thread_tag == "threadIdx.y") {
         threadIdx_y_ext = op->value;
-      }
-      if (iv->var->name_hint == "threadIdx.z" ||
-          iv->thread_tag == "threadIdx.z") {
+      } else if (iv->var->name_hint == "threadIdx.z" ||
+                 iv->thread_tag == "threadIdx.z") {
         threadIdx_z_ext = op->value;
       }
+    } else if (op->attr_key == tl::attr::kMinBlocksPerSM) {
+      if (const IntImmNode *v = op->value.as<IntImmNode>()) {
+        min_blocks_per_sm = v->value;
+      }
     }
-    StmtVisitor::VisitStmt_(op);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::ptx_cp_async()) ||
+        op->op.same_as(tl::ptx_cp_async())) {
+      has_cp_async = true;
+    } else if (op->op.same_as(builtin::call_extern()) && !op->args.empty()) {
+      if (const auto *sym = op->args[0].as<StringImmNode>()) {
+        if (static_cast<std::string>(sym->value).rfind("tl::sqmma_ss<", 0) ==
+            0) {
+          has_sqmma = true;
+        }
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
   }
 
 public:
   PrimExpr threadIdx_x_ext = Integer(1);
   PrimExpr threadIdx_y_ext = Integer(1);
   PrimExpr threadIdx_z_ext = Integer(1);
+  std::optional<int64_t> min_blocks_per_sm;
+  bool has_cp_async = false;
+  bool has_sqmma = false;
 };
 
 void CodeGenMUSA::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
-  ThreadIdxExtractor extractor;
+  LaunchConfigExtractor extractor;
   extractor(f->body);
   arith::Analyzer analyzer;
   PrimExpr threadIdx_ext =
@@ -323,7 +347,18 @@ void CodeGenMUSA::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
       // return
       return;
     }
-    os << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    if (extractor.min_blocks_per_sm.has_value()) {
+      os << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
+         << *extractor.min_blocks_per_sm << ")";
+    } else if (!(threadIdx_ext_int->value <= 256 && extractor.has_cp_async &&
+                 extractor.has_sqmma)) {
+      // Emit default __launch_bounds__(threads) so mcc 5.2.0 grants the proper
+      // register budget (avoiding silent spill miscompiles on high-VGPR 128T
+      // SQMMA kernels such as 1024x16 leading-stride GEMM). Only omit it for
+      // <=256T kernels combining cp.async + SQMMA, where mcc 5.2.0 hits a
+      // backend fence-coalescing ICE under __launch_bounds__(128).
+      os << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    }
   }
 }
 
@@ -2713,6 +2748,7 @@ std::string MTCompile(const std::string &code, const Target &target) {
   }
   args.push_back("--cuda-device-only");
   args.push_back("--cuda-gpu-arch=" + std::string(arch.value()));
+  args.push_back("-O3");
 
   if (const char *extra_env = std::getenv("TVM_MUSA_FLAGS")) {
     std::istringstream flags_stream(extra_env);

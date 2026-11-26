@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tilelang.language.common import *  # noqa: F401,F403
 from tilelang.language.common import __all__ as _COMMON_ALL
+from tilelang.language.annotations import annotate_min_blocks_per_sm  # noqa: F401
 from tilelang.language.builtin import (  # noqa: F401
     barrier_arrive,
     barrier_wait,
@@ -59,6 +60,7 @@ from .memory import __all__ as _MEMORY_ALL
 
 _MUSA_API_ALL = (
     "Kernel",
+    "annotate_min_blocks_per_sm",
     "__cos",
     "__exp",
     "__exp10",
