@@ -216,6 +216,18 @@ class PassConfigKey(str, Enum):
     allocation but each buffer gets its own dedicated region without lifetime-based
     reuse. Default: False"""
 
+    TL_ENABLE_MUSA_LEGALIZE_FRAGMENT_A_GEMM = "tl.enable_musa_legalize_fragment_a_gemm"
+    """Stage register-resident (local.fragment) A operands of MP31 SQMMA GEMMs
+    through shared.dyn memory before LayoutInference. Default: True"""
+
+    TL_ENABLE_MUSA_GEMM_A_STAGING_REUSE = "tl.enable_musa_gemm_a_staging_reuse"
+    """Reuse one shared.dyn staging buffer per (dtype, shape) across legalized
+    MP31 fragment-A GEMMs to preserve 2-CTA/SM shared-memory residency. Default: True"""
+
+    TL_ENABLE_MUSA_SMEM_LIMIT_CHECK = "tl.enable_musa_smem_limit_check"
+    """Enforce the measured MP31 188 KiB (192,512 B) per-block shared-memory
+    launch ceiling at compile time after MergeSharedMemoryAllocations. Default: True"""
+
     TL_DISABLE_SHUFFLE_ELECT = "tl.disable_shuffle_elect"
     """Disable shuffle election optimization. Default: False"""
 

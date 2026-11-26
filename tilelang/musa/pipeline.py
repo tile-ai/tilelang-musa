@@ -37,6 +37,8 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.VerifyBufferInit()(mod)
+    if target_get_arch(target) == "mp_31":
+        mod = tilelang.musa.transform.legalize_fragment_a_gemm(mod, pass_ctx.config)
     if _allow_warp_specialized(target):
         mod = tilelang.musa.transform.ProducerConsumerWarpSpecialized()(mod)
     mod = tilelang.transform.IfStmtBinding()(mod)
@@ -93,6 +95,8 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         enable_aggressive_merge=enable_aggressive_merge,
         disable_reuse=disable_reuse,
     )(mod)
+    if target_get_arch(target) == "mp_31":
+        mod = tilelang.musa.transform.verify_mp31_shared_memory_limit(mod, target=target)
 
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)

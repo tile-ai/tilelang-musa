@@ -1800,6 +1800,14 @@ private:
           tma_call = AnnotateTileOpBarrier(tile_call, barrier_buf, fwd_id);
         }
         producer_stmts.push_back(Evaluate(tma_call));
+        // For unmerged pure-TMA pipelines (e.g. FlashAttention K and V with
+        // distinct consumer release points), arrive on this group's forward
+        // barrier immediately after issuing its TMA load so the consumer can
+        // consume K[k] without waiting for V's back-pressure barrier.
+        if (!can_merge_tma_barriers && !has_simt_producer &&
+            !has_cp_async_producer) {
+          producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
+        }
         ++tma_idx;
       }
       // SIMT/cp.async producers are handled above (after first bp_wait).
@@ -1812,9 +1820,11 @@ private:
         producer_stmts.push_back(s);
       }
     }
-    if (!has_simt_producer && !has_cp_async_producer &&
-        num_producer_groups > 0) {
-      for (int g = 0; g < num_producer_groups; ++g) {
+    int producer_barrier_groups =
+        can_merge_tma_barriers ? 1 : num_producer_groups;
+    if (can_merge_tma_barriers && !has_simt_producer &&
+        !has_cp_async_producer && producer_barrier_groups > 0) {
+      for (int g = 0; g < producer_barrier_groups; ++g) {
         int fwd_base = g * num_stages;
         producer_stmts.push_back(MakeArriveBarrier(
             barrier_buf, IntImm(DataType::Int(32), fwd_base) + p_stage_expr));
@@ -1827,7 +1837,7 @@ private:
     if (has_simt_producer || has_cp_async_producer) {
       producer_stmts.push_back(Evaluate(
           Call(DataType::Handle(), builtin::ptx_wait_group(), {Integer(0)})));
-      for (int g = 0; g < num_producer_groups; ++g) {
+      for (int g = 0; g < producer_barrier_groups; ++g) {
         int fwd_base = g * num_stages;
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
         producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));

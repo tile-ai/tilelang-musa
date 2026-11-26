@@ -199,6 +199,10 @@ def test_mp31_tme_warp_specialized_gemm_codegen_and_runtime():
     assert "tl::sqmma_ss<" in source
     assert "tl::tme_barrier_wait(" in source
     assert "tl::tme_barrier_arrive(" in source
+    # Merged TMA barriers must emit exactly one producer forward arrive in the
+    # producer branch (not one arrive per TMA copy).
+    assert "} else {" in source
+    assert source.split("} else {", 1)[1].count("tl::tme_barrier_arrive(") == 1
     assert "cp_async_gs" not in source
 
     kernel = tilelang.compile(
@@ -213,6 +217,43 @@ def test_mp31_tme_warp_specialized_gemm_codegen_and_runtime():
     torch.musa.synchronize()
     ref = A.float() @ B.float().T
     torch.testing.assert_close(C.cpu(), ref, atol=1e-2, rtol=1e-2)
+
+
+@tilelang.testing.requires_musa_compute_version_eq(3, 1)
+def test_mp31_tme_warp_specialized_gemm_long_k_merged_barriers():
+    @T.prim_func
+    def _long_k_ws_gemm(
+        A: T.Tensor((256, 1024), T.float16),
+        B: T.Tensor((256, 1024), T.float16),
+        C: T.Tensor((256, 256), T.float16),
+    ):
+        with T.Kernel(2, 2, threads=256) as (bx, by):
+            A_shared = T.alloc_shared((128, 64), T.float16)
+            B_shared = T.alloc_shared((128, 64), T.float16)
+            C_local = T.alloc_fragment((128, 128), T.float32)
+            T.clear(C_local)
+            for k in T.Pipelined(16, num_stages=2):
+                T.copy(A[by * 128, k * 64], A_shared)
+                T.copy(B[bx * 128, k * 64], B_shared)
+                T.gemm(A_shared, B_shared, C_local, transpose_B=True)
+            T.copy(C_local, C[by * 128, bx * 128])
+
+    source = _lower(_long_k_ws_gemm).kernel_source
+    assert source.count("tl::tme_load(") == 2
+    assert source.count("tl::tme_barrier_arrive(") == 2
+
+    kernel = tilelang.compile(
+        _long_k_ws_gemm,
+        out_idx=[2],
+        target={"kind": "musa", "arch": "mp_31"},
+        execution_backend="tvm_ffi",
+    )
+    A = (torch.randn(256, 1024, dtype=torch.float16) * 0.1).to("musa")
+    B = (torch.randn(256, 1024, dtype=torch.float16) * 0.1).to("musa")
+    C = kernel(A, B)
+    torch.musa.synchronize()
+    ref = torch.matmul(A, B.T)
+    torch.testing.assert_close(C, ref, atol=1e-2, rtol=1e-2)
 
 
 @tilelang.testing.requires_musa_compute_version_eq(3, 1)

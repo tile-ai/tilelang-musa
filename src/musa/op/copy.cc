@@ -744,6 +744,12 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
     PrimExpr barrier = GetTmaBarrier(op);
     Stmt load = Evaluate(Call(DataType::Handle(), tma_load(),
                               {shared_ptr, global_ptr, barrier, bytes}));
+    if (GetBoolAnnotation(op, "emit_arrive")) {
+      Stmt arrive = Evaluate(
+          Call(DataType::Handle(), builtin::ptx_arrive_barrier(), {barrier}));
+      return IfThenElse(EQ(args.thread_index, args.thread_bounds->min),
+                        SeqStmt({load, arrive}));
+    }
     return IfThenElse(EQ(args.thread_index, args.thread_bounds->min), load);
   }
 
@@ -806,6 +812,11 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
   load = SeqStmt({expect, load});
   PrimExpr leader = EQ(args.thread_index, args.thread_bounds->min);
   if (IsExplicitTmaCopy(op)) {
+    if (GetBoolAnnotation(op, "emit_arrive")) {
+      Stmt arrive = Evaluate(
+          Call(DataType::Handle(), builtin::ptx_arrive_barrier(), {barrier}));
+      return IfThenElse(leader, SeqStmt({load, arrive}));
+    }
     return IfThenElse(leader, load);
   }
   Stmt arrive = Evaluate(
