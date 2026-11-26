@@ -2205,7 +2205,8 @@ void CodeGenMUSA::VisitStmt_(const AttrStmtNode *op) {
         << "threadblock_swizzle_pattern expects a function name and positive "
            "panel size";
     ICHECK(name_node->value == "rasterization2DRow" ||
-           name_node->value == "rasterization2DColumn")
+           name_node->value == "rasterization2DColumn" ||
+           name_node->value == "rasterization2DHilbert")
         << "Unsupported MUSA threadblock swizzle function: "
         << name_node->value;
     need_threadblock_swizzle_h_ = true;

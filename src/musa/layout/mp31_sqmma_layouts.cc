@@ -31,13 +31,15 @@ Layout MakeMP31SQMMASharedAB(const tirx::Buffer &buffer, bool k_major) {
       << buffer->shape.size();
 
   const int element_size = buffer->dtype.bits();
-  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
+  ICHECK(element_size == 4 || element_size == 8 || element_size == 16 ||
+         element_size == 32)
       << "Unsupported MP31 SQMMA shared layout with element_size="
       << element_size;
 
   const SwizzleGranularity sg =
-      k_major ? SwizzleGranularity::k16B
-              : static_cast<SwizzleGranularity>(element_size * 2);
+      (k_major || element_size <= 8)
+          ? SwizzleGranularity::k16B
+          : static_cast<SwizzleGranularity>(element_size * 2);
   const SwizzleLayout swizzle{sg, SwizzleStride::k256B, SwizzleLine::k256B};
   return MakeSwizzleLayout(buffer, swizzle);
 }

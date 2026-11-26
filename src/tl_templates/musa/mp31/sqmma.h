@@ -14,6 +14,7 @@ struct tf32 {};
 struct s8 {};
 struct s32 {};
 struct u8 {};
+struct s4 {};
 struct e4m3 {};
 struct e5m2 {};
 
@@ -61,6 +62,12 @@ template <> struct type_traits<u8> {
   static constexpr int element_bits = 8;
 };
 
+template <> struct type_traits<s4> {
+  using element_type = mtmusa::experimental::precision::s4;
+  using storage_type = signed char;
+  static constexpr int element_bits = 4;
+};
+
 template <> struct type_traits<e4m3> {
   using element_type = __mt_fp8_e4m3;
   using storage_type = __mt_fp8_e4m3;
@@ -90,12 +97,21 @@ offset_pointer(const void *base, int element_offset) {
   return reinterpret_cast<const DescriptorPointer *>(storage + element_offset);
 }
 
+template <>
+TL_DEVICE const typename descriptor_pointer_traits<s4>::type *
+offset_pointer<s4>(const void *base, int element_offset) {
+  using DescriptorPointer = typename descriptor_pointer_traits<s4>::type;
+  const auto *bytes = reinterpret_cast<const signed char *>(base);
+  return reinterpret_cast<const DescriptorPointer *>(bytes +
+                                                     (element_offset / 2));
+}
+
 constexpr int kMaxLeadingStrideBytes = 256;
 
-constexpr int panel_extent(int contiguous_extent, int element_bytes) {
-  return contiguous_extent * element_bytes <= kMaxLeadingStrideBytes
+constexpr int panel_extent_bits(int contiguous_extent, int element_bits) {
+  return contiguous_extent * element_bits <= kMaxLeadingStrideBytes * 8
              ? contiguous_extent
-             : kMaxLeadingStrideBytes / element_bytes;
+             : (kMaxLeadingStrideBytes * 8) / element_bits;
 }
 
 TL_DEVICE int panelized_offset(int outer, int contiguous, int outer_extent,
@@ -115,6 +131,42 @@ get_swizzle_granularity(bool k_major) {
   return element_bits == 32   ? mtmusa::sqmma::sg_64_byte
          : element_bits == 16 ? mtmusa::sqmma::sg_32_byte
                               : mtmusa::sqmma::sg_16_byte;
+}
+
+template <typename Tag> struct desc_maker {
+  template <typename Desc>
+  static TL_DEVICE void make(Desc &desc, const void *base, int element_offset,
+                             unsigned stride_bytes,
+                             mtmusa::sqmma::swizzle_granularity swizzle,
+                             mtmusa::sqmma::swizzle_stride ss) {
+    mtmusa::sqmma::make_sqmma_desc(desc, offset_pointer<Tag>(base, element_offset),
+                                   stride_bytes, swizzle, ss);
+  }
+};
+
+template <> struct desc_maker<s4> {
+  template <typename Desc>
+  static TL_DEVICE void make(Desc &desc, const void *base, int element_offset,
+                             unsigned stride_bytes,
+                             mtmusa::sqmma::swizzle_granularity swizzle,
+                             mtmusa::sqmma::swizzle_stride ss) {
+    // MUSA 5.2.0 <crt/sqmma.hpp> routes s4 to __musa_make_sqmma_desc_fp4
+    // (MP32+ only) and __musa_make_sqmma_desc_s4 crashes mcc 5.2.0 on mp_31.
+    // On MP31 the SQMMA descriptor only encodes (smem_byte_addr, stride_bytes,
+    // swizzle_granularity, swizzle_stride), identical to __musa_make_sqmma_desc_s8.
+    const auto *ptr = offset_pointer<s4>(base, element_offset);
+    __musa_make_sqmma_desc_s8(reinterpret_cast<int *>(&desc),
+                              reinterpret_cast<const signed char *>(ptr),
+                              stride_bytes, swizzle, ss);
+  }
+};
+
+template <typename Tag, typename Desc>
+TL_DEVICE void make_desc(Desc &desc, const void *base, int element_offset,
+                         unsigned stride_bytes,
+                         mtmusa::sqmma::swizzle_granularity swizzle,
+                         mtmusa::sqmma::swizzle_stride ss) {
+  desc_maker<Tag>::make(desc, base, element_offset, stride_bytes, swizzle, ss);
 }
 
 } // namespace sqmma
@@ -159,8 +211,10 @@ TL_DEVICE void sqmma_ss(const void *a, const void *b, void *c,
 
   const int a_cols = stride_a;
   const int b_cols = stride_b;
-  const int a_panel_cols = sqmma::panel_extent(a_cols, sizeof(AStorage));
-  const int b_panel_cols = sqmma::panel_extent(b_cols, sizeof(BStorage));
+  constexpr int kAElementBits = sqmma::type_traits<ATag>::element_bits;
+  constexpr int kBElementBits = sqmma::type_traits<BTag>::element_bits;
+  const int a_panel_cols = sqmma::panel_extent_bits(a_cols, kAElementBits);
+  const int b_panel_cols = sqmma::panel_extent_bits(b_cols, kBElementBits);
 
   const int squad_id = static_cast<int>(threadIdx.x) / kSquadThreads;
   const int squad_m = squad_id % kSquadM;
@@ -175,11 +229,11 @@ TL_DEVICE void sqmma_ss(const void *a, const void *b, void *c,
   const bool a_panelized = a_cols > a_panel_cols;
   const bool b_panelized = b_cols > b_panel_cols;
   const unsigned stride_a_bytes =
-      (a_panelized ? a_panel_cols : stride_a) * sizeof(AStorage);
+      ((a_panelized ? a_panel_cols : stride_a) * kAElementBits) / 8;
   const unsigned stride_b_bytes =
-      (b_panelized ? b_panel_cols : stride_b) * sizeof(BStorage);
-  const auto *a_base = reinterpret_cast<const AStorage *>(a);
-  const auto *b_base = reinterpret_cast<const BStorage *>(b);
+      ((b_panelized ? b_panel_cols : stride_b) * kBElementBits) / 8;
+  const void *a_base = a;
+  const void *b_base = b;
   auto *c_base = reinterpret_cast<CElement *>(c);
 
 #pragma unroll
@@ -214,12 +268,10 @@ TL_DEVICE void sqmma_ss(const void *a, const void *b, void *c,
 
         mt::sqmmadesc<mt::desc_a, AElement> a_desc;
         mt::sqmmadesc<mt::desc_b, BElement> b_desc;
-        mt::make_sqmma_desc(a_desc,
-                            sqmma::offset_pointer<ATag>(a_base, a_offset),
-                            stride_a_bytes, a_swizzle, mt::ss_256_byte);
-        mt::make_sqmma_desc(b_desc,
-                            sqmma::offset_pointer<BTag>(b_base, b_offset),
-                            stride_b_bytes, b_swizzle, mt::ss_256_byte);
+        sqmma::make_desc<ATag>(a_desc, a_base, a_offset, stride_a_bytes,
+                               a_swizzle, mt::ss_256_byte);
+        sqmma::make_desc<BTag>(b_desc, b_base, b_offset, stride_b_bytes,
+                               b_swizzle, mt::ss_256_byte);
         // MTCC maps init_none to scale_d=0 (clear) and init_zero to
         // scale_d=1 (accumulate the input C fragment).
         const auto scale_out =

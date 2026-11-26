@@ -25,6 +25,7 @@ _DTYPE_TO_SQMMA_TAG = {
     "int8": "s8",
     "int32": "s32",
     "uint8": "u8",
+    "int4": "s4",
     "float8_e4m3": "e4m3",
     "float8_e4m3fn": "e4m3",
     "float8_e5m2": "e5m2",

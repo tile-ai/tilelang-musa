@@ -27,6 +27,7 @@ def _make_swizzle_kernel(order):
     [
         ("row", "rasterization2DRow"),
         ("column", "rasterization2DColumn"),
+        ("hilbert", "rasterization2DHilbert"),
     ],
 )
 @tilelang.testing.requires_musa
@@ -45,7 +46,7 @@ def test_musa_common_threadblock_swizzle_codegen(order, helper):
     assert f"tl::{helper}<{_PANEL_SIZE}>()" in source
 
 
-@pytest.mark.parametrize("order", ["row", "column"])
+@pytest.mark.parametrize("order", ["row", "column", "hilbert"])
 @tilelang.testing.requires_musa
 def test_musa_common_threadblock_swizzle_runtime(order):
     kernel = tilelang.compile(

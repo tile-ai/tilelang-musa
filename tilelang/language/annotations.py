@@ -27,12 +27,14 @@ __all__ = [
 WSID = "tl.ws_op_id"
 
 
-def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
+def use_swizzle(panel_size: int = 8, order: str = "row", enable: bool = True):
     """Annotate a kernel to use a specific threadblock swizzle pattern."""
     if order == "row":
         device_func = "rasterization2DRow"
     elif order == "column":
         device_func = "rasterization2DColumn"
+    elif order == "hilbert":
+        device_func = "rasterization2DHilbert"
     elif order == "mlx":
         device_func = "rasterization2DMLX"
     else:
