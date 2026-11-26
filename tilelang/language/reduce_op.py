@@ -18,7 +18,7 @@ def _legalize_dim(buffer: tirx.Buffer, dim: int):
 
 _REDUCE_OP_KEY = "tl.tileop.reduce"
 
-ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor"]
+ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "prod", "bitand", "bitor", "bitxor"]
 
 
 # NOTE(chaofan): T.reduce is implemented as a macro, so no return
@@ -257,6 +257,14 @@ def reduce_sum(
     """
     dim = _legalize_dim(buffer, dim)
     reduce(buffer, out, "sum", dim, clear, batch=batch, annotations=annotations)
+
+
+def reduce_prod(
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
+    """Perform reduce product on input buffer, store the result to output buffer."""
+    dim = _legalize_dim(buffer, dim)
+    reduce(buffer, out, "prod", dim, clear, batch=batch, annotations=annotations)
 
 
 def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: int = 1, annotations: dict | None = None) -> None:

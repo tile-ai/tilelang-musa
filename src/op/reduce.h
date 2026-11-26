@@ -27,6 +27,7 @@ enum class ReduceTypeEnum : uint8_t {
   kBitAnd, ///< Bitwise and reduction
   kBitOr,  ///< Bitwise or reduction
   kBitXor, ///< Bitwise xor reduction
+  kProd,   ///< Product reduction (identity is 1)
 };
 
 /// Node class representing a reduction type
@@ -49,6 +50,7 @@ public:
   bool IsBitAnd() const { return type == int(ReduceTypeEnum::kBitAnd); }
   bool IsBitOr() const { return type == int(ReduceTypeEnum::kBitOr); }
   bool IsBitXor() const { return type == int(ReduceTypeEnum::kBitXor); }
+  bool IsProd() const { return type == int(ReduceTypeEnum::kProd); }
 };
 
 /// Wrapper class for reduction type with string-based construction
@@ -74,6 +76,8 @@ public:
       node->type = int(ReduceTypeEnum::kBitOr);
     } else if (type == "bitxor") {
       node->type = int(ReduceTypeEnum::kBitXor);
+    } else if (type == "prod" || type == "product") {
+      node->type = int(ReduceTypeEnum::kProd);
     } else {
       LOG(FATAL) << "Invalid reduce type: " << type;
     }
