@@ -143,7 +143,7 @@ def test_musa_reduce_template_codegen():
 
     assert reduce_artifact.kernel_source is not None
     assert "#include <tl_templates/musa/common/reduce.h>" in reduce_artifact.kernel_source
-    assert "tl::AllReduce<tl::SumOp" in reduce_artifact.kernel_source
+    assert "tl::WarpFirstAllReduce<tl::SumOp" in reduce_artifact.kernel_source
 
 
 @tilelang.testing.requires_musa
@@ -235,3 +235,148 @@ def test_musa_reduce_sum_runtime_values(dtype):
     torch.musa.synchronize()
 
     torch.testing.assert_close(out.cpu(), x_cpu.sum(dim=1), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [T.float32, T.int64])
+@tilelang.testing.requires_musa
+def test_musa_reduce_prod_runtime_values(dtype):
+    @T.prim_func
+    def kernel_fn(
+        X: T.Tensor((1, 256), dtype),
+        Out: T.Tensor((1,), dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            xf = T.alloc_fragment((1, 256), dtype)
+            of = T.alloc_fragment((1,), dtype)
+            for i, j in T.Parallel(1, 256):
+                xf[i, j] = X[i, j]
+            T.reduce_prod(xf, of, dim=1)
+            for i in T.Parallel(1):
+                Out[i] = of[i]
+
+    tilelang.disable_cache()
+    kernel = tilelang.compile(
+        kernel_fn,
+        out_idx=[1],
+        target={"kind": "musa"},
+        execution_backend="tvm_ffi",
+    )
+    src = kernel.get_kernel_source()
+    assert "tl::WarpFirstAllReduce<tl::ProdOp" in src
+    assert "tl::SumOp" not in src
+
+    if dtype == T.float32:
+        x_cpu = (1.0 + 0.002 * ((torch.arange(256, dtype=torch.float32) % 7) - 3)).reshape(1, 256)
+        out = kernel(x_cpu.to("musa")).cpu()
+        torch.musa.synchronize()
+        torch.testing.assert_close(out, x_cpu.prod(dim=1), atol=1e-4, rtol=1e-4)
+    else:
+        vals = torch.ones(256, dtype=torch.int64)
+        vals[0] = 3
+        vals[63] = -2
+        vals[129] = 5
+        vals[255] = 7
+        x_cpu = vals.reshape(1, 256)
+        out = kernel(x_cpu.to("musa")).cpu()
+        torch.musa.synchronize()
+        torch.testing.assert_close(out, x_cpu.prod(dim=1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_musa
+def test_musa_reduce_subblock_multiwarp():
+    @T.prim_func
+    def kernel_fn(
+        X: T.Tensor((4, 256), "float32"),
+        OutSum: T.Tensor((4,), "float32"),
+        OutMax: T.Tensor((4,), "float32"),
+    ):
+        with T.Kernel(1, threads=256):
+            xf = T.alloc_fragment((4, 256), "float32")
+            sf = T.alloc_fragment((4,), "float32")
+            mf = T.alloc_fragment((4,), "float32")
+            for i, j in T.Parallel(4, 256):
+                xf[i, j] = X[i, j]
+            T.reduce_sum(xf, sf, dim=1)
+            T.reduce_max(xf, mf, dim=1)
+            for i in T.Parallel(4):
+                OutSum[i] = sf[i]
+                OutMax[i] = mf[i]
+
+    tilelang.disable_cache()
+    kernel = tilelang.compile(
+        kernel_fn,
+        out_idx=[1, 2],
+        target={"kind": "musa"},
+        execution_backend="tvm_ffi",
+    )
+    src = kernel.get_kernel_source()
+    assert "tl::WarpFirstAllReduce<tl::SumOp, 64, 1, 0>" in src
+    assert "tl::WarpFirstAllReduce<tl::MaxOp, 64, 1, 0>" in src
+
+    x_cpu = torch.randn(4, 256, dtype=torch.float32)
+    out_sum, out_max = kernel(x_cpu.to("musa"))
+    torch.musa.synchronize()
+    torch.testing.assert_close(out_sum.cpu(), x_cpu.sum(dim=1), atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(out_max.cpu(), x_cpu.max(dim=1).values, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_musa
+def test_musa_reduce_scaled_warp_first_2d():
+    @T.prim_func
+    def kernel_fn(
+        X: T.Tensor((128, 128), "float32"),
+        Out: T.Tensor((1,), "float32"),
+    ):
+        with T.Kernel(1, threads=256):
+            xf = T.alloc_fragment((128, 128), "float32")
+            row_max = T.alloc_fragment((128,), "float32")
+            blk_max = T.alloc_fragment((1,), "float32")
+            for i, j in T.Parallel(128, 128):
+                xf[i, j] = X[i, j]
+            T.reduce_absmax(xf, row_max, dim=1)
+            T.reduce_max(row_max, blk_max, dim=0)
+            Out[0] = blk_max[0]
+
+    tilelang.disable_cache()
+    kernel = tilelang.compile(
+        kernel_fn,
+        out_idx=[1],
+        target={"kind": "musa"},
+        execution_backend="tvm_ffi",
+    )
+    src = kernel.get_kernel_source()
+    assert "tl::WarpFirstAllReduce<tl::MaxOp, 256, 32, 0>" in src
+
+    x_cpu = torch.randn(128, 128, dtype=torch.float32)
+    out = kernel(x_cpu.to("musa")).cpu()
+    torch.musa.synchronize()
+    torch.testing.assert_close(out, x_cpu.abs().max().reshape(1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_musa
+def test_musa_reduce_back_to_back_loop_race_free():
+    @T.prim_func
+    def kernel_fn(
+        X: T.Tensor((8, 1024), "float32"),
+        Out: T.Tensor((8,), "float32"),
+    ):
+        with T.Kernel(1, threads=256):
+            xf = T.alloc_fragment((1024,), "float32")
+            sf = T.alloc_fragment((1,), "float32")
+            for step in T.serial(8):
+                for j in T.Parallel(1024):
+                    xf[j] = X[step, j]
+                T.reduce_sum(xf, sf, dim=0)
+                Out[step] = sf[0]
+
+    tilelang.disable_cache()
+    kernel = tilelang.compile(
+        kernel_fn,
+        out_idx=[1],
+        target={"kind": "musa"},
+        execution_backend="tvm_ffi",
+    )
+    x_cpu = torch.randn(8, 1024, dtype=torch.float32)
+    out = kernel(x_cpu.to("musa")).cpu()
+    torch.musa.synchronize()
+    torch.testing.assert_close(out, x_cpu.sum(dim=1), atol=1e-3, rtol=1e-3)

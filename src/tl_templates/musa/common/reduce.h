@@ -32,6 +32,12 @@ struct SumOp {
   }
 };
 
+struct ProdOp {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return x * y;
+  }
+};
+
 struct MaxOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return x > y ? x : y;
@@ -210,6 +216,106 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
 template <typename T> TL_DEVICE T warp_reduce_sum(T value) {
   return warp_reduce<T>(value, SumOp());
 }
+
+template <typename T> TL_DEVICE T warp_reduce_prod(T value) {
+  return warp_reduce<T>(value, ProdOp());
+}
+
+// Warp-first multi-warp AllReduce supporting:
+//   - Full-block and sub-block multi-warp groups (all_threads % threads == 0),
+//   - Arbitrary power-of-two scale <= warp_size (1, 2, 4, 8, 16, 32),
+//   - Divergence-free, race-free back-to-back invocations using only 2 barriers.
+template <class Reducer, int threads, int scale = 1, int thread_offset = 0,
+          class Barrier = SyncThreadsBarrier, int batch_size = 1,
+          int workspace_stride = 0>
+struct WarpFirstAllReduce {
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ <= 220)
+  static constexpr int warp_size = 128;
+#else
+  static constexpr int warp_size = 32;
+#endif
+  static constexpr int num_warps = threads / warp_size;
+
+  static_assert(threads > warp_size,
+                "WarpFirstAllReduce requires more than one warp");
+  static_assert(threads % warp_size == 0,
+                "WarpFirstAllReduce threads must be warp aligned");
+  static_assert(scale > 0 && scale <= warp_size,
+                "WarpFirstAllReduce requires 0 < scale <= warp_size");
+  static_assert((scale & (scale - 1)) == 0,
+                "WarpFirstAllReduce scale must be a power of two");
+  static_assert(num_warps <= 32,
+                "WarpFirstAllReduce cross-warp reduction exceeds mask width");
+  static_assert((num_warps & (num_warps - 1)) == 0,
+                "WarpFirstAllReduce warp count must be a power of two");
+  static_assert(batch_size == 1 || workspace_stride > 0,
+                "WarpFirstAllReduce batched workspace must have a stride");
+
+  template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
+    const int local_thread = static_cast<int>(threadIdx.x) - thread_offset;
+    const int group_id = local_thread / threads;
+    const int tid_in_group = local_thread % threads;
+    const int warp_in_group = tid_in_group / warp_size;
+    const int lane = tid_in_group % warp_size;
+    T *group_buf = red_buf + group_id * threads;
+
+#pragma unroll
+    for (int offset = warp_size / 2; offset >= scale; offset >>= 1) {
+      x = Reducer()(x, tl::shfl_xor_sync(0xffffffffu, x, offset));
+    }
+
+    if (lane < scale) {
+      group_buf[warp_in_group * scale + lane] = x;
+    }
+    Barrier::template sync<1>();
+
+    const int sub_lane = lane & (scale - 1);
+    T total = group_buf[sub_lane];
+#pragma unroll
+    for (int w = 1; w < num_warps; ++w) {
+      total = Reducer()(total, group_buf[w * scale + sub_lane]);
+    }
+    Barrier::template sync<2>();
+    return total;
+  }
+
+  template <typename T>
+  static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
+    const int local_thread = static_cast<int>(threadIdx.x) - thread_offset;
+    const int group_id = local_thread / threads;
+    const int tid_in_group = local_thread % threads;
+    const int warp_in_group = tid_in_group / warp_size;
+    const int lane = tid_in_group % warp_size;
+    const int group_base = group_id * threads;
+
+#pragma unroll
+    for (int i = 0; i < batch_size; ++i) {
+      T val = x[i];
+#pragma unroll
+      for (int offset = warp_size / 2; offset >= scale; offset >>= 1) {
+        val = Reducer()(val, tl::shfl_xor_sync(0xffffffffu, val, offset));
+      }
+      if (lane < scale) {
+        red_buf[i * workspace_stride + group_base + warp_in_group * scale +
+                lane] = val;
+      }
+    }
+    Barrier::template sync<1>();
+
+    const int sub_lane = lane & (scale - 1);
+#pragma unroll
+    for (int i = 0; i < batch_size; ++i) {
+      T *group_buf = red_buf + i * workspace_stride + group_base;
+      T total = group_buf[sub_lane];
+#pragma unroll
+      for (int w = 1; w < num_warps; ++w) {
+        total = Reducer()(total, group_buf[w * scale + sub_lane]);
+      }
+      x[i] = total;
+    }
+    Barrier::template sync<2>();
+  }
+};
 
 template <typename T> TL_DEVICE T warp_reduce_max(T value) {
   return warp_reduce<T>(value, MaxOp());

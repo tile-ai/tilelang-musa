@@ -32,6 +32,12 @@ struct SumOp {
   }
 };
 
+struct ProdOp {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return x * y;
+  }
+};
+
 struct MaxOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return tl::fast_max(x, y);

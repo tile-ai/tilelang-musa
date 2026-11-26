@@ -251,6 +251,8 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
     }
   } else if (op.type->IsBitOr() || op.type->IsBitXor()) {
     scalar = make_zero(op.dst->dtype);
+  } else if (op.type->IsProd()) {
+    scalar = make_const(op.dst->dtype, 1);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     scalar = PrimExpr();
@@ -298,6 +300,8 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
       return acc | rhs;
     } else if (op.type->IsBitXor()) {
       return acc ^ rhs;
+    } else if (op.type->IsProd()) {
+      return acc * rhs;
     }
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     return PrimExpr();
@@ -342,6 +346,8 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
       return "tl::BitOrOp";
     if (op.type->IsBitXor())
       return "tl::BitXorOp";
+    if (op.type->IsProd())
+      return "tl::ProdOp";
     LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
     return "";
   }();
@@ -635,6 +641,8 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
   } else if (op.type->IsMin()) {
     return use_nan_op ? Call(dst_val.dtype(), tl::min_nan(), {dst_val, src_val})
                       : PrimExpr(Min(dst_val, src_val));
+  } else if (op.type->IsProd()) {
+    return dst_val * src_val;
   }
   LOG(FATAL) << "Unsupported reduce type: " << op.type->type;
   return PrimExpr();
@@ -822,14 +830,15 @@ template <typename Impl> struct ReduceLowerer {
 
       auto require_init = op.clear;
       if (op.type->IsSum() || op.type->IsAbsSum() || op.type->IsBitAnd() ||
-          op.type->IsBitOr() || op.type->IsBitXor()) {
+          op.type->IsBitOr() || op.type->IsBitXor() || op.type->IsProd()) {
         require_init = true;
       }
 
       auto clear_buffer = dst_buffer;
       auto need_duplicate = false;
       auto need_update = false;
-      if ((op.type->IsSum() || op.type->IsAbsSum()) && !op.clear) {
+      if ((op.type->IsSum() || op.type->IsAbsSum() || op.type->IsProd()) &&
+          !op.clear) {
         need_duplicate = true;
         need_update = true;
       } else if (op.type->IsBitAnd() && !op.clear) {
