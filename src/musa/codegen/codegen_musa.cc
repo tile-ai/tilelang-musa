@@ -949,11 +949,17 @@ void CodeGenMUSA::PrintVecElemStore(const std::string &vec, DataType t, int i,
     } else {
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       stream << ac << "=";
-      // Do not read the first undef lane.
-      if (i != 0) {
-        stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
+      // Do not read the first undef lane of each 4-byte packed word.
+      if (i % 4 != 0) {
+        stream << "static_cast<int>(static_cast<unsigned int>(" << ac
+               << ") & ~(0x000000ffu << " << i % 4 * 8 << ") | ";
       }
-      stream << "(" << value << " << " << i % 4 * 8 << ");\n";
+      stream << "(static_cast<unsigned int>(static_cast<unsigned char>("
+             << value << ")) << " << i % 4 * 8 << ")";
+      if (i % 4 != 0) {
+        stream << ")";
+      }
+      stream << ";\n";
     }
   } else if (t.is_float16()) {
     if (t.lanes() <= 4) {

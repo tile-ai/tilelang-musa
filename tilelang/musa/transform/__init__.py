@@ -35,3 +35,4 @@ __all__ = [
     "LowerPartialThreadSync",
     "ProducerConsumerWarpSpecialized",
 ]
+from .membound_opt import optimize_musa_membound  # noqa: F401
