@@ -198,6 +198,18 @@ SwizzleLayout GetSwizzleParams(const Buffer &shared_buffer,
 
 constexpr int kSQMMAMaxLeadingStrideBytes = 256;
 
+bool IsSubByte4Bit(DataType dtype) {
+  return (dtype.is_int() || dtype.is_uint()) && dtype.bits() == 4;
+}
+
+PrimExpr ComputeByteCount(const PrimExpr &elements, DataType dtype,
+                          arith::Analyzer *analyzer) {
+  if (IsSubByte4Bit(dtype)) {
+    return analyzer->Simplify(FloorDiv(elements, Integer(2)));
+  }
+  return analyzer->Simplify(elements * dtype.bytes());
+}
+
 std::optional<int> GetPanelizedCols(const Buffer &shared_buffer,
                                     const LowerArgs &args) {
   if (!IsSharedBuffer(shared_buffer) || shared_buffer->shape.size() < 2) {
@@ -210,12 +222,12 @@ std::optional<int> GetPanelizedCols(const Buffer &shared_buffer,
   const int64_t *cols = as_const_int(shared_buffer->shape.back());
   ICHECK(cols != nullptr)
       << "MP31 SQMMA panelized layout requires a constant continuous extent";
-  const int element_bytes = shared_buffer->dtype.bytes();
-  ICHECK_GT(element_bytes, 0);
-  if (*cols * element_bytes <= kSQMMAMaxLeadingStrideBytes) {
+  const int element_bits = shared_buffer->dtype.bits();
+  ICHECK_GT(element_bits, 0);
+  if (*cols * element_bits <= kSQMMAMaxLeadingStrideBytes * 8) {
     return std::nullopt;
   }
-  const int panel_cols = kSQMMAMaxLeadingStrideBytes / element_bytes;
+  const int panel_cols = (kSQMMAMaxLeadingStrideBytes * 8) / element_bits;
   ICHECK_GT(panel_cols, 0);
   ICHECK_EQ(*cols % panel_cols, 0)
       << "MP31 SQMMA continuous extent must be divisible by its 256-byte "
@@ -292,9 +304,10 @@ PrimExpr GetTmaBarrier(const CopyNode &op) {
 }
 
 int GetTmaDescriptorDataType(DataType dtype) {
-  // MUSA TME descriptors have no native FP8 data type. FP8 values are
-  // byte-preserving for TME, so describe them as UINT8 in the descriptor.
-  if (dtype.is_float8()) {
+  // MUSA TME descriptors have no native FP8 or 4-bit data type. Both are
+  // byte-preserving for TME (with 4-bit packed as 2 elements per byte along
+  // the innermost dimension), so describe them as UINT8 in the descriptor.
+  if (dtype.is_float8() || IsSubByte4Bit(dtype)) {
     return kDescUInt8;
   }
   if (dtype.is_bfloat16()) {
@@ -424,8 +437,8 @@ bool TmaDescriptorSupportsDataType(DataType dtype) {
     return dtype.bits() == 16 || dtype.bits() == 32 || dtype.bits() == 64;
   }
   if (dtype.is_int() || dtype.is_uint()) {
-    return dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32 ||
-           dtype.bits() == 64;
+    return dtype.bits() == 4 || dtype.bits() == 8 || dtype.bits() == 16 ||
+           dtype.bits() == 32 || dtype.bits() == 64;
   }
   return false;
 }
@@ -434,7 +447,13 @@ std::optional<Array<PrimExpr>>
 GetTmaGlobalStrideBytes(const Buffer &global_buffer,
                         arith::Analyzer *analyzer) {
   const size_t rank = global_buffer->shape.size();
+  const bool subbyte4 = IsSubByte4Bit(global_buffer->dtype);
   Array<PrimExpr> global_shape = Reverse(global_buffer->shape);
+  if (subbyte4 &&
+      !analyzer->CanProveEqual(FloorMod(global_shape[0], Integer(2)),
+                               Integer(0))) {
+    return std::nullopt;
+  }
   Array<PrimExpr> global_stride;
   if (!global_buffer->strides.empty()) {
     global_stride = Reverse(global_buffer->strides);
@@ -453,8 +472,21 @@ GetTmaGlobalStrideBytes(const Buffer &global_buffer,
   Array<PrimExpr> result;
   result.reserve(rank);
   for (size_t i = 0; i < rank; ++i) {
-    PrimExpr stride =
-        analyzer->Simplify(global_stride[i] * global_buffer->dtype.bytes());
+    PrimExpr stride;
+    if (subbyte4) {
+      if (i == 0) {
+        stride = Integer(1);
+      } else {
+        if (!analyzer->CanProveEqual(FloorMod(global_stride[i], Integer(2)),
+                                     Integer(0))) {
+          return std::nullopt;
+        }
+        stride = analyzer->Simplify(FloorDiv(global_stride[i], Integer(2)));
+      }
+    } else {
+      stride =
+          analyzer->Simplify(global_stride[i] * global_buffer->dtype.bytes());
+    }
     if (i != 0) {
       if (const auto *imm = stride.as<IntImmNode>()) {
         if (imm->value % 16 != 0) {
@@ -479,8 +511,21 @@ bool CanLowerTmeTensorCopy(const Buffer &global_buffer,
   }
 
   Array<Range> aligned_shared_range;
-  return AlignTmeSharedRangeToGlobal(global_range, shared_range, analyzer,
-                                     &aligned_shared_range);
+  if (!AlignTmeSharedRangeToGlobal(global_range, shared_range, analyzer,
+                                   &aligned_shared_range)) {
+    return false;
+  }
+  if (IsSubByte4Bit(global_buffer->dtype)) {
+    // Packed 4-bit tensors describe 2 elements per UINT8 byte along the
+    // innermost dimension, so require even start coordinate and 32-element
+    // (16-byte) aligned innermost box width.
+    return analyzer->CanProveEqual(
+               FloorMod(global_range.back()->min, Integer(2)), Integer(0)) &&
+           analyzer->CanProveEqual(
+               FloorMod(aligned_shared_range.back()->extent, Integer(32)),
+               Integer(0));
+  }
+  return true;
 }
 
 bool CanAutoSelectTmeStore(const CopyNode &op, const CopyAnalysisContext &ctx) {
@@ -550,10 +595,24 @@ LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
   ICHECK(is_one(global_stride[0]))
       << "MP31 TME load requires a contiguous innermost global dimension";
 
+  const bool subbyte4 = IsSubByte4Bit(global_buffer->dtype);
   Array<PrimExpr> global_stride_bytes;
   for (size_t i = 0; i < rank; ++i) {
-    PrimExpr stride =
-        analyzer->Simplify(global_stride[i] * global_buffer->dtype.bytes());
+    PrimExpr stride;
+    if (subbyte4) {
+      if (i == 0) {
+        stride = Integer(1);
+      } else {
+        ICHECK(analyzer->CanProveEqual(FloorMod(global_stride[i], Integer(2)),
+                                       Integer(0)))
+            << "MP31 packed 4-bit TME global stride must be even, got "
+            << global_stride[i];
+        stride = analyzer->Simplify(FloorDiv(global_stride[i], Integer(2)));
+      }
+    } else {
+      stride =
+          analyzer->Simplify(global_stride[i] * global_buffer->dtype.bytes());
+    }
     if (i != 0) {
       if (auto imm = stride.as<IntImmNode>()) {
         ICHECK_EQ(imm->value % 16, 0)
@@ -561,6 +620,25 @@ LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
       }
     }
     global_stride_bytes.push_back(cast(DataType::UInt(64), stride));
+  }
+
+  if (subbyte4) {
+    ICHECK(analyzer->CanProveEqual(FloorMod(global_shape[0], Integer(2)),
+                                   Integer(0)))
+        << "MP31 packed 4-bit TME innermost global shape must be even, got "
+        << global_shape[0];
+    ICHECK(analyzer->CanProveEqual(FloorMod(global_coords[0], Integer(2)),
+                                   Integer(0)))
+        << "MP31 packed 4-bit TME innermost coordinate must be even, got "
+        << global_coords[0];
+    ICHECK(analyzer->CanProveEqual(FloorMod(box_dims[0], Integer(2)),
+                                   Integer(0)))
+        << "MP31 packed 4-bit TME innermost box extent must be even, got "
+        << box_dims[0];
+    global_shape.Set(0, analyzer->Simplify(FloorDiv(global_shape[0], Integer(2))));
+    global_coords.Set(
+        0, analyzer->Simplify(FloorDiv(global_coords[0], Integer(2))));
+    box_dims.Set(0, analyzer->Simplify(FloorDiv(box_dims[0], Integer(2))));
   }
 
   Array<PrimExpr> smem_stride;
@@ -735,7 +813,7 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
         analyzer->CanProveEqual(global_region.elements, shared_region.elements))
         << "Runtime-pointer TME requires matching source/shared extents";
     PrimExpr bytes =
-        analyzer->Simplify(global_region.elements * op.src->dtype.bytes());
+        ComputeByteCount(global_region.elements, op.src->dtype, analyzer);
     PrimExpr global_ptr = op.src.access_ptr(
         /*access_mask=*/1, DataType::Handle(), /*content_lanes=*/1,
         global_region.offset, global_region.elements);
@@ -800,7 +878,7 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
   for (const Range &range : op.dst_range) {
     bytes *= range->extent;
   }
-  bytes = analyzer->Simplify(bytes * op.dst->dtype.bytes());
+  bytes = ComputeByteCount(bytes, op.dst->dtype, analyzer);
   Stmt expect = Evaluate(
       Call(DataType::Handle(), mbarrier_expect_tx(), {barrier, bytes}));
   load = SeqStmt({expect, load});
@@ -842,7 +920,7 @@ Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
         analyzer->CanProveEqual(shared_region.elements, global_region.elements))
         << "Runtime-pointer TME requires matching shared/destination extents";
     PrimExpr bytes =
-        analyzer->Simplify(global_region.elements * op.dst->dtype.bytes());
+        ComputeByteCount(global_region.elements, op.dst->dtype, analyzer);
     PrimExpr global_ptr = op.dst.access_ptr(
         /*access_mask=*/2, DataType::Handle(), /*content_lanes=*/1,
         global_region.offset, global_region.elements);
