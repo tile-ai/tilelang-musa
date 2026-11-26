@@ -1812,9 +1812,11 @@ private:
         producer_stmts.push_back(s);
       }
     }
+    int producer_barrier_groups =
+        can_merge_tma_barriers ? 1 : num_producer_groups;
     if (!has_simt_producer && !has_cp_async_producer &&
-        num_producer_groups > 0) {
-      for (int g = 0; g < num_producer_groups; ++g) {
+        producer_barrier_groups > 0) {
+      for (int g = 0; g < producer_barrier_groups; ++g) {
         int fwd_base = g * num_stages;
         producer_stmts.push_back(MakeArriveBarrier(
             barrier_buf, IntImm(DataType::Int(32), fwd_base) + p_stage_expr));
@@ -1827,7 +1829,7 @@ private:
     if (has_simt_producer || has_cp_async_producer) {
       producer_stmts.push_back(Evaluate(
           Call(DataType::Handle(), builtin::ptx_wait_group(), {Integer(0)})));
-      for (int g = 0; g < num_producer_groups; ++g) {
+      for (int g = 0; g < producer_barrier_groups; ++g) {
         int fwd_base = g * num_stages;
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
         producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
