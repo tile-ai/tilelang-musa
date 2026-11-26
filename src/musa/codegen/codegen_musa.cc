@@ -2667,6 +2667,34 @@ void CodeGenMUSA::PrintVecElemLoadExpr(DataType t, int i,
   return;
 }
 
+void CodeGenMUSA::VisitExpr_(const MinNode *op, std::ostream &os) {
+  DataType t = op->dtype;
+  if (t.is_float() && (t.bits() == 32 || t.bits() == 64)) {
+    const char *fn = t.bits() == 32 ? "fminf" : "fmin";
+    if (t.is_scalar()) {
+      os << fn << "(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    } else {
+      PrintVecBinaryOp(fn, t, op->a, op->b, os);
+    }
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenMUSA::VisitExpr_(const MaxNode *op, std::ostream &os) {
+  DataType t = op->dtype;
+  if (t.is_float() && (t.bits() == 32 || t.bits() == 64)) {
+    const char *fn = t.bits() == 32 ? "fmaxf" : "fmax";
+    if (t.is_scalar()) {
+      os << fn << "(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    } else {
+      PrintVecBinaryOp(fn, t, op->a, op->b, os);
+    }
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
 std::string MTCompile(const std::string &code, const Target &target) {
   static std::atomic<uint64_t> counter{0};
 
@@ -2713,6 +2741,12 @@ std::string MTCompile(const std::string &code, const Target &target) {
   }
   args.push_back("--cuda-device-only");
   args.push_back("--cuda-gpu-arch=" + std::string(arch.value()));
+
+  auto pass_ctx = tvm::transform::PassContext::Current();
+  if (pass_ctx.defined() &&
+      pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value()) {
+    args.push_back("-ffast-math");
+  }
 
   if (const char *extra_env = std::getenv("TVM_MUSA_FLAGS")) {
     std::istringstream flags_stream(extra_env);
