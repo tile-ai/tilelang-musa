@@ -37,15 +37,34 @@ PrimExpr MakeSwizzledLinearIndex(PrimExpr row, PrimExpr col, int rows, int cols,
     panel = FloorDiv(col, panel_cols);
     col_in_panel = FloorMod(col, panel_cols);
   }
-  PrimExpr addr = (row * panel_cols + col_in_panel) * element_bytes;
-  PrimExpr line_id = FloorDiv(addr, sl);
-  PrimExpr line_offset = FloorMod(addr, sl);
-  PrimExpr cycle_line_id = FloorMod(line_id, ss / sg);
-  PrimExpr granule_id = FloorDiv(line_offset, sg);
-  PrimExpr granule_offset = FloorMod(line_offset, sg);
-  PrimExpr target_granule_id = granule_id ^ cycle_line_id;
-  PrimExpr target_addr = line_id * sl + target_granule_id * sg + granule_offset;
-  PrimExpr target_linear = FloorDiv(target_addr, element_bytes);
+  PrimExpr target_linear;
+  if (sl % element_bytes == 0 && sg % element_bytes == 0) {
+    // Express the swizzle directly in element units so the contiguous
+    // intra-granule offset stays outside FloorDiv/bitwise_xor and remains
+    // transparent to TVM's vectorization analyzer.
+    const int line_elems = sl / element_bytes;
+    const int granule_elems = sg / element_bytes;
+    PrimExpr linear = row * panel_cols + col_in_panel;
+    PrimExpr line_id = FloorDiv(linear, line_elems);
+    PrimExpr line_offset = FloorMod(linear, line_elems);
+    PrimExpr cycle_line_id = FloorMod(line_id, ss / sg);
+    PrimExpr granule_id = FloorDiv(line_offset, granule_elems);
+    PrimExpr granule_offset = FloorMod(line_offset, granule_elems);
+    PrimExpr target_granule_id = granule_id ^ cycle_line_id;
+    target_linear = line_id * line_elems + target_granule_id * granule_elems +
+                    granule_offset;
+  } else {
+    PrimExpr addr = (row * panel_cols + col_in_panel) * element_bytes;
+    PrimExpr line_id = FloorDiv(addr, sl);
+    PrimExpr line_offset = FloorMod(addr, sl);
+    PrimExpr cycle_line_id = FloorMod(line_id, ss / sg);
+    PrimExpr granule_id = FloorDiv(line_offset, sg);
+    PrimExpr granule_offset = FloorMod(line_offset, sg);
+    PrimExpr target_granule_id = granule_id ^ cycle_line_id;
+    PrimExpr target_addr =
+        line_id * sl + target_granule_id * sg + granule_offset;
+    target_linear = FloorDiv(target_addr, element_bytes);
+  }
   if (panel_cols != cols) {
     target_linear = target_linear + panel * rows * panel_cols;
   }
