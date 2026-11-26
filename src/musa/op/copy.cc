@@ -479,8 +479,19 @@ bool CanLowerTmeTensorCopy(const Buffer &global_buffer,
   }
 
   Array<Range> aligned_shared_range;
-  return AlignTmeSharedRangeToGlobal(global_range, shared_range, analyzer,
-                                     &aligned_shared_range);
+  if (!AlignTmeSharedRangeToGlobal(global_range, shared_range, analyzer,
+                                   &aligned_shared_range)) {
+    return false;
+  }
+  // MP31 TME hardware requires the innermost box width in bytes to be 16-byte
+  // aligned (in addition to outer global strides being 16-byte aligned).
+  // Reject non-16B-aligned boxes (e.g. 100 fp16 = 200B, or 2 fp32 = 8B) so
+  // auto-selected TME stores/loads cleanly fall back to SIMT copies instead of
+  // failing at runtime with "MUSA error: TME illegal parameters".
+  PrimExpr inner_box_bytes = analyzer->Simplify(
+      aligned_shared_range.back()->extent * global_buffer->dtype.bytes());
+  return analyzer->CanProveEqual(FloorMod(inner_box_bytes, Integer(16)),
+                                 Integer(0));
 }
 
 bool CanAutoSelectTmeStore(const CopyNode &op, const CopyAnalysisContext &ctx) {

@@ -180,3 +180,31 @@ def test_mp31_copy_prefer_sync_forces_simt():
 def test_mp31_copy_rejects_unknown_preference():
     with pytest.raises(tvm.TVMError, match="Unknown copy prefer_instruction"):
         _lower(_copy_invalid_preference)
+
+
+@pytest.mark.parametrize("n,dtype,tdt", [
+    (100, "float16", torch.float16),  # 200B inner box (not 16B-aligned)
+    (2, "float32", torch.float32),    # 8B inner box (not 16B-aligned)
+])
+@tilelang.testing.requires_musa_compute_version_eq(3, 1)
+def test_mp31_copy_auto_tme_store_skips_unaligned_inner_box(n, dtype, tdt):
+    @T.prim_func
+    def _unaligned_store(src: T.Tensor((n,), dtype), dst: T.Tensor((n,), dtype)):
+        with T.Kernel(1, threads=128):
+            smem = T.alloc_shared((n,), dtype)
+            T.copy(src, smem)
+            T.copy(smem, dst)
+
+    artifact = _lower(_unaligned_store)
+    assert "tl::tme_store(" not in artifact.kernel_source
+
+    kernel = tilelang.compile(
+        _unaligned_store,
+        out_idx=[1],
+        target={"kind": "musa", "arch": "mp_31"},
+        execution_backend="tvm_ffi",
+    )
+    src = torch.arange(n, dtype=tdt)
+    dst = kernel(src.to("musa"))
+    torch.musa.synchronize()
+    torch.testing.assert_close(dst.cpu(), src, atol=0, rtol=0)
