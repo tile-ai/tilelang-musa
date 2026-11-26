@@ -417,7 +417,7 @@ struct LoweredTMEDesc {
 };
 
 bool TmaDescriptorSupportsDataType(DataType dtype) {
-  if (dtype.is_bfloat16()) {
+  if (dtype.is_float8() || dtype.is_bfloat16()) {
     return true;
   }
   if (dtype.is_float()) {
