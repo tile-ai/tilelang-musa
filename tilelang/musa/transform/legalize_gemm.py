@@ -21,6 +21,7 @@ _SHARED_SCOPES = ("shared", "shared.dyn")
 
 CONFIG_ENABLE = "tl.enable_musa_legalize_fragment_a_gemm"
 CONFIG_REUSE = "tl.enable_musa_gemm_a_staging_reuse"
+CONFIG_ENABLE_INT8_FP32 = "tl.enable_musa_legalize_int8_fp32_gemm"
 
 
 def _op_name(call) -> str:
@@ -254,8 +255,209 @@ def legalize_fragment_a_gemm(mod, config=None):
     return tvm.IRModule(functions, attrs=mod.attrs)
 
 
+def _needs_int8_fp32_legalize(call: tirx.Call) -> bool:
+    op_name = _op_name(call)
+    if op_name not in _GEMM_OPS:
+        return False
+    if len(call.args) < 10:
+        return False
+    if not (_is_region(call.args[0]) and _is_region(call.args[1]) and _is_region(call.args[2])):
+        return False
+    a_buf = _region_buffer(call.args[0])
+    b_buf = _region_buffer(call.args[1])
+    c_buf = _region_buffer(call.args[2])
+    if a_buf.scope() not in _SHARED_SCOPES or b_buf.scope() not in _SHARED_SCOPES:
+        return False
+    if c_buf.scope() != "local.fragment":
+        return False
+    a_dt = str(a_buf.dtype)
+    b_dt = str(b_buf.dtype)
+    c_dt = str(c_buf.dtype)
+    return a_dt in ("int8", "uint8") and b_dt == a_dt and c_dt == "float32"
+
+
+def _int8_fp32_split(stmt, accum_for):
+    value = getattr(stmt, "value", None)
+    if not isinstance(value, tirx.Call) or not _needs_int8_fp32_legalize(value):
+        return None
+
+    c_region = value.args[2]
+    c_buf = _region_buffer(c_region)
+    c_i32 = accum_for(c_buf)
+    clear_accum = value.args[9]
+
+    new_args = list(value.args)
+    new_args[2] = _retarget_region(c_region, c_i32)
+    new_args[9] = tirx.const(1, "bool")
+    new_gemm = tirx.Call(value.dtype, value.op, new_args, value.annotations)
+
+    # Build T.Parallel epilogue converting int32 SQMMA accumulator into float32 C.
+    c_load = c_region.args[0]
+    base_indices = list(c_load.indices)
+    extents = list(c_region.args[2:])
+    rank = len(base_indices)
+    loop_vars = []
+    idx_exprs = list(base_indices)
+    for axis in range(rank - 2, rank):
+        lv = tirx.Var(f"_i8f32_{axis}", "int32")
+        loop_vars.append((lv, extents[axis]))
+        idx_exprs[axis] = base_indices[axis] + lv
+
+    i32_val = tirx.Cast("float32", tirx.BufferLoad(c_i32, idx_exprs))
+    c_val = tirx.BufferLoad(c_buf, idx_exprs)
+    if isinstance(clear_accum, tirx.IntImm):
+        rhs = i32_val if int(clear_accum.value) != 0 else (c_val + i32_val)
+    else:
+        rhs = tirx.Select(clear_accum, i32_val, c_val + i32_val)
+
+    body = tirx.BufferStore(c_buf, rhs, idx_exprs)
+    for lv, ext in reversed(loop_vars):
+        body = tirx.For(lv, tirx.IntImm("int32", 0), ext, tirx.ForKind.PARALLEL, body)
+
+    return [tirx.Evaluate(new_gemm), body]
+
+
+def _legalize_int8_fp32_func(func, config):
+    if not isinstance(func, tirx.PrimFunc):
+        return func
+
+    accum_by_shape: dict = {}
+    new_buffers: list = []
+
+    def _shape_key(buf):
+        return tuple(int(s) if isinstance(s, tirx.IntImm) else str(s) for s in buf.shape)
+
+    def accum_for(c_buf):
+        key = _shape_key(c_buf)
+        if key in accum_by_shape:
+            return accum_by_shape[key]
+        buf = tirx.decl_buffer(
+            c_buf.shape,
+            "int32",
+            name=f"{c_buf.name}_i32_accum",
+            scope="local.fragment",
+        )
+        accum_by_shape[key] = buf
+        new_buffers.append(buf)
+        return buf
+
+    def preorder(stmt):
+        if isinstance(stmt, tirx.SeqStmt):
+            out = []
+            changed = False
+            for inner in stmt.seq:
+                split = _int8_fp32_split(inner, accum_for)
+                if split is None:
+                    out.append(inner)
+                else:
+                    changed = True
+                    out.extend(split)
+            return tirx.SeqStmt(out) if changed else None
+
+        if isinstance(stmt, tirx.SBlock):
+            split = _int8_fp32_split(stmt.body, accum_for)
+            if split is None:
+                return None
+            return tirx.SBlock(
+                stmt.iter_vars,
+                stmt.reads,
+                stmt.writes,
+                stmt.name_hint,
+                tirx.SeqStmt(split),
+                stmt.init,
+                stmt.alloc_buffers,
+                stmt.match_buffers,
+                stmt.annotations,
+            )
+
+        if isinstance(stmt, tirx.For):
+            split = _int8_fp32_split(stmt.body, accum_for)
+            if split is None:
+                return None
+            return tirx.For(
+                stmt.loop_var,
+                stmt.min,
+                stmt.extent,
+                stmt.kind,
+                tirx.SeqStmt(split),
+                stmt.thread_binding,
+                stmt.annotations,
+            )
+
+        if isinstance(stmt, tirx.AttrStmt):
+            split = _int8_fp32_split(stmt.body, accum_for)
+            if split is None:
+                return None
+            return tirx.AttrStmt(
+                stmt.node,
+                stmt.attr_key,
+                stmt.value,
+                tirx.SeqStmt(split),
+            )
+
+        if isinstance(stmt, tirx.IfThenElse):
+            then_split = _int8_fp32_split(stmt.then_case, accum_for)
+            else_split = (
+                _int8_fp32_split(stmt.else_case, accum_for)
+                if stmt.else_case is not None
+                else None
+            )
+            if then_split is None and else_split is None:
+                return None
+            return tirx.IfThenElse(
+                stmt.condition,
+                tirx.SeqStmt(then_split) if then_split is not None else stmt.then_case,
+                tirx.SeqStmt(else_split) if else_split is not None else stmt.else_case,
+            )
+        return None
+
+    body = tirx.stmt_functor.ir_transform(func.body, preorder, None)
+    if not new_buffers:
+        return func
+
+    placed = False
+
+    def place_allocs(stmt):
+        nonlocal placed
+        if isinstance(stmt, tirx.SBlock) and not placed:
+            placed = True
+            return tirx.SBlock(
+                stmt.iter_vars,
+                stmt.reads,
+                stmt.writes,
+                stmt.name_hint,
+                stmt.body,
+                stmt.init,
+                list(stmt.alloc_buffers) + list(new_buffers),
+                stmt.match_buffers,
+                stmt.annotations,
+            )
+        return None
+
+    body = tirx.stmt_functor.ir_transform(body, place_allocs, None)
+    return tirx.PrimFunc(
+        func.params,
+        body,
+        func.ret_type,
+        func.buffer_map,
+        func.attrs,
+        func.span,
+    )
+
+
+def legalize_int8_fp32_gemm(mod, config=None):
+    """Legalize int8/uint8 SQMMA GEMMs accumulating into float32 via int32 accum + cast."""
+    config = config or {}
+    if not _bool_cfg(config, CONFIG_ENABLE_INT8_FP32, True):
+        return mod
+    functions = {gv: _legalize_int8_fp32_func(func, config) for gv, func in mod.functions.items()}
+    return tvm.IRModule(functions, attrs=mod.attrs)
+
+
 __all__ = [
     "legalize_fragment_a_gemm",
+    "legalize_int8_fp32_gemm",
     "CONFIG_ENABLE",
     "CONFIG_REUSE",
+    "CONFIG_ENABLE_INT8_FP32",
 ]

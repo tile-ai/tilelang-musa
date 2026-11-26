@@ -17,13 +17,15 @@ constexpr int kSQMMAMaxLeadingStrideBytes = 256;
 PrimExpr MakeSwizzledLinearIndex(PrimExpr row, PrimExpr col, int rows, int cols,
                                  int element_size,
                                  const SwizzleLayout &swizzle) {
-  const int element_bytes = element_size / 8;
   const int sg = static_cast<int>(swizzle.swizzle_granularity);
   const int ss = static_cast<int>(swizzle.swizzle_stride);
   const int sl = static_cast<int>(swizzle.swizzle_line);
-  const int panel_cols = cols * element_bytes <= kSQMMAMaxLeadingStrideBytes
+  const int sl_bits = sl * 8;
+  const int sg_bits = sg * 8;
+  const int max_panel_bits = kSQMMAMaxLeadingStrideBytes * 8;
+  const int panel_cols = cols * element_size <= max_panel_bits
                              ? cols
-                             : kSQMMAMaxLeadingStrideBytes / element_bytes;
+                             : max_panel_bits / element_size;
   ICHECK_GT(panel_cols, 0);
   ICHECK_EQ(cols % panel_cols, 0)
       << "MP31 SQMMA swizzled continuous extent must be divisible by its "
@@ -37,15 +39,36 @@ PrimExpr MakeSwizzledLinearIndex(PrimExpr row, PrimExpr col, int rows, int cols,
     panel = FloorDiv(col, panel_cols);
     col_in_panel = FloorMod(col, panel_cols);
   }
-  PrimExpr addr = (row * panel_cols + col_in_panel) * element_bytes;
-  PrimExpr line_id = FloorDiv(addr, sl);
-  PrimExpr line_offset = FloorMod(addr, sl);
-  PrimExpr cycle_line_id = FloorMod(line_id, ss / sg);
-  PrimExpr granule_id = FloorDiv(line_offset, sg);
-  PrimExpr granule_offset = FloorMod(line_offset, sg);
-  PrimExpr target_granule_id = granule_id ^ cycle_line_id;
-  PrimExpr target_addr = line_id * sl + target_granule_id * sg + granule_offset;
-  PrimExpr target_linear = FloorDiv(target_addr, element_bytes);
+  PrimExpr target_linear;
+  if (sl_bits % element_size == 0 && sg_bits % element_size == 0) {
+    // Express the swizzle directly in element units so the contiguous
+    // intra-granule offset stays outside FloorDiv/bitwise_xor and remains
+    // transparent to TVM's vectorization analyzer (and works for sub-byte
+    // 4-bit types as well).
+    const int line_elems = sl_bits / element_size;
+    const int granule_elems = sg_bits / element_size;
+    PrimExpr linear = row * panel_cols + col_in_panel;
+    PrimExpr line_id = FloorDiv(linear, line_elems);
+    PrimExpr line_offset = FloorMod(linear, line_elems);
+    PrimExpr cycle_line_id = FloorMod(line_id, ss / sg);
+    PrimExpr granule_id = FloorDiv(line_offset, granule_elems);
+    PrimExpr granule_offset = FloorMod(line_offset, granule_elems);
+    PrimExpr target_granule_id = granule_id ^ cycle_line_id;
+    target_linear = line_id * line_elems + target_granule_id * granule_elems +
+                    granule_offset;
+  } else {
+    const int element_bytes = element_size / 8;
+    PrimExpr addr = (row * panel_cols + col_in_panel) * element_bytes;
+    PrimExpr line_id = FloorDiv(addr, sl);
+    PrimExpr line_offset = FloorMod(addr, sl);
+    PrimExpr cycle_line_id = FloorMod(line_id, ss / sg);
+    PrimExpr granule_id = FloorDiv(line_offset, sg);
+    PrimExpr granule_offset = FloorMod(line_offset, sg);
+    PrimExpr target_granule_id = granule_id ^ cycle_line_id;
+    PrimExpr target_addr =
+        line_id * sl + target_granule_id * sg + granule_offset;
+    target_linear = FloorDiv(target_addr, element_bytes);
+  }
   if (panel_cols != cols) {
     target_linear = target_linear + panel * rows * panel_cols;
   }
@@ -75,8 +98,8 @@ Layout MakeSwizzleLayout(const tirx::Buffer &buffer,
   ICHECK_GT(rows, 0);
   ICHECK_GT(cols, 0);
   ICHECK_GT(element_size, 0);
-  ICHECK_EQ(element_size % 8, 0)
-      << "Swizzle layout element size must be byte-addressable";
+  ICHECK(element_size == 4 || element_size % 8 == 0)
+      << "Swizzle layout element size must be 4-bit or byte-addressable";
   ICHECK_GT(sg, 0);
   ICHECK_GT(ss, 0);
   ICHECK_GT(sl, 0);
@@ -111,7 +134,8 @@ SwizzleLayout AnalyzeSwizzleLayout(const tirx::Buffer &buffer,
   const int rows = static_cast<int>(*rows_ptr);
   const int cols = static_cast<int>(*cols_ptr);
   const int element_size = buffer->dtype.bits();
-  if (rows <= 0 || cols <= 0 || element_size <= 0 || element_size % 8 != 0) {
+  if (rows <= 0 || cols <= 0 || element_size <= 0 ||
+      (element_size != 4 && element_size % 8 != 0)) {
     return {SwizzleGranularity::kNone, SwizzleStride::k256B,
             SwizzleLine::k256B};
   }

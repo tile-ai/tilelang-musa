@@ -39,6 +39,8 @@ enum class SQMMATypeClass : uint8_t {
   kUInt8,
   kFloatInt8,
   kInt8Float,
+  kFloatInt4,
+  kInt4Float,
 };
 
 struct SQMMAShapeMN {
@@ -136,6 +138,14 @@ std::optional<SQMMATypeClass> GetSQMMATypeClass(const GemmNode &op) {
       c_dtype == DataType::Float(32)) {
     return SQMMATypeClass::kInt8Float;
   }
+  if (IsMP31Float16(a_dtype) && b_dtype == DataType::Int(4) &&
+      c_dtype == DataType::Float(32)) {
+    return SQMMATypeClass::kFloatInt4;
+  }
+  if (a_dtype == DataType::Int(4) && IsMP31Float16(b_dtype) &&
+      c_dtype == DataType::Float(32)) {
+    return SQMMATypeClass::kInt4Float;
+  }
   return std::nullopt;
 }
 
@@ -161,8 +171,10 @@ const std::vector<SQMMAShapeMN> &GetMNCandidates(SQMMATypeClass type_class) {
   case SQMMATypeClass::kTF32:
     return kTF32;
   case SQMMATypeClass::kFloatInt8:
+  case SQMMATypeClass::kFloatInt4:
     return kFloatInt;
   case SQMMATypeClass::kInt8Float:
+  case SQMMATypeClass::kInt4Float:
     return kIntFloat;
   default:
     return kStandard;
@@ -183,7 +195,9 @@ const std::vector<int> &GetKCandidates(SQMMATypeClass type_class) {
     return kTF32;
   }
   if (type_class == SQMMATypeClass::kFloatInt8 ||
-      type_class == SQMMATypeClass::kInt8Float) {
+      type_class == SQMMATypeClass::kInt8Float ||
+      type_class == SQMMATypeClass::kFloatInt4 ||
+      type_class == SQMMATypeClass::kInt4Float) {
     return kMixed;
   }
   return kEightBit;
@@ -235,8 +249,8 @@ std::optional<std::array<int, 3>> SelectNativeShape(SQMMATypeClass type_class,
   };
   const int64_t a_contiguous = get_leading_stride(op.a_, "A");
   const int64_t b_contiguous = get_leading_stride(op.b_, "B");
-  const int64_t a_panel = kMaxLeadingStrideBytes / op.a_->dtype.bytes();
-  const int64_t b_panel = kMaxLeadingStrideBytes / op.b_->dtype.bytes();
+  const int64_t a_panel = (kMaxLeadingStrideBytes * 8) / op.a_->dtype.bits();
+  const int64_t b_panel = (kMaxLeadingStrideBytes * 8) / op.b_->dtype.bits();
   ICHECK_GT(a_panel, 0);
   ICHECK_GT(b_panel, 0);
   auto validate_panelized_buffer =
