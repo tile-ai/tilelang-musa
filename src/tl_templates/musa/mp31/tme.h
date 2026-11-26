@@ -246,4 +246,29 @@ TL_DEVICE void tme_store_read_wait() {
   __musa_tme_store_read_wait();
 }
 
+struct MP31PartialBarrier {
+  int barrier_id;
+  int *phase;
+  TL_DEVICE void operator()() const {
+    __threadfence_block();
+    tme_barrier_arrive(barrier_id);
+    tme_barrier_wait(barrier_id, *phase);
+    *phase ^= 1;
+  }
+};
+
+template <class ReduceType, typename T>
+TL_DEVICE T mp31_allreduce_partial(T x, T *red_buf, int barrier_id,
+                                   int *phase) {
+  return ReduceType::run_with_barrier(x, red_buf,
+                                      MP31PartialBarrier{barrier_id, phase});
+}
+
+template <class ReduceType, typename T>
+TL_DEVICE void mp31_allreduce_batch_partial(T *x, T *red_buf, int barrier_id,
+                                            int *phase) {
+  ReduceType::run_batch_with_barrier(x, red_buf,
+                                     MP31PartialBarrier{barrier_id, phase});
+}
+
 } // namespace tl
