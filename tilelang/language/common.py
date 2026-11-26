@@ -105,6 +105,7 @@ from .reduce_op import (
     warp_reduce_bitor,  # noqa: F401
 )
 from .scan_op import cumsum, cummax  # noqa: F401
+from .sort_op import sort, argsort, topk  # noqa: F401
 from .customize import (
     atomic_max,  # noqa: F401
     atomic_min,  # noqa: F401
@@ -261,6 +262,9 @@ _LOCAL_EXPORTS = (
     "tma_store_wait",
     "cummax",
     "cumsum",
+    "sort",
+    "argsort",
+    "topk",
     "dynamic",
     "symbolic",
     "empty",

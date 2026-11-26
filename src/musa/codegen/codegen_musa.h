@@ -45,7 +45,7 @@ public:
     return (enable_fp16_ || enable_bf16_ || enable_int8_ || enable_fp8_ ||
             enable_fp6_ || enable_fp4_ || need_math_constants_h_ ||
             need_math_h_ || need_mma_h_ || need_atomic_h_ || need_debug_h_ ||
-            need_reduce_h_ || need_scan_h_ || need_async_copy_h_ ||
+            need_reduce_h_ || need_scan_h_ || need_sort_h_ || need_async_copy_h_ ||
             need_ldg_stg_h_ || need_mp31_lsu_h_ || need_mp31_peer_reduce_h_ ||
             need_cvt_h_ || need_threadblock_swizzle_h_ || need_dp4a_h_ ||
             need_mp31_tme_h_ || need_mp31_sqmma_h_ || need_mp31_wmma_h_);
@@ -128,6 +128,8 @@ private:
   bool need_reduce_h_{false};
   // whether need tl scan helpers
   bool need_scan_h_{false};
+  // whether need tl sort/topk/argsort helpers
+  bool need_sort_h_{false};
   // whether need tl async-copy helpers
   bool need_async_copy_h_{false};
   // whether need vectorized global load/store helpers

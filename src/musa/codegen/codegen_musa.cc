@@ -481,6 +481,16 @@ std::string CodeGenMUSA::Finish() {
     decl_stream << "#include <tl_templates/musa/common/scan.h>\n";
   }
 
+  if (need_sort_h_) {
+    if (enable_fp16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_FP16\n";
+    }
+    if (enable_bf16_) {
+      decl_stream << "#define TL_MUSA_ENABLE_BF16\n";
+    }
+    decl_stream << "#include <tl_templates/musa/common/sort.h>\n";
+  }
+
   if (need_async_copy_h_) {
     decl_stream << "#include <tl_templates/musa/common/async_copy.h>\n";
   }
@@ -1174,6 +1184,9 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
   if (static_cast<std::string>(global_symbol).rfind("tl::CumSum", 0) == 0 ||
       static_cast<std::string>(global_symbol).rfind("tl::CumMax", 0) == 0) {
     need_scan_h_ = true;
+  }
+  if (sym.rfind("tl::BlockBitonicSort", 0) == 0) {
+    need_sort_h_ = true;
   }
   if (static_cast<std::string>(global_symbol).rfind("tl::sqmma_", 0) == 0) {
     need_mp31_sqmma_h_ = true;
